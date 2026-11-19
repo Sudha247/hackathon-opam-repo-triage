@@ -227,6 +227,16 @@ On 200 PRs merged since 2026-08-01 (16 evaluable, rules only, no LLM): 13 of
 of 4 cases), and 13 of the 41 changes authors made in failing packages were
 anticipated.
 
+A weekly GitHub Action (`.github/workflows/accuracy.yml`, Mondays, or by
+hand) runs the evaluation on the PRs merged in the last 90 days and compares
+it with the previous run (`scripts/accuracy_report.py`). The totals move with
+the sample; the check that matters is on the PRs evaluated both times: a
+suggestion that matched the author's fix and no longer does is a regression
+of the tool. The job then fails (so GitHub notifies), as it does when
+precision drops by 15 points or more. The history (`history.jsonl`, and the
+latest evaluation) is kept on the `accuracy` branch; the report is in the
+job's summary.
+
 ## Data sources, cheapest first
 
 1. The CI commit page and job logs (opam.ci.ocaml.org).
