@@ -1,0 +1,1406 @@
+#!/usr/bin/env python3
+"""Parse opam-repo-ci (opam.ci.ocaml.org) results for an opam-repository commit.
+
+Usage:
+  opam_repo_ci_triage.py summary <sha|url|--pr N> [--json] [--all]
+  opam_repo_ci_triage.py logs    <sha|url|--pr N> [--match REGEX] [--max N] [--json]
+  opam_repo_ci_triage.py compare <sha|url|--pr N> [--baseline SHA] [--json]
+  opam_repo_ci_triage.py suggest <sha|url|--pr N> [--match REGEX] [--max N] [--json]
+
+`summary` parses the commit page into one record per job (variant).
+`logs` fetches the logs of failed jobs and extracts the relevant error excerpt.
+`compare` classifies failing revdeps against the CI results of the PR that
+published the previous version of the package (2 GitHub REST calls, token
+optional): NEW,
+pre-existing, builder-specific or no-baseline. No builds are run.
+`suggest` proposes dependency-bound fixes for compile/test failures. Rules:
+unbound identifiers -> the version that introduced/removed them (library or
+OCaml stdlib), safe-string errors, and test-output diffs (dependency versions
+differing from a passing job, or released after the package). Nothing is
+built and no GitHub token is needed. Sources, cheapest first: the job log,
+the ocaml.org MCP endpoint (per-version API docs), opam.ocaml.org pages
+(versions, release dates), raw files (opam files, OCaml stdlib .mli), and a
+shallow blob-less git fetch only when ocaml.org has no docs for a version.
+The number of network requests is printed at the end.
+
+Only the Python standard library is used. Pages and logs are cached in
+--cache-dir (default: ./.opam-ci-cache) since finished CI results do not change.
+"""
+
+import argparse
+import concurrent.futures
+import functools
+import hashlib
+import html
+import html.parser
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+BASE = "https://opam.ci.ocaml.org/github/ocaml/opam-repository/commit/"
+NET = {"http": 0, "mcp": 0, "git": 0, "github-api": 0}   # requests actually sent (cache misses)
+USER_AGENT = "opam-ci-triage"
+
+
+# --------------------------------------------------------------------------
+# Fetching
+
+
+def fetch(url, cache_dir, refresh=False):
+    key = hashlib.sha256(url.encode()).hexdigest()[:32]
+    path = os.path.join(cache_dir, key + ".html")
+    if not refresh and os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    NET["http"] += 1
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                body = r.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 502, 503) or attempt == 5:
+                raise
+            delay = int(e.headers.get("Retry-After") or 0) or 2 ** (attempt + 1)
+            time.sleep(min(delay, 60))
+    if not body:
+        raise RuntimeError(f"empty response for {url}")
+    os.makedirs(cache_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    return body
+
+
+def resolve_sha(target, pr):
+    if pr is not None:
+        # One REST call (no token needed); the head can move, so not cached on disk.
+        d = gh_api(f"repos/{REPO}/pulls/{pr}", cache=False)
+        if d and d.get("head", {}).get("sha"):
+            return d["head"]["sha"]
+        # Fallback without the API: refs/pull/N/head (slow: lists every ref).
+        NET["git"] += 1
+        out = subprocess.run(["git", "ls-remote", f"https://github.com/{REPO}", f"refs/pull/{pr}/head"],
+                             capture_output=True, text=True)
+        if not out.stdout.strip():
+            sys.exit(f"cannot resolve PR #{pr}: {out.stderr.strip()[:200]}")
+        return out.stdout.split()[0]
+    m = re.search(r"([0-9a-f]{40})", target or "")
+    if not m:
+        sys.exit(f"cannot find a commit sha in {target!r}")
+    return m.group(1)
+
+
+# --------------------------------------------------------------------------
+# Commit page parsing
+#
+# Structure of the page:
+#   <h2>Summary of errors</h2><ul class="statuses"> ... </ul>
+#   <details><summary><b>Main results</b></summary><ul class="statuses"> ... </ul></details>
+#   <details><summary><b>Reverse dependencies</b></summary><ul class="statuses"> ... </ul></details>
+# Each node is <li class="none|passed|failed|skipped|..."> containing either a
+# plain text label (a grouping node, e.g. "compilers", "4.14", "debian-13")
+# or <a href=".../variant/<comma,separated,path>">label (status[: reason])</a>,
+# optionally followed by a nested <ul class="statuses">.
+
+
+class CommitPageParser(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.section = None          # "summary" | "main" | None
+        self.stack = []              # one entry per open <li>: dict(label, cls, job)
+        self.in_a = None             # href of the <a> being read
+        self.text = []
+        self.jobs = []               # (section, href, li_class, text, ancestors, messages)
+        self.pr = None
+        self._in_h2 = False
+        self._in_summary_tag = False
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "h2":
+            self._in_h2, self.text = True, []
+        elif tag == "summary":
+            self._in_summary_tag, self.text = True, []
+        elif tag == "li" and self.section:
+            self.stack.append({"cls": a.get("class"), "label": "", "job": None})
+        elif tag == "ul" and self.section and self.stack:
+            # Entering children: freeze the parent's label.
+            top = self.stack[-1]
+            top["label"] = top["label"].strip()
+        elif tag == "a":
+            href = a.get("href", "")
+            if self.section and "/variant/" in href:
+                self.in_a, self.text = href, []
+            m = re.search(r"/pull/(\d+)$", href)
+            if m:
+                self.pr = int(m.group(1))
+
+    def handle_endtag(self, tag):
+        if tag == "h2" and self._in_h2:
+            self._in_h2 = False
+            if "".join(self.text).strip() == "Summary of errors":
+                self.section = "summary"
+        elif tag == "summary" and self._in_summary_tag:
+            self._in_summary_tag = False
+            # "Main results", "Reverse dependencies", ...
+            self.section, self.stack = "main", []
+        elif tag == "a" and self.in_a:
+            text = " ".join("".join(self.text).split())
+            ancestors = [e["label"] for e in self.stack[:-1]]
+            cls = (self.stack[-1]["cls"] or "") if self.stack else ""
+            self.jobs.append((self.section, self.in_a, cls, text, ancestors, []))
+            if self.stack:
+                self.stack[-1]["label"] = text
+                self.stack[-1]["job"] = len(self.jobs) - 1
+            self.in_a = None
+        elif tag == "li" and self.section and self.stack:
+            e = self.stack.pop()
+            # A class-less <li> under a job is a message (e.g. lint errors).
+            msg = " ".join(e["label"].split())
+            if e["cls"] is None and e["job"] is None and msg:
+                for anc in reversed(self.stack):
+                    if anc["job"] is not None:
+                        self.jobs[anc["job"]][5].append(msg)
+                        break
+        elif tag == "details" and self.section == "main":
+            self.section = None
+
+    def handle_data(self, data):
+        if self.in_a or self._in_h2 or self._in_summary_tag:
+            self.text.append(data)
+        elif self.section and self.stack and not self.in_a:
+            self.stack[-1]["label"] += data
+
+
+LABEL_RE = re.compile(r"^(.*?) \((\w+)(?::\s*(.*))?\)$", re.S)
+
+
+def split_variant(variant):
+    """Split a variant path into (platform, target, kind, revdep).
+
+    Examples:
+      compilers,4.14,lwt.5.10.2,revdeps,osc.0.1.4
+      day10,debian-13,x86_64,5.5,lwt.5.10.2,tests
+      compilers,4.11,foo.1.0,lower-bounds
+      distributions,centos-10-ocaml-4.14,foo.1.0
+      (lint)
+    """
+    if variant.startswith("("):
+        return [], None, variant.strip("()"), None
+    parts = variant.split(",")
+    if "revdeps" in parts:
+        i = parts.index("revdeps")
+        if i == len(parts) - 1:   # the job computing the list of revdeps
+            return parts[: i - 1], parts[i - 1], "revdeps-list", None
+        return parts[: i - 1], parts[i - 1], "revdeps", ",".join(parts[i + 1:])
+    if parts[-1] in ("lower-bounds", "tests"):
+        return parts[:-2], parts[-2], parts[-1], None
+    return parts[:-1], parts[-1], "build", None
+
+
+def categorize(status, reason):
+    r = reason or ""
+    if status == "passed":
+        return "passed"
+    if status != "failed":
+        return status  # active, queued, ...
+    if r.startswith("[SKIP] Failure ignored"):
+        return "ignored"            # x-ci-accept-failures
+    if r.startswith("[SKIP]"):
+        return "not-available"      # package not installable on that variant
+    if r == "Cancelled" or "Cancelled" in r[:20]:
+        return "cancelled"
+    if re.search(r"curl failed|HTTP error code|Could not resolve|Connection (refused|reset|timed out)", r):
+        return "network"
+    if "Failed to get sources" in r:
+        return "sources"            # fetched but could not be extracted/verified (e.g. symlinks on msys2)
+    if re.search(r"\bfailed to build\b|a dependency failed|^\s*\S+ failed:$", r):
+        return "dependency"
+    if re.search(r"No solution|conflict", r, re.I):
+        return "solver"
+    if re.search(r"failed at \".*(@runtest|test)", r):
+        return "build-or-test"
+    return "build"
+
+
+def parse_commit_page(page):
+    p = CommitPageParser()
+    p.feed(page)
+    summary_hrefs = {href for sec, href, *_ in p.jobs if sec == "summary"}
+    jobs = []
+    for sec, href, cls, text, ancestors, messages in p.jobs:
+        if sec != "main":
+            continue
+        variant = urllib.parse.unquote(href.split("/variant/", 1)[1])
+        m = LABEL_RE.match(text)
+        label, status, reason = (m.group(1), m.group(2), m.group(3)) if m else (text, cls, None)
+        platform, target, kind, revdep = split_variant(variant)
+        jobs.append({
+            "variant": variant,
+            "url": urllib.parse.urljoin(BASE, href),
+            "label": label,
+            "status": status,
+            "reason": reason.strip() if reason else None,
+            "category": kind if kind in ("lint", "analysis") and status == "failed"
+                        else categorize(status, reason.strip() if reason else None),
+            "target": target,
+            "kind": kind,
+            "revdep": revdep,
+            "platform": platform,
+            "experimental": any("(experimental)" in a for a in ancestors),
+            "in_summary": href in summary_hrefs,
+            "messages": messages,
+        })
+    return {"pr": p.pr, "jobs": jobs}
+
+
+# --------------------------------------------------------------------------
+# Log excerpt extraction
+
+
+def log_text(page):
+    m = re.search(r"<pre[^>]*>(.*?)</pre>", page, re.S)
+    raw = m.group(1) if m else page
+    return html.unescape(re.sub(r"<[^>]+>", "", raw))
+
+
+def excerpt(text, max_output_lines=40):
+    lines = text.splitlines()
+    out = {}
+
+    # 1. First "ERROR while compiling" block (opam repeats it in the error report).
+    for i, l in enumerate(lines):
+        if l.startswith("#=== ERROR while "):  # compiling, installing, fetching ...
+            block = [l]
+            for l2 in lines[i + 1:]:
+                if not l2.strip() or l2.startswith("<><>"):
+                    break
+                block.append(l2)
+            header = [b for b in block if not b.startswith("### output") and not re.match(r"# (env|output)-file", b)]
+            try:
+                k = block.index("### output ###")
+                body = block[k + 1:]
+                header = block[:k]
+                if len(body) > max_output_lines:
+                    body = [f"# [... {len(body) - max_output_lines} lines elided ...]"] + body[-max_output_lines:]
+                block = header + ["### output ###"] + body
+            except ValueError:
+                block = header
+            out["error_block"] = "\n".join(block)
+            break
+
+    # 2. Solver failure.
+    for i, l in enumerate(lines):
+        if re.search(r"\[ERROR\] Package conflict|No solution|Sorry, no solution", l):
+            out["solver"] = "\n".join(lines[i:i + 30])
+            break
+
+    # 3. "Log analysis" chosen message = last line of the log, after the timestamp.
+    tail = [l for l in lines if re.match(r"^\d{4}-\d\d-\d\d \d\d:\d\d\.\d\d: ", l)]
+    if tail:
+        out["final"] = re.sub(r"^\S+ \S+ ", "", tail[-1])
+    for l in lines:
+        m = re.match(r"^\d{4}-\d\d-\d\d \d\d:\d\d\.\d\d: Job failed: (.*)", l)
+        if m:
+            out["job_failed"] = m.group(1)
+
+    # 4. Builder and base commit info (useful to reproduce and compare).
+    for l in lines:
+        m = re.search(r"New job: (.*)", l)
+        if m and "job" not in out:
+            out["job"] = m.group(1).strip()
+        m = re.search(r"git merge --no-edit ([0-9a-f]{40})|onto master ([0-9a-f]{40})", l)
+        if m and "base" not in out:
+            out["base"] = m.group(1) or m.group(2)
+        if "Building with day10" in l:
+            out["builder"] = "day10"
+    out.setdefault("builder", "classic")
+    return out
+
+
+# --------------------------------------------------------------------------
+# Rendering
+
+
+def platform_str(job):
+    p = "/".join(job["platform"]) or "-"
+    return p + (" (exp)" if job["experimental"] else "")
+
+
+def render_summary(sha, data, show_all):
+    jobs = data["jobs"]
+    print(f"PR #{data['pr']}  commit {sha[:12]}  {BASE}{sha}")
+    counts = {}
+    for j in jobs:
+        counts[j["category"]] = counts.get(j["category"], 0) + 1
+    print("jobs:", len(jobs), " ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    noise = {"passed", "ignored", "not-available"}
+
+    for j in jobs:
+        if j["kind"] in ("lint", "analysis"):
+            print(f"\n[{j['kind']}] {j['status']}" + (f": {j['reason']}" if j["reason"] else ""))
+            for m in j["messages"]:
+                print(f"    {m}")
+
+    targets = sorted({j["target"] for j in jobs if j["target"]})
+    for t in targets:
+        tj = [j for j in jobs if j["target"] == t]
+        own = [j for j in tj if j["kind"] != "revdeps" and (show_all or j["category"] not in noise)]
+        rev = [j for j in tj if j["kind"] == "revdeps" and (show_all or j["category"] not in noise)]
+        print(f"\n== {t} ==")
+        if own:
+            print("  own jobs:")
+            for j in own:
+                print(f"    {j['kind']:<13} {j['category']:<14} {platform_str(j):<45} {j['reason'] or ''}")
+        else:
+            print("  own jobs: all passed (or ignored / not available)")
+        if rev:
+            by_pkg = {}
+            for j in rev:
+                by_pkg.setdefault(j["revdep"], []).append(j)
+            print(f"  revdeps with problems: {len(by_pkg)} packages")
+            for pkg, js in sorted(by_pkg.items()):
+                # Group identical reasons across platforms.
+                by_reason = {}
+                for j in js:
+                    by_reason.setdefault((j["category"], j["reason"]), []).append(platform_str(j))
+                for (cat, reason), plats in by_reason.items():
+                    print(f"    {pkg:<32} {cat:<14} {reason or ''}")
+                    print(f"    {'':<32} {'':<14} on: {', '.join(plats)}")
+
+
+# --------------------------------------------------------------------------
+# Baseline comparison
+#
+# Cheap baseline: the opam-repo-ci results of the PR that published the
+# previous version of the same package. Its revdeps jobs built the same revdep
+# versions against the previous version, so a failure present there is not
+# caused by the new PR. Costs a few GitHub API calls and one page fetch.
+
+REPO = "ocaml/opam-repository"
+
+
+def github_token():
+    """A GitHub token if one is available (GITHUB_TOKEN/GH_TOKEN, or a logged-in
+    gh CLI). None is fine: unauthenticated requests work, limited to 60/hour."""
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if tok:
+        return tok
+    try:
+        out = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+_GH_CACHE = {}
+
+
+def gh_api(path, cache_dir=".opam-ci-cache", cache=True):
+    """GitHub REST API GET, token optional, cached on disk unless cache=False."""
+    if path in _GH_CACHE:
+        return _GH_CACHE[path]
+    disk = os.path.join(cache_dir, "api-" + hashlib.sha256(path.encode()).hexdigest()[:24] + ".json")
+    if cache and os.path.exists(disk):
+        with open(disk) as f:
+            _GH_CACHE[path] = json.load(f)
+        return _GH_CACHE[path]
+    NET["github-api"] += 1
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    tok = github_token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request("https://api.github.com/" + path, headers=headers),
+                                    timeout=60) as r:
+            v = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429) and not tok:
+            print("note: GitHub API rate limit reached (60/hour without a token); "
+                  "set GITHUB_TOKEN to raise it", file=sys.stderr)
+        return None
+    if cache:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(disk, "w") as f:
+            json.dump(v, f)
+    _GH_CACHE[path] = v
+    return v
+
+
+def opam_vcmp(a, b):
+    """Compare opam (Debian-like) version strings."""
+    def order(c):
+        if c == "~":
+            return -1
+        if c.isalpha():
+            return ord(c)
+        return ord(c) + 256
+
+    def cmp_nondigit(x, y):
+        for i in range(max(len(x), len(y))):
+            ox = order(x[i]) if i < len(x) else 0
+            oy = order(y[i]) if i < len(y) else 0
+            if ox != oy:
+                return -1 if ox < oy else 1
+        return 0
+
+    while a or b:
+        ma = re.match(r"[^0-9]*", a).group(0)
+        mb = re.match(r"[^0-9]*", b).group(0)
+        c = cmp_nondigit(ma, mb)
+        if c:
+            return c
+        a, b = a[len(ma):], b[len(mb):]
+        da = re.match(r"[0-9]*", a).group(0)
+        db = re.match(r"[0-9]*", b).group(0)
+        na, nb = int(da or 0), int(db or 0)
+        if na != nb:
+            return -1 if na < nb else 1
+        a, b = a[len(da):], b[len(db):]
+    return 0
+
+
+def split_pkg(full):
+    name, _, version = full.partition(".")
+    return name, version
+
+
+def find_baseline_commit(target):
+    """For target 'lwt.5.10.2', return info about the PR that added the
+    previous version on master, or None."""
+    name, version = split_pkg(target)
+    versions = Sources(".opam-ci-cache").versions(name)      # git, no API call
+    older = [v for v in versions if opam_vcmp(v, version) < 0]
+    if not older:
+        return None
+    prev = max(older, key=functools.cmp_to_key(opam_vcmp))
+    return {"prev": f"{name}.{prev}", **(find_publication(name, prev) or {})}
+
+
+def find_publication(name, version):
+    """The PR that published name.version: {'pr': N, 'sha': head sha}, or None.
+    Uses 2 GitHub REST calls (token optional)."""
+    commits = gh_api(f"repos/{REPO}/commits?path=packages/{name}/{name}.{version}/opam&per_page=100") or []
+    if not commits:
+        return None
+    first = commits[-1]["sha"]          # oldest commit touching the file = the one adding it
+    pulls = gh_api(f"repos/{REPO}/commits/{first}/pulls") or []
+    pr = pulls[0] if pulls else None
+    return {"pr": pr["number"] if pr else None, "sha": pr["head"]["sha"] if pr else first}
+
+
+def ocaml_version(job):
+    p = job["platform"]
+    if p[:1] == ["compilers"] and len(p) == 2:
+        return p[1]
+    if p[:1] == ["day10"] and len(p) == 4 and p[2] == "x86_64":
+        return p[3]
+    return None   # other platforms (distributions, extras, macos, ...) are not compared
+
+
+FAILING = {"build", "build-or-test", "dependency", "solver"}
+
+
+def compare(jobs, base_jobs):
+    """Return one verdict per (revdep, ocaml version) that fails in `jobs`."""
+    def index(js):
+        idx = {}
+        for j in js:
+            v = ocaml_version(j)
+            if j["kind"] == "revdeps" and v:
+                idx.setdefault((j["revdep"], v), []).append(j)
+        return idx
+
+    new_idx, base_idx = index(jobs), index(base_jobs)
+    out = []
+    for (revdep, v), js in sorted(new_idx.items()):
+        failing = [j for j in js if j["category"] in FAILING]
+        if not failing:
+            continue
+        passing_here = [j for j in js if j["category"] == "passed"]
+        base = base_idx.get((revdep, v), [])
+        base_fail = [j for j in base if j["category"] in FAILING]
+        base_pass = [j for j in base if j["category"] == "passed"]
+        if base_fail:
+            same = {j["reason"] for j in failing} & {j["reason"] for j in base_fail}
+            verdict = "pre-existing" + (" (same error)" if same else " (different error)")
+        elif passing_here:
+            verdict = "builder-specific"   # fails on one builder, passes on another in the same run
+        elif base_pass:
+            verdict = "NEW"
+        elif base:
+            verdict = "unknown (baseline: " + ",".join(sorted({j["category"] for j in base})) + ")"
+        else:
+            verdict = "no-baseline"
+        out.append({
+            "revdep": revdep, "ocaml": v, "verdict": verdict,
+            "new": [{"platform": "/".join(j["platform"]), "category": j["category"],
+                     "reason": j["reason"], "url": j["url"]} for j in failing],
+            "passes_on": ["/".join(j["platform"]) for j in passing_here],
+            "baseline": [{"platform": "/".join(j["platform"]), "category": j["category"],
+                          "reason": j["reason"], "url": j["url"]} for j in base],
+        })
+    return out
+
+
+def render_compare(target, info, results, show_all=False):
+    print(f"== {target} vs baseline {info['prev']}: PR #{info.get('pr')} commit {info['sha'][:12]}")
+    order = ["NEW", "builder-specific", "no-baseline", "unknown", "pre-existing"]
+    def rank(r):
+        return next(i for i, k in enumerate(order) if r["verdict"].startswith(k))
+    counts = {}
+    for r in results:
+        k = r["verdict"].split(" (")[0]
+        counts[k] = counts.get(k, 0) + 1
+    print("   " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: order.index(kv[0]) if kv[0] in order else 99)))
+    compact_header = False
+    for r in sorted(results, key=lambda r: (rank(r), r["revdep"], r["ocaml"])):
+        if r["verdict"].startswith("pre-existing") and not show_all:
+            if not compact_header:
+                print("\n  pre-existing (also failed with the previous version; --all for details):")
+                compact_header = True
+            print(f"    {r['revdep'] + ' / OCaml ' + r['ocaml']:<36} {r['new'][0]['reason'] or ''}"[:200])
+            continue
+        print(f"\n  [{r['verdict']}] {r['revdep']} on OCaml {r['ocaml']}")
+        for n in r["new"]:
+            print(f"      new  {n['platform']:<28} {n['category']:<13} {n['reason'] or ''}")
+        if r["passes_on"]:
+            print(f"      but passes on: {', '.join(r['passes_on'])}")
+        for b in r["baseline"]:
+            print(f"      base {b['platform']:<28} {b['category']:<13} {b['reason'] or ''}")
+
+
+# --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Bound suggestions
+#
+# Cheap rules only: CI logs, opam files and upstream git tags. Nothing is
+# built. Upstream sources are read with plain git (no token, any host):
+# `git ls-remote --tags`, then a shallow blob-less fetch of one tag gives the
+# file list, and single files are read from raw.githubusercontent.com (GitHub)
+# or fetched on demand by git (other hosts). Each suggestion carries its evidence.
+
+def git(args, cwd=None, check=True):
+    if args[0] in ("fetch", "ls-remote", "cat-file"):
+        NET["git"] += 1
+    out = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True,
+                         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    if check and out.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args[:3])}...: {out.stderr.strip()[:200]}")
+    return out
+
+
+def repo_url(dev_repo):
+    """Normalise an opam dev-repo / src URL to a fetchable https git URL."""
+    u = dev_repo.strip().removeprefix("git+")
+    u = re.sub(r"^git://", "https://", u)
+    u = re.sub(r"^git@([^:]+):", r"https://\1/", u)
+    u = u.split("#", 1)[0]
+    m = re.match(r"(https://github\.com/[^/]+/[^/]+?)(?:\.git)?(?:/.*)?$", u)
+    if m:          # also archive URLs: https://github.com/o/r/releases/... -> repo
+        return m.group(1)
+    u = re.sub(r"/-/(archive|tags|tree)/.*$", "", u)   # GitLab archive URLs (nested groups kept)
+    return u.removesuffix("/")
+
+
+class Sources:
+    """Cached, token-free access to opam-repository and upstream repositories."""
+
+    OPAM_REPO_URL = f"https://github.com/{REPO}"
+
+    def __init__(self, cache_dir):
+        self.cache_dir = cache_dir
+        self.mem = {}
+
+    def raw(self, url):
+        if url in self.mem:
+            return self.mem[url]
+        try:
+            v = fetch(url, self.cache_dir)
+        except (urllib.error.HTTPError, RuntimeError):
+            v = None
+        self.mem[url] = v
+        return v
+
+    # ---- git plumbing (bare, shallow, blob-less mirrors under cache_dir/git)
+
+    def _gitdir(self, url):
+        d = os.path.join(self.cache_dir, "git", hashlib.sha256(url.encode()).hexdigest()[:16])
+        if not os.path.isdir(d):
+            os.makedirs(d)
+            git(["init", "-q", "--bare", d])
+            git(["remote", "add", "origin", url], cwd=d)
+            git(["config", "remote.origin.promisor", "true"], cwd=d)
+            git(["config", "remote.origin.partialclonefilter", "blob:none"], cwd=d)
+            git(["config", "extensions.partialClone", "origin"], cwd=d)
+        return d
+
+    def _ensure(self, url, ref, is_tag):
+        """Make `ref` (tag name or commit sha) available locally; return a rev."""
+        key = ("ensure", url, ref)
+        if key in self.mem:
+            return self.mem[key]
+        d = self._gitdir(url)
+        rev = f"refs/tags/{ref}" if is_tag else ref
+        if git(["rev-parse", "--verify", "-q", rev + "^{tree}"], cwd=d, check=False).returncode != 0:
+            spec = f"+refs/tags/{ref}:refs/tags/{ref}" if is_tag else ref
+            r = git(["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", spec], cwd=d, check=False)
+            if r.returncode != 0:
+                rev = None
+        self.mem[key] = rev
+        return rev
+
+    def tags(self, url):
+        key = ("tags", url)
+        if key not in self.mem:
+            disk = os.path.join(self.cache_dir, "tags-" + hashlib.sha256(url.encode()).hexdigest()[:16] + ".json")
+            if os.path.exists(disk) and time.time() - os.path.getmtime(disk) < 86400:
+                with open(disk) as f:
+                    tags = json.load(f)
+            else:
+                r = git(["ls-remote", "--tags", "--refs", url], check=False)
+                tags = [l.split("refs/tags/", 1)[1] for l in r.stdout.splitlines() if "refs/tags/" in l]
+                os.makedirs(self.cache_dir, exist_ok=True)
+                with open(disk, "w") as f:
+                    json.dump(tags, f)
+            self.mem[key] = tags
+        return self.mem[key]
+
+    def tag_for(self, url, name, version):
+        tags = set(self.tags(url))
+        for c in (version, "v" + version, f"{name}-{version}", f"{name}.{version}",
+                  f"{name}-v{version}", f"release-{version}", f"Release-{version}",
+                  version.replace("~", "-"), "v" + version.replace("~", "-"),
+                  version.replace("~", "_"), "v" + version.replace("~", "_")):
+            if c in tags:
+                return c
+        return None
+
+    def tree(self, url, ref, is_tag=True):
+        key = ("tree", url, ref)
+        if key not in self.mem:
+            rev = self._ensure(url, ref, is_tag)
+            paths = []
+            if rev:
+                r = git(["ls-tree", "-r", "--name-only", rev], cwd=self._gitdir(url), check=False)
+                paths = r.stdout.splitlines()
+            self.mem[key] = paths
+        return self.mem[key]
+
+    def file_at(self, url, ref, path, is_tag=True):
+        m = re.match(r"https://github\.com/([^/]+/[^/]+)$", url)
+        if m:
+            return self.raw(f"https://raw.githubusercontent.com/{m.group(1)}/{ref}/{path}")
+        rev = self._ensure(url, ref, is_tag)
+        if not rev:
+            return None
+        r = git(["cat-file", "-p", f"{rev}:{path}"], cwd=self._gitdir(url), check=False)
+        return r.stdout if r.returncode == 0 else None
+
+    # ---- opam-repository
+
+    def versions(self, name, ref="master"):
+        """Versions of `name` in opam-repository: from the opam.ocaml.org package
+        page (one small HTML page); git listing only if that page is unavailable."""
+        if ref == "master":
+            page = self.raw(f"https://opam.ocaml.org/packages/{name}/")
+            if page:
+                vs = set(re.findall(re.escape(name) + r"\.(\d[^\s\"'<>/]*)", page))
+                if vs:
+                    return sorted(vs, key=functools.cmp_to_key(opam_vcmp))
+        return self._versions_git(name, ref)
+
+    def _versions_git(self, name, ref="master"):
+        if ref == "master":
+            key = ("master-sha",)
+            if key not in self.mem:
+                r = git(["ls-remote", self.OPAM_REPO_URL, "refs/heads/master"], check=False)
+                self.mem[key] = r.stdout.split()[0] if r.stdout else None
+            ref = self.mem[key]
+        if not ref:
+            return []
+        d = self._gitdir(self.OPAM_REPO_URL)
+        rev = self._ensure(self.OPAM_REPO_URL, ref, is_tag=False)
+        if not rev:
+            return []
+        r = git(["ls-tree", "--name-only", f"{rev}:packages/{name}"], cwd=d, check=False)
+        vs = [split_pkg(l)[1] for l in r.stdout.splitlines() if l.startswith(name + ".")]
+        return sorted(vs, key=functools.cmp_to_key(opam_vcmp))
+
+    # ---- ocaml.org documentation, through its MCP endpoint (JSON, plain-text
+    # signatures; docs are built for every package version in opam-repository)
+
+    MCP_URL = "https://ocaml.org/mcp"
+
+    def mcp(self, tool, **args):
+        """Call an ocaml.org MCP tool; parsed JSON result, or None on error."""
+        key = json.dumps([tool, args], sort_keys=True)
+        if key in self.mem:
+            return self.mem[key]
+        disk = os.path.join(self.cache_dir, "mcp-" + hashlib.sha256(key.encode()).hexdigest()[:24] + ".json")
+        if os.path.exists(disk):
+            with open(disk) as f:
+                v = json.load(f)
+        else:
+            NET["mcp"] += 1
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": tool, "arguments": args}}).encode()
+            req = urllib.request.Request(self.MCP_URL, data=body, headers={
+                "User-Agent": USER_AGENT, "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    res = json.loads(r.read()).get("result", {})
+                v = None if res.get("isError") else json.loads(res["content"][0]["text"])
+            except (urllib.error.URLError, ValueError, KeyError, IndexError):
+                return None                      # transient: do not cache
+            os.makedirs(self.cache_dir, exist_ok=True)
+            with open(disk, "w") as f:
+                json.dump(v, f)
+        self.mem[key] = v
+        return v
+
+    def doc_modules(self, pkg, version):
+        """{TopModule: 'lib/TopModule'} for pkg.version, or None without docs."""
+        d = self.mcp("ocaml_package_documentation", package=pkg, version=version)
+        if not d or d.get("documentation_status") not in (None, "success"):
+            return None
+        mods = {}
+        for m in [m for lib in d.get("libraries", []) for m in lib.get("modules", [])] + d.get("modules", []):
+            if m.get("path"):
+                mods.setdefault(m["name"], m["path"].removesuffix("/index.html"))
+        return mods or None
+
+    def doc_page(self, pkg, version, path):
+        """Plain-text documentation (signatures) of one module page, or None."""
+        d = self.mcp("ocaml_module_documentation", package=pkg, version=version, path=path + "/index.html")
+        return d.get("content") if d else None
+
+    def doc_present(self, pkg, version, mods, kind, ident):
+        """Is `ident` (reached through module path `mods`) documented for
+        pkg.version? None when ocaml.org has no docs for that version."""
+        top0 = mods[0] if mods else ident
+        cached = self.mem.get(("docpath", pkg, top0))
+        if cached and mods:
+            # Same module path as in another version: skip the package index.
+            page = self.doc_page(pkg, version, "/".join([cached] + mods[1:]))
+            if page is not None:
+                return defines(page, kind, ident)
+        tops = self.doc_modules(pkg, version)
+        if tops is None:
+            return None
+        if kind == "module" and not mods:
+            if ident in tops:
+                return True
+            # maybe wrapped: Wrapper.ident
+            return any(defines(self.doc_page(pkg, version, b) or "", "module", ident)
+                       for b in list(tops.values())[:3])
+        if mods[0] in tops:
+            base, rest = tops[mods[0]], mods[1:]
+        else:   # reached through an open of a wrapper module (e.g. Term from Why3)
+            base = next((f"{b}/{mods[0]}" for b in list(tops.values())[:3]
+                         if self.doc_page(pkg, version, f"{b}/{mods[0]}")), None)
+            if base is None:
+                return None     # page missing: ocaml.org docs are sometimes partial
+            rest = mods[1:]
+        page = self.doc_page(pkg, version, "/".join([base] + rest))
+        if page is None:
+            return None
+        self.mem[("docpath", pkg, top0)] = base
+        return defines(page, kind, ident)
+
+    def published(self, pkg, version):
+        """Release date (YYYY-MM-DD) of pkg.version, from its ocaml.org page."""
+        page = self.raw(f"https://opam.ocaml.org/packages/{pkg}/{pkg}.{version}/")
+        m = re.search(r'datetime="(\d{4}-\d\d-\d\d)', page or "")
+        return m.group(1) if m else None
+
+    def opam_file(self, name, version, ref="master"):
+        return self.raw(f"https://raw.githubusercontent.com/{REPO}/{ref}/packages/{name}/{name}.{version}/opam")
+
+    def upstream(self, name, version, ref="master"):
+        """Upstream git URL of a package, from its opam dev-repo (or url src)."""
+        text = self.opam_file(name, version, ref) or self.opam_file(name, version)
+        if not text:
+            return None
+        m = re.search(r'^dev-repo:\s*"([^"]+)"', text, re.M)
+        if m:
+            return repo_url(m.group(1))
+        m = re.search(r'src:\s*"(https://(?:github|gitlab)\.com/[^"]+)"', text)
+        return repo_url(m.group(1)) if m else None
+
+
+OCAML_REPO = "https://github.com/ocaml/ocaml"
+
+
+def ocaml_releases(src):
+    rel = [t for t in src.tags(OCAML_REPO) if re.fullmatch(r"[45]\.\d+\.0", t)]
+    rel = [t for t in rel if opam_vcmp(t, "4.08.0") >= 0]
+    return sorted(rel, key=functools.cmp_to_key(opam_vcmp))
+
+
+def module_files(paths, module):
+    """Source files defining compilation unit `module` (also foo.lwt.ml variants)."""
+    m = module.lower()
+    out = []
+    for p in paths:
+        base = p.rsplit("/", 1)[-1]
+        stem = base.split(".", 1)[0].lower()
+        if stem == m and (base.endswith(".mli") or base.endswith(".ml")):
+            out.append(p)
+    out.sort(key=lambda p: (not p.endswith(".mli"), "/test" in p, len(p)))
+    return out
+
+
+def defines(text, kind, ident):
+    i = re.escape(ident)
+    pats = {
+        "value": [rf"\b(val|external|let|and)\s+(rec\s+)?{i}\b"],
+        "constructor": [rf"(\||=|\[)\s*{i}\b", rf"\b{i}\s+of\b"],
+        # a record field starts a line or follows { or ; (not `val x :`, not `~x:`)
+        "field": [rf"(?m)(^|[{{;])[ \t]*(mutable\s+)?{i}\s*:(?!:)"],
+        "type": [rf"\btype\s+(nonrec\s+)?([^=]*\s)?{i}\b"],
+        "module": [rf"\bmodule\s+(type\s+)?{i}\b"],
+    }[kind]
+    return any(re.search(p, text) for p in pats)
+
+
+def present(src, repo, ref, path_mods, kind, ident, stdlib=False):
+    """Is `ident` (of `kind`), reached through modules `path_mods`, defined at `ref`?
+    Returns True/False, or None when the source cannot be located."""
+    paths = src.tree(repo, ref)
+    if not paths:
+        return None
+    if stdlib:
+        paths = [p for p in paths if p.startswith("stdlib/")]
+    if kind == "module" and not path_mods:
+        return bool(module_files(paths, ident))
+    # Try the innermost module that has its own file, then outer ones.
+    for k in range(len(path_mods) - 1, -1, -1):
+        files = module_files(paths, path_mods[k])
+        if not files:
+            continue
+        inner = path_mods[k + 1:]
+        for f in files[:3]:
+            text = src.file_at(repo, ref, f) or ""
+            if inner and not defines(text, "module", inner[0]):
+                continue
+            if kind == "module" or defines(text, kind, ident):
+                return True
+        return False
+    return False
+
+
+def bisect_presence(check, versions, bad, allowed=lambda v: True, cap=10):
+    """`check(v)` -> True/False/None. The identifier is missing at version `bad`.
+    Walk outwards from `bad` (history is not always monotonic): the first newer
+    version that has it gives ('>=', v); otherwise the closest older version
+    that has it gives ('<', version right after it). Only versions accepted by
+    `allowed` (the package's other existing bounds) are considered."""
+    evidence = {}
+
+    def c(v):
+        if v not in evidence:
+            evidence[v] = check(v)
+        return evidence[v]
+
+    newer = [v for v in versions if opam_vcmp(v, bad) > 0 and allowed(v)]
+    for v in newer[:cap]:
+        if c(v):
+            return (">=", v), evidence
+    older = [v for v in versions if opam_vcmp(v, bad) < 0 and allowed(v)]
+    for v in reversed(older[-cap:]):
+        if c(v):
+            later = [w for w in versions if opam_vcmp(w, v) > 0]
+            return ("<", later[0] if later else bad), evidence
+    return None, evidence
+
+
+def existing_bounds(opam_text, dep):
+    """[(op, version)] from a simple `"dep" {>= "a" & < "b"}` constraint."""
+    m = re.search(r'^\s*"' + re.escape(dep) + r'"\s*\{([^}]*)\}', opam_text or "", re.M)
+    if not m or "|" in m.group(1):
+        return []
+    return re.findall(r'(>=|<=|>|<|=)\s*"([^"]+)"', m.group(1))
+
+
+def satisfies(v, bounds):
+    ops = {">=": lambda c: c >= 0, ">": lambda c: c > 0, "<=": lambda c: c <= 0,
+           "<": lambda c: c < 0, "=": lambda c: c == 0}
+    return all(ops[op](opam_vcmp(v, b)) for op, b in bounds)
+
+
+def log_info(text):
+    """Facts from a job log: failing package, installed versions, error lines."""
+    info = {"installed": {}}
+    for line in text.splitlines():
+        m = re.search(r"-> installed ([\w+-]+)\.(\S+)", line)
+        if m:
+            info["installed"][m.group(1)] = m.group(2)
+    for m in re.finditer(r'"([\w+-]+)\.([^"\s]+)"', "\n".join(l for l in text.splitlines() if "->" in l and '"' in l)):
+        info["installed"].setdefault(m.group(1), m.group(2))   # day10 dependency graph
+    m = re.search(r"#=== ERROR while compiling ([\w+-]+)\.(\S+?) =", text)
+    if m:
+        info["failing"] = (m.group(1), m.group(2))
+    m = re.search(r"ocaml(?:-base)?-compiler\.(\d+\.\d+\.\d+)", text)
+    if m:
+        info["ocaml"] = m.group(1)
+    blk = excerpt(text, max_output_lines=200).get("error_block", "")
+    info["error_lines"] = [re.sub(r"^# ?", "", l) for l in blk.splitlines()]
+    info["test_diff"] = ".corrected" in blk or "git --no-pager diff" in blk
+    info["base"] = excerpt(text).get("base")
+    return info
+
+
+UNBOUND_RES = [
+    (re.compile(r"Unbound value [`\"']?([\w.']+)"), "value"),
+    (re.compile(r"Unbound constructor [`\"']?([\w.']+)"), "constructor"),
+    (re.compile(r"Unbound record field [`\"']?([\w.']+)"), "field"),
+    (re.compile(r"Unbound type constructor [`\"']?([\w.']+)"), "type"),
+    (re.compile(r"Unbound module [`\"']?([\w.']+)"), "module"),
+]
+
+
+def find_unbound(lines):
+    text = "\n".join(lines)
+    for rx, kind in UNBOUND_RES:
+        m = rx.search(text)
+        if m:
+            parts = m.group(1).strip("`\"'.").split(".")
+            return kind, parts[:-1], parts[-1]
+    m = re.search(r"There is no field (\w+) within type [`\"']?([\w.]+)", text)
+    if m:
+        mods = m.group(2).split(".")[:-1]
+        return "field", mods, m.group(1)
+    return None
+
+
+def norm(s):
+    return re.sub(r"[-_]", "", s.lower())
+
+
+def constraint_edit(opam_text, dep, op, version):
+    """Return (old_line, new_line) for the dependency `dep` in `opam_text`."""
+    m = re.search(r'^(\s*)"' + re.escape(dep) + r'"\s*(\{([^}]*)\})?[^\n]*$', opam_text or "", re.M)
+    new_term = f'{op} "{version}"'
+    if not m:
+        return None, f'"{dep}" {{{new_term}}}'
+    old = m.group(0)
+    filt = (m.group(3) or "").strip()
+    if not filt:
+        terms = []
+    elif "|" in filt or "(" in filt:
+        terms = [f"({filt})"]
+    else:
+        terms = [t.strip() for t in filt.split("&")]
+        drop = r'(>=|>)\s*"' if op in (">=", ">") else r'(<=|<)\s*"'
+        terms = [t for t in terms if not re.match(drop, t)]
+    terms.append(new_term)
+    return old.strip(), f'"{dep}" {{{" & ".join(terms)}}}'
+
+
+def suggest_for_job(src, job, text, pr_packages, pr_sha):
+    info = log_info(text)
+    out = {"variant": job["variant"], "url": job["url"], "kind": job["kind"]}
+    if "failing" not in info:
+        out["note"] = "no compile error block (dependency, network or install failure)"
+        return out
+    fname, fver = info["failing"]
+    out["failing"] = f"{fname}.{fver}"
+    in_pr = f"{fname}.{fver}" in pr_packages
+    out["fix_in"] = "this PR" if in_pr else f"{fname}.{fver} (other package)"
+    ref = pr_sha if in_pr else (info.get("base") or "master")
+    opam_text = src.opam_file(fname, fver, ref) or src.opam_file(fname, fver)
+    err = info["error_lines"]
+
+    # Rule: safe-string
+    if re.search(r"has type\s+string\s+but an expression was expected of type\s*$", "\n".join(err), re.M) and \
+       re.search(r"=?\s*bytes", "\n".join(err)):
+        old, new = constraint_edit(opam_text, "ocaml", "<", "4.06")
+        out.update(rule="safe-string", error="string used where bytes is expected (safe-string, default since OCaml 4.06)",
+                   dep="ocaml", old=old, new=new, confidence="high")
+        return out
+
+    unb = find_unbound(err)
+    if unb:
+        kind, mods, ident = unb
+        out["error"] = f"Unbound {kind} {'.'.join(mods + [ident])}"
+        top = mods[0] if mods else (ident if kind == "module" else None)
+        if top is None:
+            out["note"] = "unqualified identifier: cannot attribute it to a package"
+            return out
+        # Stdlib?
+        rel = ocaml_releases(src)
+        latest, t414 = rel[-1], "4.14.0"
+        top_m = mods[1] if top == "Stdlib" and len(mods) > 1 else top
+        def stdlib_mli(r, m):
+            return src.raw(f"https://raw.githubusercontent.com/ocaml/ocaml/{r}/stdlib/{m.lower()}.mli")
+        if stdlib_mli(latest, top_m) or stdlib_mli(t414, top_m):
+            inner = mods[2:] if top == "Stdlib" else mods[1:]
+
+            def check(r):
+                text = stdlib_mli(r, top_m)
+                if kind == "module" and not mods:
+                    return text is not None
+                if text is None:
+                    return False
+                if inner and not defines(text, "module", inner[0]):
+                    return False
+                return defines(text, kind, ident)
+            bad = info.get("ocaml", "0")
+            bad_rel = max([r for r in rel if opam_vcmp(r, bad) <= 0] or [rel[0]], key=lambda r: [int(x) for x in r.split(".")])
+            res, ev = bisect_presence(check, rel, bad_rel)
+            out["evidence"] = {f"ocaml {v}": r for v, r in sorted(ev.items(), key=lambda kv: [int(x) for x in kv[0].split(".")])}
+            if res:
+                op, v = res
+                v = ".".join(v.split(".")[:2])
+                old, new = constraint_edit(opam_text, "ocaml", op, v)
+                out.update(rule="stdlib", dep="ocaml", old=old, new=new, confidence="high")
+            else:
+                out["note"] = "stdlib identifier, but no OCaml release boundary found"
+            return out
+        # Library: candidate packages whose name matches the top module.
+        cands = [p for p in info["installed"] if norm(top).startswith(norm(p)) and len(norm(p)) >= 2]
+        cands.sort(key=lambda p: -len(p))
+        by_name = bool(cands)
+        if not cands and opam_text:
+            # The module may be reached through an `open` (e.g. Term from Why3).
+            # Rank the direct dependencies by the module names in the error text.
+            deps = re.findall(r'^\s*"([\w+-]+)"', opam_text.split("depends:", 1)[-1].split("]", 1)[0], re.M)
+            deps = [d for d in deps if d in info["installed"] and d not in ("ocaml", "dune", "ocamlfind")]
+            mentioned = {norm(w) for w in re.findall(r"\b([A-Z]\w+)\.", "\n".join(err))}
+            cands = sorted(deps, key=lambda d: not any(m.startswith(norm(d)) for m in mentioned))
+        for pkg in cands[:5]:
+            bad = info["installed"].get(pkg)
+            if not bad:
+                continue
+            doc_mods = mods if mods else []          # full path, e.g. ['Ortools', 'Sat']
+            git_path = mods[1:] if mods and norm(mods[0]).startswith(norm(pkg)) and len(mods) > 1 else mods
+            used = set()
+
+            def check(v, pkg=pkg, doc_mods=doc_mods, git_path=git_path, used=used):
+                # 1. ocaml.org docs for pkg.v (no git, no token, any upstream host)
+                r = src.doc_present(pkg, v, doc_mods, kind, ident)
+                if r is not None:
+                    used.add("ocaml.org docs")
+                    return r
+                # 2. fallback: shallow blob-less git fetch of the matching tag
+                repo = src.upstream(pkg, v) or src.upstream(pkg, bad)
+                t = repo and src.tag_for(repo, pkg, v)
+                if not t:
+                    return None
+                used.add(f"git {repo}")
+                if kind == "module" and not mods:
+                    return bool(module_files(src.tree(repo, t), ident))
+                return present(src, repo, t, git_path or [top], kind, ident)
+
+            if not by_name:
+                # Accept a dependency only if it actually provides that module.
+                has_mod = src.doc_present(pkg, bad, [], "module", top)
+                if has_mod is None:
+                    repo = src.upstream(pkg, bad)
+                    t = repo and src.tag_for(repo, pkg, bad)
+                    has_mod = bool(t and module_files(src.tree(repo, t), top))
+                if not has_mod:
+                    continue
+            at_bad = check(bad)
+            if at_bad is None:
+                out.setdefault("tried", []).append(f"{pkg}.{bad}: no ocaml.org docs and no matching git tag")
+                continue
+            if at_bad:
+                out.setdefault("tried", []).append(f"{pkg}.{bad} defines it ({', '.join(sorted(used))}): "
+                                                   f"not a version problem of {pkg}")
+                continue
+            bounds = existing_bounds(opam_text, pkg)
+            res, ev = bisect_presence(check, src.versions(pkg), bad,
+                                      allowed=lambda v, b=bounds: satisfies(v, [x for x in b if x[0] != "="]))
+            out["evidence"] = {f"{pkg} {v}": r for v, r in sorted(ev.items(), key=lambda kv: functools.cmp_to_key(opam_vcmp)(kv[0]))}
+            out["evidence"][f"{pkg} {bad} (installed in failing job)"] = False
+            out["source"] = ", ".join(sorted(used))
+            if res:
+                op, v = res
+                old, new = constraint_edit(opam_text, pkg, op, v)
+                out.update(rule="library-api", dep=pkg, old=old, new=new, confidence="high")
+                if f"{pkg}.{fver}" in pr_packages and src.upstream(fname, fver, ref) == src.upstream(pkg, fver, ref):
+                    out["alternative"] = f'"{pkg}" {{= version}}  (same upstream repository and version)'
+                return out
+        out.setdefault("note", "could not locate the identifier in any candidate package's history")
+        return out
+
+    if info["test_diff"]:
+        out["rule"] = "test-output"
+        out["error"] = "test output differs (cram/mdx)"
+        return out   # completed by the caller with a passing job's versions
+    out["note"] = "no rule matched"
+    return out
+
+
+def suggest(sha, data, src, cache_dir, max_logs, match):
+    pr_packages = sorted({j["target"] for j in data["jobs"] if j["target"]})
+    cats = {"build", "build-or-test", "solver"}
+    sel = [j for j in data["jobs"] if j["status"] == "failed" and j["category"] in cats
+           and (not match or re.search(match, j["variant"]))]
+    # One job per (package, revdep, kind, reason): the same error on many platforms is one problem.
+    seen, uniq = set(), []
+    for j in sel:
+        key = (j["target"], j["revdep"], j["kind"], re.sub(r"[`\"']|-j \d+", "", j["reason"] or ""))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(j)
+    if len(uniq) > max_logs:
+        print(f"note: {len(uniq)} distinct failures, analysing the first {max_logs} (use --max)", file=sys.stderr)
+        uniq = uniq[:max_logs]
+    results = []
+    for j in uniq:
+        try:
+            text = log_text(fetch(j["url"], cache_dir))
+        except Exception as e:
+            results.append({"variant": j["variant"], "note": f"log unavailable: {e}"})
+            continue
+        r = suggest_for_job(src, j, text, pr_packages, sha)
+        if r.get("rule") == "test-output":
+            complete_test_output(src, r, j, text, data, cache_dir)
+        results.append(r)
+    return results
+
+
+def complete_test_output(src, r, job, text, data, cache_dir):
+    """For a test-output diff: compare the failing job's installed versions with a
+    passing job of the same package and suggest a with-test upper bound."""
+    bad = log_info(text)
+    fname, fver = bad["failing"]
+    same = [k for k in data["jobs"] if k["target"] == job["target"] and k["revdep"] == job["revdep"]
+            and k["kind"] == job["kind"] and k["category"] == "passed"]
+    where = "this run"
+    if not same:
+        dated_candidates(src, r, bad, fname, fver)
+        return
+    ok = log_info(log_text(fetch(same[0]["url"], cache_dir)))
+    opam_text = src.opam_file(fname, fver, bad.get("base") or "master") or ""
+    deps = set(re.findall(r'^\s*"([\w+-]+)"', opam_text, re.M))
+    diffs = []
+    for p, v in bad["installed"].items():
+        w = ok["installed"].get(p)
+        if w and w != v and p in deps and p not in ("ocaml", "dune", "ocaml-base-compiler", "ocaml-compiler"):
+            diffs.append((p, w, v))
+    blob = "\n".join(bad["error_lines"]).lower()
+    diffs.sort(key=lambda d: (d[0].lower() not in blob, d[0]))
+    r["compared_with"] = "/".join(same[0]["platform"]) + f" in {where}"
+    r["candidates"] = []
+    for p, good_v, bad_v in diffs[:4]:
+        if opam_vcmp(bad_v, good_v) > 0:
+            vs = [v for v in src.versions(p) if opam_vcmp(v, good_v) > 0]
+            first = vs[0] if vs else bad_v
+            # Test-only: keep the main constraint, add a separate with-test line.
+            r["candidates"].append({"dep": p, "passing": good_v, "failing": bad_v, "old": None,
+                                    "new": f'"{p}" {{with-test & < "{first}"}}   (new line in depends)'})
+    r["confidence"] = "low (candidates differ between a passing and the failing job)"
+
+
+TRIVIAL_DEPS = {"ocaml", "dune", "ocamlfind", "odoc", "ocaml-base-compiler", "ocaml-compiler", "base-unix",
+                "base-threads", "base-bytes", "conf-pkg-config", "dune-configurator"}
+
+
+def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
+    """No passing job to compare with: dependencies whose installed version was
+    released after the failing package itself are candidates for having changed
+    its test output. Bound: before their first release after that date.
+    Cost: one small opam.ocaml.org page per dependency looked at (at most
+    `max_lookups`, those mentioned in the error first) plus a binary search
+    over dates for the candidates."""
+    day = src.published(fname, fver)
+    if not day:
+        r["note"] = "no passing job to compare with, and no release date for the package"
+        return
+    opam_text = src.opam_file(fname, fver) or ""
+    dep_lines = re.findall(r'^\s*"([\w+-]+)"([^\n]*)$', opam_text.split("depends:", 1)[-1].split("\n]", 1)[0], re.M)
+    blob = "\n".join(bad["error_lines"]).lower()
+    deps = [d for d, rest in dep_lines
+            if d not in TRIVIAL_DEPS and d in bad["installed"]
+            and not re.search(r"\b(build|with-doc|with-dev-setup)\b", rest)]
+    deps.sort(key=lambda d: d.lower() not in blob)      # mentioned in the output first
+    newer = []
+    for d in deps[:max_lookups]:
+        v = bad["installed"][d]
+        dv = src.published(d, v)
+        if dv and dv > day:
+            newer.append((d.lower() not in blob, dv, d, v))
+    newer.sort()
+    cands = []
+    for _, dv, d, v in newer[:3]:
+        # first version released after `day`: binary search on release dates
+        vs = [w for w in src.versions(d) if opam_vcmp(w, v) <= 0]
+        lo, hi = 0, len(vs) - 1                  # vs[hi] == v is after `day`
+        while lo < hi:
+            mid = (lo + hi) // 2
+            dm = src.published(d, vs[mid])
+            if dm and dm > day:
+                hi = mid
+            else:
+                lo = mid + 1
+        cands.append((d.lower() not in blob, dv, d, v, vs[lo] if vs else v))
+    cands.sort(key=lambda c: (c[0], c[1]))
+    r["compared_with"] = f"release date of {fname}.{fver} ({day})"
+    r["candidates"] = [{"dep": d, "failing": v, "first_after": first, "old": None,
+                        "new": f'"{d}" {{with-test & < "{first}"}}   (new line in depends)'}
+                       for _, _, d, v, first in cands]
+    r["also_newer"] = [d for _, _, d, _ in newer[3:]]
+    r["confidence"] = "low (dependencies released after the package; check their changelogs)"
+    if not cands:
+        r["note"] = f"none of the {min(len(deps), max_lookups)} dependencies checked was released after {fname}.{fver} ({day})"
+
+
+def render_suggestions(results):
+    for r in results:
+        print("=" * 100)
+        print(f"{r['variant']}")
+        if r.get("failing"):
+            print(f"  failing package : {r['failing']}   fix goes in: {r.get('fix_in')}")
+        if r.get("error"):
+            print(f"  error           : {r['error']}")
+        if r.get("source"):
+            print(f"  looked up in    : {r['source']}")
+        if r.get("evidence"):
+            print("  evidence        : " + ", ".join(f"{k}={'yes' if v else ('no' if v is False else '?')}" for k, v in r["evidence"].items()))
+        for t in r.get("tried", []):
+            print(f"  tried           : {t}")
+        if r.get("new"):
+            print(f"  suggestion ({r.get('rule')}, {r.get('confidence')}):")
+            if r.get("old"):
+                print(f"    - {r['old']}")
+            print(f"    + {r['new']}")
+            if r.get("alternative"):
+                print(f"    or {r['alternative']}")
+        if r.get("candidates"):
+            print(f"  candidates      : {r.get('confidence')}")
+        for c in r.get("candidates", []):
+            if "first_after" in c:
+                print(f"    {c['dep']}: {c['failing']} installed; first release after {r.get('compared_with')} is {c['first_after']}")
+            else:
+                print(f"    {c['dep']}: {c['passing']} passes on {r.get('compared_with')}, {c['failing']} fails")
+            if c.get("old"):
+                print(f"    - {c['old']}")
+            print(f"    + {c['new']}")
+        if r.get("also_newer"):
+            print(f"  also released after it (not ranked): {', '.join(r['also_newer'])}")
+        if r.get("note"):
+            print(f"  note            : {r['note']}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", choices=["summary", "logs", "compare", "suggest"])
+    ap.add_argument("target", nargs="?", help="commit sha or opam.ci.ocaml.org URL")
+    ap.add_argument("--pr", type=int, help="opam-repository PR number (uses gh to find the head sha)")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--all", action="store_true", help="summary: also show passed/ignored/not-available jobs")
+    ap.add_argument("--match", help="logs: only jobs whose variant matches this regex")
+    ap.add_argument("--category", action="append",
+                    help="logs: only these categories (default: everything except network/cancelled/ignored/not-available)")
+    ap.add_argument("--max", type=int, default=30, help="logs: max number of logs to fetch")
+    ap.add_argument("--baseline", help="compare: baseline commit sha/URL (default: the PR of the previous version)")
+    ap.add_argument("--cache-dir", default=".opam-ci-cache")
+    ap.add_argument("--refresh", action="store_true", help="ignore the cache for the commit page")
+    args = ap.parse_args()
+
+    sha = resolve_sha(args.target, args.pr)
+    page = fetch(BASE + sha, args.cache_dir, refresh=args.refresh)
+    data = parse_commit_page(page)
+    if not data["jobs"]:
+        sys.exit("no jobs found (CI not started yet, or the page layout changed)")
+
+    if args.command == "suggest":
+        src = Sources(args.cache_dir)
+        results = suggest(sha, data, src, args.cache_dir, args.max, args.match)
+        if args.json:
+            json.dump({"sha": sha, "pr": data["pr"], "suggestions": results}, sys.stdout, indent=2)
+            print()
+        else:
+            render_suggestions(results)
+        print("network requests: " + ", ".join(f"{k}={v}" for k, v in NET.items()), file=sys.stderr)
+        return
+
+    if args.command == "compare":
+        targets = sorted({j["target"] for j in data["jobs"]
+                          if j["kind"] == "revdeps" and j["category"] in FAILING})
+        report = []
+        for t in targets:
+            if args.baseline:
+                info = {"prev": "(given)", "sha": resolve_sha(args.baseline, None), "pr": None}
+            else:
+                info = find_baseline_commit(t)
+            if not info or "sha" not in info:
+                print(f"== {t}: no previous version / baseline PR found", file=sys.stderr)
+                continue
+            try:
+                base_data = parse_commit_page(fetch(BASE + info["sha"], args.cache_dir))
+            except urllib.error.HTTPError as e:
+                print(f"== {t}: baseline CI page for {info['prev']} ({info['sha'][:12]}) unavailable: {e}", file=sys.stderr)
+                continue
+            results = compare(data["jobs"], base_data["jobs"])
+            results = [r for r in results if
+                       any(j["target"] == t for j in data["jobs"] if j["revdep"] == r["revdep"])]
+            report.append({"target": t, "baseline": info, "results": results})
+            if not args.json:
+                render_compare(t, info, results, args.all)
+        if args.json:
+            json.dump({"sha": sha, "pr": data["pr"], "report": report}, sys.stdout, indent=2)
+            print()
+        return
+
+    if args.command == "summary":
+        if args.json:
+            json.dump({"sha": sha, **data}, sys.stdout, indent=2)
+            print()
+        else:
+            render_summary(sha, data, args.all)
+        return
+
+    cats = set(args.category or ["build", "build-or-test", "dependency", "solver", "lint"])
+    sel = [j for j in data["jobs"]
+           if j["status"] == "failed" and (j["category"] in cats or j["kind"] == "lint")
+           and (not args.match or re.search(args.match, j["variant"]))]
+    if len(sel) > args.max:
+        print(f"note: {len(sel)} jobs selected, fetching the first {args.max} (use --max)", file=sys.stderr)
+        sel = sel[: args.max]
+
+    def work(j):
+        try:
+            return {**j, "log": excerpt(log_text(fetch(j["url"], args.cache_dir)))}
+        except Exception as e:  # keep going: one unreachable log must not hide the others
+            return {**j, "log": {"fetch_error": str(e)}}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        results = list(ex.map(work, sel))
+
+    if args.json:
+        json.dump({"sha": sha, "pr": data["pr"], "jobs": results}, sys.stdout, indent=2)
+        print()
+        return
+    for r in results:
+        lg = r["log"]
+        print("=" * 100)
+        print(f"{r['variant']}  [{r['category']}] builder={lg.get('builder')} base={lg.get('base', '?')[:12]}")
+        print(r["url"])
+        if lg.get("job"):
+            print("job:", lg["job"])
+        for k in ("solver", "error_block"):
+            if k in lg:
+                print(lg[k])
+        if "fetch_error" in lg:
+            print("!! could not fetch log:", lg["fetch_error"])
+            continue
+        print("=> " + (lg.get("final") or lg.get("job_failed") or "?"))
+
+
+if __name__ == "__main__":
+    main()
