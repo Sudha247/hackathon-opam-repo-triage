@@ -34,6 +34,7 @@ import argparse
 import collections
 import concurrent.futures
 import functools
+import gzip
 import hashlib
 import html
 import html.parser
@@ -49,6 +50,16 @@ import urllib.request
 
 BASE = "https://opam.ci.ocaml.org/github/ocaml/opam-repository/commit/"
 NET = {"http": 0, "mcp": 0, "git": 0, "github-api": 0}   # requests actually sent (cache misses)
+
+# OPAM_CI_OFFLINE=1 (used by the tests): everything must come from the cache;
+# a cache miss is recorded in OFFLINE_MISSES and behaves like a failed request.
+OFFLINE = os.environ.get("OPAM_CI_OFFLINE") == "1"
+OFFLINE_MISSES = []
+
+
+def offline_miss(what):
+    OFFLINE_MISSES.append(what)
+    return None
 USER_AGENT = "opam-ci-triage"
 
 
@@ -62,6 +73,14 @@ def fetch(url, cache_dir, refresh=False):
     if not refresh and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             return f.read()
+    if not refresh and os.path.exists(path + ".gz"):       # compressed test fixtures
+        with gzip.open(path + ".gz", "rt", encoding="utf-8") as f:
+            return f.read()
+    if not refresh and os.path.exists(path + ".404"):      # known not to exist (e.g. a file in a tag)
+        raise urllib.error.HTTPError(url, 404, "Not Found (cached)", None, None)
+    if OFFLINE:
+        offline_miss(url)
+        raise RuntimeError(f"offline: {url} is not in the cache")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     NET["http"] += 1
     for attempt in range(6):
@@ -70,6 +89,9 @@ def fetch(url, cache_dir, refresh=False):
                 body = r.read().decode("utf-8", errors="replace")
             break
         except urllib.error.HTTPError as e:
+            if e.code == 404:
+                os.makedirs(cache_dir, exist_ok=True)
+                open(path + ".404", "w").close()
             if e.code not in (429, 502, 503) or attempt == 5:
                 raise
             delay = int(e.headers.get("Retry-After") or 0) or 2 ** (attempt + 1)
@@ -412,10 +434,12 @@ def gh_api(path, cache_dir=".opam-ci-cache", cache=True):
     if path in _GH_CACHE:
         return _GH_CACHE[path]
     disk = os.path.join(cache_dir, "api-" + hashlib.sha256(path.encode()).hexdigest()[:24] + ".json")
-    if cache and os.path.exists(disk):
+    if (cache or OFFLINE) and os.path.exists(disk):
         with open(disk) as f:
             _GH_CACHE[path] = json.load(f)
         return _GH_CACHE[path]
+    if OFFLINE:
+        return offline_miss("github-api " + path)
     NET["github-api"] += 1
     headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
     tok = github_token()
@@ -430,7 +454,7 @@ def gh_api(path, cache_dir=".opam-ci-cache", cache=True):
             print("note: GitHub API rate limit reached (60/hour without a token); "
                   "set GITHUB_TOKEN to raise it", file=sys.stderr)
         return None
-    if cache:
+    if cache or os.environ.get("OPAM_CI_RECORD") == "1":     # recording fixtures keeps everything
         os.makedirs(cache_dir, exist_ok=True)
         with open(disk, "w") as f:
             json.dump(v, f)
@@ -594,10 +618,15 @@ def render_compare(target, info, results, show_all=False):
 # or fetched on demand by git (other hosts). Each suggestion carries its evidence.
 
 def git(args, cwd=None, check=True):
+    if args[0] in ("fetch", "ls-remote") and OFFLINE:
+        offline_miss("git " + " ".join(args[:4]))
+        return subprocess.CompletedProcess(args, 1, "", "offline")
     if args[0] in ("fetch", "ls-remote", "cat-file"):
         NET["git"] += 1
-    out = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True,
-                         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if OFFLINE:
+        env["GIT_NO_LAZY_FETCH"] = "1"          # a partial clone must not fetch missing objects
+    out = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, env=env)
     if check and out.returncode != 0:
         raise RuntimeError(f"git {' '.join(args[:3])}...: {out.stderr.strip()[:200]}")
     return out
@@ -667,7 +696,7 @@ class Sources:
         key = ("tags", url)
         if key not in self.mem:
             disk = os.path.join(self.cache_dir, "tags-" + hashlib.sha256(url.encode()).hexdigest()[:16] + ".json")
-            if os.path.exists(disk) and time.time() - os.path.getmtime(disk) < 86400:
+            if os.path.exists(disk) and (OFFLINE or time.time() - os.path.getmtime(disk) < 86400):
                 with open(disk) as f:
                     tags = json.load(f)
             else:
@@ -752,6 +781,8 @@ class Sources:
         if os.path.exists(disk):
             with open(disk) as f:
                 v = json.load(f)
+        elif OFFLINE:
+            return offline_miss("mcp " + key)
         else:
             NET["mcp"] += 1
             body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -2230,6 +2261,10 @@ def main():
         llm = ({"limit": args.llm_max, "model": args.llm_model, "dry_run": args.llm_dry_run}
                if args.llm or args.llm_dry_run else None)
         results = rank(suggest(sha, data, src, args.cache_dir, args.max, args.match, llm))
+        if OFFLINE:
+            print(f"offline cache misses: {len(OFFLINE_MISSES)}", file=sys.stderr)
+            for m in OFFLINE_MISSES[:10]:
+                print(f"  miss: {m}", file=sys.stderr)
         if args.command == "review":
             review = build_review(sha, data, results, src)
             if args.post:

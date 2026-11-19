@@ -100,6 +100,24 @@ Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
 fallbacks enabled. Responses are cached in `.opam-ci-cache/`, so re-runs cost
 nothing. The log and opam file are passed as untrusted data.
 
+## Tests
+
+`tests/test_triage.py` runs `suggest` on 14 recorded CI runs (ortools,
+colibri2, why3find, hol_light, binaryen, oonnxx, chatoyant, lwt revdeps,
+graphql-async, ocaml-r, git-paf, websocket, lambdapi, dns-certify) and checks
+the fixes verified by hand or made by the PR authors. They run offline
+(`OPAM_CI_OFFLINE=1`): pages, logs, opam files, doc lookups and git objects come
+from `tests/fixtures/<case>/` (1.6 MB), and any cache miss fails the test.
+
+```sh
+python3 tests/test_triage.py              # ~4 s, no network
+python3 tests/test_triage.py -k why3find  # one case
+python3 tests/test_triage.py --record     # re-record the fixtures (online)
+```
+
+To add a case: put its commit and expected suggestions in `CASES`, then
+`--record <case>`.
+
 ## Evaluation on merged PRs
 
 `evaluate_closed_prs.py` runs `suggest` on the initial version (before the
