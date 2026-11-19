@@ -23,6 +23,7 @@ PR's current head).
 | `logs` | For failed jobs: the first `#=== ERROR while …` block, solver output, the final error, the builder (classic or day10) and the master commit the PR was merged onto. |
 | `compare` | Classifies failing reverse dependencies against the CI run of the PR that published the previous version of the package: NEW, pre-existing, builder-specific, no-baseline. |
 | `suggest` | Proposes fixes, with the evidence they are based on (see below). Fixes to the PR come first, then workarounds (platform restrictions), problems in other packages or CI, and explanations without a change. |
+| `review` | The same as a GitHub pull-request review: each fix that can be placed on a line of the PR's diff becomes a line comment with a "suggested change" block (one click to apply); the rest goes in the review text. Needs `--pr N` and CI results for the PR's current head. Printed as JSON by default; `--post` posts it with `gh api` (review it first). |
 | `comment` | A draft PR comment in Markdown from the `suggest` results: diffs for the PR's opam files with their evidence, the rest folded in `<details>`. Printed by default; `--post` posts it with `gh pr comment` (review it first). |
 
 ```sh
