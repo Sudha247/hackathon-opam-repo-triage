@@ -224,7 +224,7 @@ def render_pr(pr):
                 body.append(f'<h4 class="g-{k}">{e(label)} ({len(groups[k])})</h4>')
                 body.extend(render_suggestion(r, pr.get("sha")) for r in groups[k])
     body.append("</div>")
-    return (f'<details class="pr" data-cats="{" ".join(sorted(cats))}" data-search="{e(search)}">'
+    return (f'<details class="pr" id="pr-{n}" data-cats="{" ".join(sorted(cats))}" data-search="{e(search)}">'
             + head + "\n".join(body) + "</details>")
 
 
@@ -382,7 +382,9 @@ def render(data):
         "<!DOCTYPE html>", '<html lang="en"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
         '<meta name="color-scheme" content="light dark">',
-        "<title>opam-repository CI triage</title>", f"<style>{CSS}</style></head><body><main>",
+        "<title>opam-repository CI triage</title>",
+        '<link rel="alternate" type="application/atom+xml" title="opam-repository CI triage" href="feed.xml">',
+        f"<style>{CSS}</style></head><body><main>",
         "<h1>opam-repository CI triage</h1>",
         f'<p class="lead">The open pull requests of {link(REPO_URL, "ocaml/opam-repository")} whose CI '
         f'(opam-repo-ci) fails: {e(data.get("failing_prs"))} of {e(data.get("open_prs"))} open PRs{limit}'
@@ -394,7 +396,7 @@ def render(data):
         + (f'<p class="meta">Failures that no rule recognises get a diagnosis from an LLM (Claude), shown as '
            f'"LLM diagnosis (unchecked)"; {e((data.get("llm") or {}).get("calls", 0))} new LLM calls in this '
            f'update.</p>' if (data.get("llm") or {}).get("enabled") else "")
-        + f'<p class="meta">Updated {e(gen[:16].replace("T", " "))} UTC. Up to '
+        + f'<p class="meta">Updated {e(gen[:16].replace("T", " "))} UTC (<a href="feed.xml">feed</a>). Up to '
         f'{e(data.get("max_failures_per_pr"))} different failures are analysed per PR. In this update: '
         f'{e(run.get("analysed", 0))} PRs analysed, {e(run.get("unchanged", 0))} unchanged since the last one.'
         f'</p>',
@@ -442,6 +444,49 @@ repository</a>).</p></section>''')
     return "\n".join(parts) + "\n"
 
 
+def render_feed(data):
+    """An Atom feed with one entry per analysed PR. An entry's id changes with
+    the PR's head commit, so a feed reader shows each new analysis."""
+    def x(v):
+        return html.escape("" if v is None else str(v), quote=True)
+    gen = data.get("generated") or ""
+    out = ['<?xml version="1.0" encoding="utf-8"?>',
+           '<feed xmlns="http://www.w3.org/2005/Atom">',
+           "<title>opam-repository CI triage</title>",
+           f"<id>urn:opam-repo-ci-triage:{x(data.get('repository'))}</id>",
+           f"<updated>{x(gen)}</updated>",
+           '<link rel="alternate" href="index.html"/>',
+           "<author><name>opam-repo-ci triage</name></author>"]
+    for pr in data.get("prs", []):
+        if pr.get("pending") or pr.get("result") is None:
+            continue
+        n = int(pr["number"])
+        cats, groups = categorise(pr)
+        lines = [", ".join(label for c, label in CATEGORIES if c in cats)]
+        if pr.get("ci_state") == "PENDING":
+            lines.append(f"CI still running ({pr.get('ci_unfinished') or '?'} jobs left).")
+        since = pr.get("since_last_push")
+        if since and (since.get("fixed") or since.get("new")):
+            lines.append(f"Since the previous push: {len(since.get('fixed') or [])} gone, "
+                         f"{len(since.get('new') or [])} new, {since.get('still', 0)} unchanged.")
+        for k, label, _ in CLASSES:
+            for r in groups.get(k, [])[:5]:
+                title = r.get("title") or RULE_TITLES.get(r.get("rule"), r.get("rule")) or "Note"
+                lines.append(f"{title}: {r.get('failing') or r.get('job') or ''}"
+                             + (f" ({(r.get('new') or '').split('   ')[0]})" if r.get("new") else ""))
+        updated = pr.get("analysed_at") or gen
+        out += ["<entry>",
+                f"<title>#{n} {x(pr.get('title'))}</title>",
+                f"<id>{x(REPO_URL)}/pull/{n}#{x(pr.get('sha'))}</id>",
+                f'<link rel="alternate" href="{x(REPO_URL)}/pull/{n}"/>',
+                f'<link rel="related" href="index.html#pr-{n}"/>',
+                f"<updated>{x(updated)}</updated>",
+                f"<summary>{x(chr(10).join(lines))}</summary>",
+                "</entry>"]
+    out.append("</feed>")
+    return "\n".join(out) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default=os.path.join(ROOT, "site", "data.json"))
@@ -453,6 +498,8 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         f.write(page)
+    with open(os.path.join(os.path.dirname(os.path.abspath(args.out)), "feed.xml"), "w") as f:
+        f.write(render_feed(data))
     print(f"wrote {args.out} ({len(page.encode())} bytes, {len(data.get('prs', []))} PRs)")
 
 

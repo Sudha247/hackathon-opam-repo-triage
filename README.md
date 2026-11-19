@@ -177,6 +177,10 @@ publishes the results on the repository's GitHub Pages site:
    writes `site/data.json`. `--time-budget` stops starting new PRs; the next
    run continues.
 
+   The page also publishes an Atom feed, `feed.xml`, with one entry per PR,
+   whose id changes with the PR's head commit: a feed reader shows each new
+   analysis without visiting the page.
+
    When a PR gets a new commit, the page says what changed since the
    previous one: the problems gone, the new ones, and how many remain.
 
