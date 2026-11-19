@@ -1681,19 +1681,6 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     seen, unique = {}, []
     for r in results:
         plat = r.pop("_plat", None)
-        if r.get("rule") == "install-missing-files" and not r.get("new"):
-            k = ("install", split_pkg(r.get("failing") or "")[0], r.get("fix_in") == "this PR")
-            if k in seen:
-                seen[k]["failing"] += ", " + r["failing"]
-                seen[k]["jobs"] = merge_jobs(seen[k].get("jobs") or [seen[k]["variant"]],
-                                             r.get("jobs") or [r["variant"]])
-                if r.get("fix_in") != "this PR":
-                    seen[k]["fix_in"] = f"{k[1]} (other package)"
-                seen[k].setdefault("also_seen_on", []).append(r["variant"])
-                continue
-            seen[k] = r
-            unique.append(r)
-            continue
         k = ((r.get("failing"), (r.get("new") or "").split("   ")[0]) if r.get("new")
              else (r.get("failing"), r["rule"], (r.get("note") or "").replace(plat or "\0", "{P}"))
              if r.get("rule") in PER_PACKAGE_RULES else None)
@@ -1733,7 +1720,44 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     if not match or re.search(match, "(lint)"):
         results += lint_rules(data, src, sha, cache_dir)
     results += skipped_rules(data, src, cache_dir, pr_packages)
-    return readable(merge_unrecognised(results))
+    return readable(merge_versions(merge_unrecognised(results)))
+
+
+# Rules whose entries for several versions of one package are merged.
+MERGE_VERSIONS = {"install-missing-files", "uninstallable", "newer-c-compiler", "system-library-version",
+                  "needs-git-checkout", "install-outside-prefix", "test-output-ocaml", "missing-header",
+                  "missing-tool", "missing-library", "missing-pkg-config", "sources"}
+
+
+def merge_versions(results):
+    """Several versions of one package with the same rule and no diff (a diff
+    stays with its own opam file, for line comments): one entry, listing them."""
+    out, first = [], {}
+    for r in results:
+        failing = r.get("failing") or ""
+        name = split_pkg(failing)[0]
+        if r.get("rule") not in MERGE_VERSIONS or r.get("new") or not name or " " in failing:
+            out.append(r)
+            continue
+        k = (name, r["rule"], r.get("fix_in") == "this PR")
+        f = first.get(k)
+        if f is None:
+            first[k] = r
+            out.append(r)
+            continue
+        f["failing"] += ", " + failing
+        f["jobs"] = merge_jobs(f.get("jobs") or [f["variant"]], r.get("jobs") or [r["variant"]])
+        if r.get("fix_in") != "this PR":
+            f["fix_in"] = f"{name} (other package)"
+        if r.get("note") and r["note"] != f.get("_note0", f.get("note")):
+            f.setdefault("_note0", f.get("note"))
+            f.setdefault("_similar", []).append(failing)
+    for r in out:
+        r.pop("_note0", None)
+        similar = r.pop("_similar", None)
+        if similar:
+            r["note"] = (r.get("note") or "").rstrip() + f" (The details differ slightly for {', '.join(similar)}.)"
+    return out
 
 
 def merge_unrecognised(results):
