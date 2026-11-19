@@ -1404,8 +1404,12 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
 
 def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run):
     jobs = {j["variant"]: j for j in data["jobs"]}
-    todo = [r for r in results if r.get("url") and r.get("variant") in jobs
-            and (r.get("note") in LLM_UNEXPLAINED or (r.get("note") or "").startswith("no rule matched"))]
+    def unexplained(r):
+        # The note may carry a "Pre-existing: ..." prefix.
+        note = re.sub(r"^Pre-existing: .*?\. ", "", r.get("note") or "")
+        return not r.get("rule") and not r.get("new") and not r.get("candidates") and \
+            (note in LLM_UNEXPLAINED or note.startswith("no rule matched"))
+    todo = [r for r in results if r.get("url") and r.get("variant") in jobs and unexplained(r)]
     seen, done = set(), 0
     for r in todo:
         sig = re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
@@ -1425,9 +1429,10 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         fix_in = {"this-pr": "this PR" if pkg in pr_packages else f"{pkg} (other package)",
                   "other-package": f"{pkg} (other package)", "upstream": "upstream (the package's source)",
                   "ci": "the CI environment", "unknown": r.get("fix_in") or "unknown"}[res["fix_in"]]
+        pre = f"Pre-existing: {r['preexisting']}. " if r.get("preexisting") else ""
         r.update(rule="llm", failing=pkg, fix_in=fix_in, confidence=res["confidence"],
                  error=r.get("error") or res["diagnosis"],
-                 note=f"{res['diagnosis']} Check: {res['verify']}", llm_usage=res.get("llm_usage"))
+                 note=f"{pre}{res['diagnosis']} Check: {res['verify']}", llm_usage=res.get("llm_usage"))
         if res.get("change_new"):
             r.update(old=res.get("change_old") or None, new=res["change_new"])
     if len(seen) < len({re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
@@ -1592,13 +1597,14 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
 
 def merge_unrecognised(results):
     """The failures no rule recognises, as one entry listing their jobs."""
-    unk = [r for r in results if not (r.get("rule") or r.get("new") or r.get("candidates") or r.get("error"))]
+    unk = [r for r in results if not (r.get("rule") or r.get("new") or r.get("candidates") or r.get("error")
+                                      or r.get("llm_prompt"))]
     if not unk:
         return results
     jobs = merge_jobs([], [v for r in unk for v in (r.get("jobs") or [r["variant"]])])
     names = sorted({r["failing"] for r in unk if r.get("failing")})
     return [r for r in results if r not in unk] + [{
-        "variant": "unrecognised", "rule": "unrecognised", "fix_in": "unknown", "confidence": "low",
+        "variant": f"{len(jobs)} job{'s' if len(jobs) != 1 else ''}", "rule": "unrecognised", "fix_in": "unknown", "confidence": "low",
         "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else "") if names else None,
         "error": f"{len(jobs)} failed job{'s' if len(jobs) != 1 else ''} that no rule recognises",
         "note": "Read the logs of these jobs.", "jobs": jobs,

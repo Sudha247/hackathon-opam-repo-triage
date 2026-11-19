@@ -3,3 +3,4 @@ ci-logs/
 __pycache__/
 site/
 state/
+.venv/
