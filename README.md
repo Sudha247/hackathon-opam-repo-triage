@@ -93,7 +93,14 @@ recognises are grouped in one "Not recognised" entry listing their jobs.
 | Known messages: `no such function: unixepoch` (SQLite < 3.38), `Could NOT find Python3`, `fatal: not a git repository` from `git describe`, an install into `/usr/...` (read-only), `No known cycle-counting instruction`, Core_kernel shadowing Unix, `Unbound value Conv.…` with cmdliner ≥ 2, `checking for ar... no` on Windows, Clang 19's removed APIs, OCaml 5.4's labelled tuples in Parsetree patterns, `configure: error: x.pc not found` | the cause and the change: a bound, a dependency, `available`, or the install variables | high/medium |
 | Lower-bounds job: a dependency downgraded to a version that no longer builds | `>=` the version used in the other jobs, on the direct dependency that pulls it in (found through opam's "required by") | medium |
 | Lower-bounds job: the package itself fails and no other rule applies | its downgraded direct dependencies as candidates (passing and failing versions), those named in the error first | low |
+| A new release fails with a dependency version that the previous release excludes on master (a bound maintainers added after a breakage, missing from the new opam file) | the same bound, citing the previous release; skipped when the new release changed that constraint on purpose | medium |
+| A reverse dependency builds on master (opam-health-check) but fails with the new release | the usual fix in the same PR: `"pkg" {< "new version"}` in its depends, or a `conflicts` entry when it does not depend on it directly; not for a PR that modifies an existing version, nor for a new conf package | medium |
 | A package recompiled at the same version, removed, then failing to build or install (it has a `remove:` field; seen on lower-bounds jobs with opam 2.6) | an opam bug (ocaml/opam#6440 moves the same source directory for both steps), not a bound: the job can be ignored | high |
+
+Every suggested change is checked before it is shown: a constraint no version
+satisfies, a bound that still allows the version the failing job installed, or
+(when opam is installed) a change on which `opam lint` reports a new problem is
+moved to the note as text to check, at low confidence.
 
 Failures that would happen without the PR are marked "Pre-existing" in the note:
 

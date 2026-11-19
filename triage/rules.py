@@ -803,3 +803,63 @@ def lower_bounds_rule(src, job, text, r, pr_packages, pr_sha):
                    if named else "")
              + "These direct dependencies are older in the lower-bounds job than in the other jobs, which pass.")
     return None
+
+
+def upper_bounds(opam_text):
+    """{dependency: (line, [(op, version)...])} for the dependencies with an
+    upper bound (`<` or `<=`) in an opam file's depends."""
+    out = {}
+    block = (opam_text or "").split("depends:", 1)[-1].split("\n]", 1)[0]
+    for m in re.finditer(r'^[ \t]*"([\w+-]+)"[ \t]*\{([^}]*)\}[^\n]*$', block, re.M):
+        ups = re.findall(r'(<=?)\s*"([^"]+)"', m.group(2))
+        if ups:
+            out[m.group(1)] = (m.group(0).strip(), ups)
+    return out
+
+
+def previous_release_bound(src, job, text, info, pr_packages, pr_sha, cache):
+    """A new release fails with a dependency version that the previous
+    release excludes on master (maintainers often add bounds to old versions
+    after a breakage, and a new release made from the upstream opam file does
+    not have them): suggest the same bound, citing the previous release."""
+    if "failing" not in info:
+        return None
+    fname, fver = info["failing"]
+    pkg = f"{fname}.{fver}"
+    if pkg not in pr_packages:
+        return None
+    if pkg not in cache:
+        older = [v for v in src.versions(fname) if opam_vcmp(v, fver) < 0]
+        prev = max(older, key=functools.cmp_to_key(opam_vcmp)) if older else None
+        cur = src.opam_file(fname, fver, pr_sha)
+        prev_text = src.opam_file(fname, prev) if prev else None
+        cache[pkg] = (prev, cur, upper_bounds(prev_text), upper_bounds(cur)) if prev and cur else None
+    if not cache[pkg]:
+        return None
+    prev, cur, prev_up, cur_up = cache[pkg]
+    cur_lines = {m.group(1): m.group(2) or "" for m in re.finditer(
+        r'^[ \t]*"([\w+-]+)"[ \t]*(?:\{([^}]*)\})?', (cur or "").split("depends:", 1)[-1].split("\n]", 1)[0], re.M)}
+    for dep, (line, ups) in sorted(prev_up.items()):
+        if dep in cur_up:
+            continue
+        mentioned = set(re.findall(r'"([^"]+)"', cur_lines.get(dep, "")))
+        lowers = re.findall(r'>=?\s*"([^"]+)"', cur_lines.get(dep, ""))
+        if any(v in mentioned for _, v in ups) or any(opam_vcmp(lo, v) >= 0 for lo in lowers for _, v in ups):
+            continue    # the new release changed this constraint on purpose (e.g. needs a newer API)
+        have = info["installed"].get(dep)
+        if not have:
+            continue
+        excluded = [(op, v) for op, v in ups if (opam_vcmp(have, v) >= 0 if op == "<" else opam_vcmp(have, v) > 0)]
+        if not excluded:
+            continue
+        op, v = excluded[0]
+        old, new = constraint_edit(cur, dep, op, v)
+        return {"variant": job["variant"], "url": job["url"], "kind": job["kind"],
+                "experimental": job["experimental"], "rule": "previous-release-bound", "failing": pkg,
+                "fix_in": "this PR", "dep": dep, "old": old, "new": new, "confidence": "medium",
+                "error": f"{dep}.{have} is installed; the previous release {fname}.{prev} excludes it on master "
+                         f"(`{line}`)",
+                "note": f"The previous release has this bound in opam-repository (often added after a breakage) "
+                        f"and this one does not. If the new release really supports {dep}.{have}, the failure "
+                        f"has another cause."}
+    return None

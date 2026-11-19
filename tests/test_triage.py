@@ -130,7 +130,7 @@ CASES = {
         "eb1089be5f315d8d5f5d749ad06f42bd92ae5b4b", ["--max", "2", "--match", "revdeps,bun"],
         [{"failing": "afl.2.52b", "rule": "newer-c-compiler", "note": "-Wimplicit-int"},
          {"rule": "health-check-preexisting", "failing": "xen-gnt-unix.4.0.2"},
-         {"rule": "health-check-new", "failing": "jext.0.1.1"}]),
+         {"rule": "health-check-new", "failing": "jext.0.1.1", "new": 'conflicts: [ "lwt" {>= "6.1.3"} ]'}]),
     # Rules for causes found by grading the LLM fallback's answers.
     "ordma-git-describe": (
         "3670238c506b9ba55e76e0956102b5a5eca57118", ["--max", "1", "--match", "^compilers,4.11"],
@@ -178,6 +178,10 @@ CASES = {
     "miaou-lower-bound-candidates": (
         "a8e39569b4d59572ae01a7800cf55dcd9d854d1e", ["--max", "1", "--match", "5.2,miaou-core.0.6.0,lower"],
         [{"failing": "miaou-registry.0.6.0", "rule": "lower-bound", "candidate": '"dune" {>= "3.24.2"}'}]),
+    # A bound the previous release has on master and the new release lacks.
+    "odnnr-previous-release-bound": (
+        "6b62b33f94fa0d7f64aa4da5cb0c75e78fa3b3ee", ["--max", "1", "--match", "^compilers,4.11,odnnr.2.0.3$"],
+        [{"failing": "odnnr.2.0.3", "rule": "previous-release-bound", "new": '"dolog" {>= "4.0.0" & < "5.0.0"}'}]),
 }
 
 
@@ -219,6 +223,33 @@ def record(cases):
 
 class TriageTest(unittest.TestCase):
     pass
+
+
+class ChecksTest(unittest.TestCase):
+    """The checks of suggested changes (no network)."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import opam_repo_ci_triage as t
+        self.t = t
+
+    def test_unsatisfiable(self):
+        terms = self.t.VERSION_TERM.findall
+        self.assertTrue(self.t.unsatisfiable(terms('>= "11.0.0" & < "11.0.0"')))
+        self.assertTrue(self.t.unsatisfiable(terms('>= "v0.9.15" & < "v0.9.15"')))
+        self.assertFalse(self.t.unsatisfiable(terms('>= "4.0.0" & < "5.0.0"')))
+
+    def test_allows(self):
+        terms = self.t.VERSION_TERM.findall
+        self.assertTrue(self.t.allows("6.0.0", terms('>= "4.0.0"')))
+        self.assertFalse(self.t.allows("6.0.0", terms('>= "4.0.0" & < "5.0.0"')))
+
+    def test_applied(self):
+        text = 'opam-version: "2.0"\ndepends: [\n  "ocaml" {>= "4.08"}\n]\n'
+        self.assertIn('"ocaml" {>= "4.08" & < "5.4"}',
+                      self.t.applied(text, {"old": '"ocaml" {>= "4.08"}', "new": '"ocaml" {>= "4.08" & < "5.4"}'}))
+        self.assertIn('  "conf-python-3" {build}\n  "ocaml"',
+                      self.t.applied(text, {"new": '"conf-python-3" {build}   (new line in depends)'}))
 
 
 def make_test(case):

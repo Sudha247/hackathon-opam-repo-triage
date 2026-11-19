@@ -36,10 +36,14 @@ from .ci import (  # noqa: F401
     split_pkg,
 )
 from .sources import (  # noqa: F401
+    constraint_edit,
     find_baseline_commit,
     license_id,
     opam_field,
     url_src,
+)
+from .rules import (  # noqa: F401
+    direct_deps,
 )
 
 
@@ -116,7 +120,7 @@ def health_check(src, name, cache):
     return cache[name]
 
 
-def health_summary(notes):
+def health_summary(notes, src=None):
     """Entries comparing the failing reverse dependencies with opam-health-check
     (master): the ones that also fail there, and the ones that build there."""
     h, run = notes.get("health") or {}, notes.get("run")
@@ -126,14 +130,40 @@ def health_summary(notes):
     def listing(d):
         return ", ".join(f"{rd} (OCaml {', '.join(sorted({v for v, _ in xs}))})" for rd, xs in sorted(d.items()))
     good = h.get("good") or {}
-    if good:
-        out.append({"variant": f"{len(good)} reverse dependenc{'ies' if len(good) > 1 else 'y'}",
-                    "rule": "health-check-new", "fix_in": "this PR", "confidence": "medium",
-                    "failing": ", ".join(sorted(good)),
-                    "error": f"build on master in opam-health-check{when} but fail here: {listing(good)}",
-                    "note": "These failures are probably caused by this PR: look at them first. "
-                            "opam-health-check builds the newest version of each package, without tests.",
-                    "jobs": sorted({v for xs in good.values() for _, v in xs})})
+    for rd, xs in sorted(good.items()):
+        # Broken by this PR: the usual fix in opam-repository is an upper
+        # bound on the new release in the reverse dependency, in the same PR.
+        targets = sorted({m.group(1) for _, v in xs for m in [re.search(r",([^,]+),revdeps,", v)] if m})
+        target = targets[0] if targets else None
+        r = {"variant": f"{rd}, reverse dependency" + (f" of {target}" if target else ""),
+             "rule": "health-check-new", "fix_in": "this PR", "confidence": "medium", "failing": rd,
+             "error": f"{rd} builds on master in opam-health-check{when} but fails here "
+                      f"(OCaml {', '.join(sorted({v for v, _ in xs}))})",
+             "note": "Probably broken by this PR: look at it first. opam-health-check builds the newest "
+                     "version of each package, without tests.",
+             "jobs": sorted({v for _, v in xs})}
+        rn, rv = split_pkg(rd)
+        added = notes.get("added")
+        opam = src.opam_file(rn, rv) if src and target and (added is None or target in added) else None
+        if target and added is not None and target not in added:
+            r["note"] = (f"This PR modifies {target} rather than adding a new version: check that the change "
+                         f"does not break {rd}. opam-health-check builds the newest version of each package, "
+                         f"without tests.")
+        if opam and target.startswith("conf-"):
+            r["note"] = (f"{target} is a new version of a conf package: when it breaks {rd}, the conf package "
+                         f"is usually what is wrong (its depexts or its check), not {rd}.")
+            opam = None
+        if opam:
+            tn, tv = split_pkg(target)
+            if tn in direct_deps(opam):
+                old, new = constraint_edit(opam, tn, "<", tv)
+            else:
+                old, new = None, f'conflicts: [ "{tn}" {{>= "{tv}"}} ]   (added to any existing `conflicts`)'
+            r.update(dep=tn, old=old, new=new,
+                     note=f"Probably broken by {target}. The usual fix in opam-repository is this upper bound in "
+                          f"{rd}'s opam file, in the same PR (or a fixed release of {rn}). opam-health-check "
+                          f"builds the newest version of each package, without tests.")
+        out.append(r)
     bad = {**(h.get("bad") or {}), **(h.get("partial") or {})}
     if bad:
         out.append({"variant": f"{len(bad)} reverse dependenc{'ies' if len(bad) > 1 else 'y'}",
@@ -181,6 +211,11 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
                 per_job[j["variant"]] = f"{info['prev']} failed the same job in the CI of {pr}"
     # opam-health-check: master, newest version of each package, no tests, on
     # the classic builder's default platform.
+    if notes is not None and base:
+        d = gh_api(f"repos/{REPO}/compare/{base}...{sha}", cache_dir)
+        if d:
+            notes["added"] = {m.group(1) for f in d.get("files", []) if f.get("status") == "added"
+                              for m in [re.match(r"packages/[^/]+/([^/]+)/opam$", f.get("filename", ""))] if m}
     if src is not None:
         cache, asked, newest = {}, set(), {}
 

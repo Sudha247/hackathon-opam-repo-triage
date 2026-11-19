@@ -11,7 +11,9 @@ import html.parser
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import sys
 import time
 import urllib.error
@@ -28,11 +30,14 @@ from .ci import (  # noqa: F401
     job_dims,
     log_text,
     merge_jobs,
+    opam_vcmp,
     split_pkg,
 )
 from .rules import (  # noqa: F401
     complete_test_output,
+    log_info,
     lower_bounds_rule,
+    previous_release_bound,
     suggest_for_job,
 )
 from .matrix import (  # noqa: F401
@@ -76,7 +81,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     if len(uniq) > max_logs:
         print(f"note: {len(uniq)} distinct failures, analysing the first {max_logs} (use --max)", file=sys.stderr)
         uniq = uniq[:max_logs]
-    results, base = [], None
+    results, base, prev_cache = [], None, {}
     for j in uniq:
         try:
             text = log_text(fetch(j["url"], cache_dir))
@@ -89,6 +94,12 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         if r.get("rule") == "test-output":
             complete_test_output(src, r, j, text, data, cache_dir)
         lb = lower_bounds_rule(src, j, text, r, pr_packages, sha)
+        info = log_info(text)
+        r["_installed"] = info["installed"]
+        pb = previous_release_bound(src, j, text, info, pr_packages, sha, prev_cache)
+        if pb and not any(x.get("failing") == pb["failing"] and x.get("new") == pb["new"] for x in results + [r]):
+            pb.update(_key=failure_key(j), jobs=merged[group_key(j)], keep=True)
+            results.append(pb)
         r["_key"] = failure_key(j)
         r["jobs"] = merged[group_key(j)]
         results.append(r)
@@ -126,7 +137,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
                                 else "this PR only adds upper bounds to these packages, so their dependencies "
                                      "are the same as on master")
             r["note"] = f"Pre-existing: {r['preexisting']}." + (" " + r["note"] if r.get("note") else "")
-    results += health_summary(new_notes)
+    results += health_summary(new_notes, src)
     for r in results:
         r.pop("_key", None)
         r.pop("_keys", None)
@@ -192,7 +203,92 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     if not match or re.search(match, "(lint)"):
         results += lint_rules(data, src, sha, cache_dir)
     results += skipped_rules(data, src, cache_dir, pr_packages)
+    check_changes(results, src, sha, set(pr_packages))
+    for r in results:
+        r.pop("_installed", None)
     return readable(merge_versions(merge_unrecognised(results)))
+
+
+VERSION_TERM = re.compile(r'(<=|>=|!=|<|>|=)\s*"([^"]+)"')
+
+
+def unsatisfiable(terms):
+    """Do these version constraints (a conjunction) exclude every version?"""
+    for lo_op, lo in terms:
+        if lo_op not in (">=", ">", "="):
+            continue
+        for up_op, up in terms:
+            if up_op not in ("<=", "<", "=") or (lo_op, lo) == (up_op, up):
+                continue
+            c = opam_vcmp(lo, up)
+            if c > 0 or (c == 0 and (lo_op == ">" or up_op == "<")):
+                return True
+    return False
+
+
+def allows(version, terms):
+    ok = {"<": lambda c: c < 0, "<=": lambda c: c <= 0, ">": lambda c: c > 0, ">=": lambda c: c >= 0,
+          "=": lambda c: c == 0, "!=": lambda c: c != 0}
+    return all(ok[op](opam_vcmp(version, v)) for op, v in terms)
+
+
+def lint_codes(text):
+    """The warning and error codes `opam lint` reports for an opam file, or
+    None without opam."""
+    if not shutil.which("opam"):
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "opam")
+        with open(path, "w") as f:
+            f.write(text)
+        p = subprocess.run(["opam", "lint", "--strict", path], capture_output=True, text=True)
+    return {f"{k} {n}" for k, n in re.findall(r"\b(warning|error)\s+(\d+):", p.stdout + p.stderr)}
+
+
+def applied(text, r):
+    """The opam file with the suggested change applied, when it can be placed."""
+    new = (r.get("new") or "").split("   ")[0].strip()
+    if r.get("old") and r["old"] in text:
+        return text.replace(r["old"], new, 1)
+    if re.match(r'"[\w+-]+"', new) and "new line in depends" in (r.get("new") or ""):
+        return re.sub(r"(?m)^(depends:\s*\[)\s*$", lambda m: m.group(1) + "\n  " + new, text, count=1)
+    return None
+
+
+def check_changes(results, src, sha, pr_packages):
+    """Check each suggested change before it is shown: a constraint that no
+    version satisfies, a bound that still allows the version the failing job
+    installed, or a change that `opam lint` objects to (when opam is
+    installed) is moved to the note, as text to check."""
+    for r in results:
+        new = r.get("new") or ""
+        m = re.match(r'\s*"([\w+-]+)"\s*\{([^}]*)\}', new)
+        problem = None
+        if m and "|" not in m.group(2):
+            dep, terms = m.group(1), VERSION_TERM.findall(m.group(2))
+            have = (r.get("_installed") or {}).get(dep)
+            if terms and unsatisfiable(terms):
+                problem = f"no version of {dep} satisfies it"
+            elif (have and terms and "with-test" not in m.group(2) and allows(have, terms)
+                  and r.get("rule") in ("library-api", "previous-release-bound", "lower-bound")):
+                problem = f"it still allows {dep}.{have}, which the failing job installed"
+        failing = r.get("failing") or ""
+        name, ver = split_pkg(failing)
+        if not problem and new and ver and " " not in failing and shutil.which("opam"):
+            text = (src.opam_file(name, ver, sha) if failing in pr_packages else None) or src.opam_file(name, ver)
+            after = applied(text, r) if text else None
+            if after:
+                before_codes, after_codes = lint_codes(text), lint_codes(after)
+                if before_codes is not None and after_codes - before_codes:
+                    problem = f"opam lint reports {', '.join(sorted(after_codes - before_codes))} on the result"
+        if problem:
+            change = new.split("   ")[0].strip()
+            r["note"] = ((r.get("note") or "").rstrip() + f" Possible change, not shown as a diff because "
+                         f"{problem}: `{change}`.").strip()
+            for k in ("new", "old", "alternative"):
+                r.pop(k, None)
+            r["confidence"] = "low"
+            r["checked"] = problem
 
 
 # Rules whose entries for several versions of one package are merged.
