@@ -1110,6 +1110,24 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
     opam_text = src.opam_file(fname, fver, ref) or src.opam_file(fname, fver)
     err = info["error_lines"]
 
+    # opam reinstalls a package at the same version (a "recompile" in the
+    # plan, e.g. after downgrading its dependencies) and removes it first; for
+    # a package with a `remove:` field, the rebuild then runs in an empty
+    # source directory ("No rule to make target", dune building nothing).
+    # Seen with opam 2.6 on lower-bounds jobs; frama-c's own PR passed because
+    # frama-c was pinned there.
+    plan = re.search(rf"(?m)^\s*- recompile\s+{re.escape(fname)}\s+{re.escape(fver)}\s+(?!.*pinned).*$", text)
+    removed = plan and re.search(rf"(?m)^-> removed\s+{re.escape(fname)}\.{re.escape(fver)}\s*$", text[plan.end():])
+    if removed and re.search(r"(?m)^remove:", opam_text or ""):
+        out.update(rule="opam-same-version-reinstall", confidence="medium", fix_in="opam (the CI's opam version)",
+                   error=f"{fname}.{fver} is recompiled at the same version, removed, then fails to "
+                         f"{'install' if info.get('action') == 'installing' else 'build'}",
+                   note=f"opam removes {fname}.{fver} before rebuilding it at the same version, and the "
+                        f"package has a `remove:` field: the rebuild then finds an empty source directory. "
+                        f"This looks like an opam 2.6 issue, not a problem of the packages or their bounds; "
+                        f"the job can be ignored. A pinned {fname} (as in its own PR) does not hit it.")
+        return out
+
     # Install failures: the install command failed (its output is in the block),
     # or files listed for installation were never built because an earlier
     # build command failed without stopping the build.
@@ -1654,6 +1672,7 @@ RULE_TITLES = {
     "system-library-version": "System library version", "rerun": "Jobs to rerun",
     "sources": "Source archive cannot be unpacked", "accept-failures-ignored": "Accepted failure not ignored",
     "unrecognised": "Not recognised", "llm": "LLM diagnosis (unchecked)",
+    "opam-same-version-reinstall": "opam reinstalls at the same version",
 }
 
 
@@ -2237,7 +2256,7 @@ def collapse_systemic(out, threshold=5):
 
 
 # Rules whose explanation does not depend on the platform: reported once.
-PER_PACKAGE_RULES = {"newer-c-compiler", "system-library-version"}
+PER_PACKAGE_RULES = {"newer-c-compiler", "system-library-version", "opam-same-version-reinstall"}
 
 # C/C++ errors that newer compilers introduced: code that built with an older
 # GCC fails on recent distributions (debian-13, fedora, archlinux, ...).

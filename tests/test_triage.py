@@ -99,6 +99,7 @@ CASES = {
         "8f970cb1aaa9971525c904c59e168a4ab5169d00", ["--max", "8"],
         [{"failing": "conf-libclang.22", "rule": "system-library-version", "error": "archlinux has LLVM 23"},
          {"rule": "rerun", "error": "HTTP error code 503"},
+         {"failing": "frama-c.34.0~beta", "rule": "opam-same-version-reinstall"},
          {"not": {"error": "brew"}}]),
     "glfw-accepted-failures": (
         "bac9c3858cff51b3d7c9a6f6990799bbe7582c01", ["--max", "6"],
