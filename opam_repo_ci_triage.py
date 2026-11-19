@@ -28,6 +28,7 @@ Only the Python standard library is used. Pages and logs are cached in
 """
 
 import argparse
+import collections
 import concurrent.futures
 import functools
 import hashlib
@@ -988,7 +989,7 @@ def norm(s):
 
 def constraint_edit(opam_text, dep, op, version):
     """Return (old_line, new_line) for the dependency `dep` in `opam_text`."""
-    m = re.search(r'^(\s*)"' + re.escape(dep) + r'"\s*(\{([^}]*)\})?[^\n]*$', opam_text or "", re.M)
+    m = re.search(r'^([ \t]*)"' + re.escape(dep) + r'"[ \t]*(\{([^}]*)\})?[^\n]*$', opam_text or "", re.M)
     new_term = f'{op} "{version}"'
     if not m:
         return None, f'"{dep}" {{{new_term}}}'
@@ -1008,7 +1009,7 @@ def constraint_edit(opam_text, dep, op, version):
 
 def suggest_for_job(src, job, text, pr_packages, pr_sha):
     info = log_info(text)
-    out = {"variant": job["variant"], "url": job["url"], "kind": job["kind"]}
+    out = {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"]}
     if "failing" not in info:
         out["note"] = "no compile error block (dependency, network or install failure)"
         return out
@@ -1028,6 +1029,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                    dep="ocaml", old=old, new=new, confidence="high")
         return out
 
+    info["pr_packages"] = pr_packages
     lr = log_rules(src, err, fname, opam_text, info, job)
     if lr:
         out.update(lr)
@@ -1179,7 +1181,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match):
         r["_key"] = failure_key(j)
         results.append(r)
     failing_in_log = {r["_key"]: r["failing"] for r in results if r.get("failing")}
-    matrix = matrix_rules(data["jobs"], results, match, set(pr_packages), failing_in_log)
+    matrix = collapse_systemic(matrix_rules(data["jobs"], results, match, set(pr_packages), failing_in_log))
     # A matrix suggestion explains the per-job failures that had no rule.
     explained = {k for m in matrix for k in m.pop("_keys", [])}
     results = [r for r in results
@@ -1414,6 +1416,34 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
     return out
 
 
+def collapse_systemic(out, threshold=5):
+    """The same matrix pattern on many packages is one cause (the PR, a shared
+    dependency or the CI environment), not one fix per package: merge them."""
+    def sig(r):
+        pattern = r["error"].split(": ", 1)[0] if r["rule"] == "platform-matrix" else r["error"]
+        return (r["rule"], re.sub(r"the dependency \S+", "a dependency", pattern), r.get("new", "").split("   ")[0]
+                if r["rule"] == "compiler-matrix" else "")
+    groups = collections.defaultdict(list)
+    for r in out:
+        groups[sig(r)].append(r)
+    merged = []
+    for (rule, pattern, _), rs in groups.items():
+        if len(rs) < threshold:
+            merged += rs
+            continue
+        names = sorted({r["variant"].split(" [", 1)[0] for r in rs})
+        culprits = collections.Counter(r["failing"] for r in rs if r["failing"] not in names)
+        merged.append({
+            "variant": f"{len(rs)} packages [{rule}]", "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else ""),
+            "fix_in": "systemic: the PR itself, a shared dependency, or the CI environment",
+            "rule": rule + "-systemic", "error": f"{len(rs)} packages: {pattern}",
+            "confidence": "medium",
+            "note": (f"shared failing dependencies: {dict(culprits.most_common(3))}; " if culprits else "")
+                    + f"per-package fix if needed: {rs[0].get('new', '')}",
+            "_keys": [k for r in rs for k in r.get("_keys", [])]})
+    return merged
+
+
 def log_rules(src, err, fname, opam_text, info, job):
     """Missing dune language version, tool, library or C header."""
     text = "\n".join(err)
@@ -1426,6 +1456,8 @@ def log_rules(src, err, fname, opam_text, info, job):
         return {"rule": "dune-lang", "error": m.group(0), "dep": "dune", "old": old, "new": new, "confidence": "high"}
     m = (re.search(r'Program "?([\w.+-]+)"? not found in the tree or in PATH', text)
          or re.search(r'"([\w.+-]+)": command not found', text)
+         or re.search(r"([\w.+-]+): command not found", text)
+         or re.search(r"Command not found: ([\w.+-]+)", text)
          or re.search(r"(?m)^\S*?([\w.+-]+): (?:command )?not found$", text))
     if m:
         tool = m.group(1)
@@ -1442,13 +1474,31 @@ def log_rules(src, err, fname, opam_text, info, job):
         else:
             r.update(note=f"no {conf} package: add a depext providing `{tool}` for {platform}", confidence="low")
         return r
+    m = re.search(r"Package (\S+) was not found in the pkg-config search path", text)
+    if m:
+        conf = f"conf-{m.group(1)}"
+        r = {"rule": "missing-pkg-config", "error": m.group(0)}
+        if conf in deps:
+            r.update(note=f"{conf} is a dependency but its pkg-config file is missing on {platform}: depext gap in {conf}",
+                     confidence="medium")
+        elif src.versions(conf):
+            r.update(dep=conf, old=None, new=f'"{conf}"   (new line in depends)', confidence="medium")
+        else:
+            r.update(note=f"add a depext providing {m.group(1)}.pc for {platform}", confidence="low")
+        return r
     m = re.search(r'Library "([\w.-]+)" not found', text) or re.search(r"Package `([\w.-]+)' not found", text)
     if m:
         lib = m.group(1)
         pkg = lib.split(".", 1)[0]
         in_tests = bool(re.search(r"(^|/)tests?/", text))
         r = {"rule": "missing-library", "error": m.group(0)}
-        if pkg in deps or pkg == fname:
+        siblings = {split_pkg(p)[0] for p in (info.get("pr_packages") or [])}
+        if pkg in siblings and pkg != fname:
+            r.update(note=f"`{lib}` comes from {pkg}, another package of this PR: the tests of {fname} use a sibling "
+                          f"package; restrict them (dune `(package ...)` on the test stanza, or no `@runtest` under "
+                          f"`-p {fname}`) rather than adding a dependency, which would create a cycle",
+                     confidence="medium")
+        elif pkg in deps or pkg == fname:
             r.update(note=f"{pkg} is already a dependency: `{lib}` may only exist in other versions of {pkg}, "
                           f"or be an optional sub-library", confidence="low")
         elif src.versions(pkg):
@@ -1618,7 +1668,8 @@ def render_suggestions(results):
         print("=" * 100)
         print(f"{r['variant']}")
         if r.get("failing"):
-            print(f"  failing package : {r['failing']}   fix goes in: {r.get('fix_in')}")
+            print(f"  failing package : {r['failing']}   fix goes in: {r.get('fix_in')}"
+                  + ("   (experimental platform: does not block)" if r.get("experimental") else ""))
         if r.get("error"):
             print(f"  error           : {r['error']}")
         if r.get("source"):
