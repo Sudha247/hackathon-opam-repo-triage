@@ -17,6 +17,7 @@ import argparse
 import collections
 import datetime
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -144,6 +145,12 @@ def save_state(path, prs):
     os.replace(path + ".tmp", path)
 
 
+def llm_available():
+    """The LLM fallback runs only with an API key and the anthropic package;
+    without them the page is built from the rules alone."""
+    return bool(os.environ.get("ANTHROPIC_API_KEY")) and importlib.util.find_spec("anthropic") is not None
+
+
 def tool_version():
     with open(TOOL, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()[:12]
@@ -159,6 +166,10 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="per-PR timeout of the tool, in seconds")
     ap.add_argument("--time-budget", type=int, default=0,
                     help="stop starting new analyses after this many seconds (0: no limit)")
+    ap.add_argument("--llm-max", type=int, default=2,
+                    help="LLM calls per PR at most, for failures no rule recognises (needs ANTHROPIC_API_KEY)")
+    ap.add_argument("--llm-budget", type=int, default=40,
+                    help="LLM calls per run at most; PRs left without them get them in a later run")
     args = ap.parse_args()
     start = time.monotonic()
 
@@ -180,6 +191,11 @@ def main():
     if args.limit is not None:
         failing = failing[:args.limit]
 
+    llm = llm_available()
+    llm_left = args.llm_budget if llm else 0
+    print("LLM fallback: " + (f"on (at most {args.llm_budget} calls)" if llm else
+                              "off (no ANTHROPIC_API_KEY, or the anthropic package is not installed)"),
+          file=sys.stderr)
     version = tool_version()
     new_state, stats = {}, collections.Counter()
     net_total = collections.Counter()
@@ -190,6 +206,10 @@ def main():
         entry.update({k: p[k] for k in ("number", "title", "url", "draft", "updated", "sha", "author")})
         entry["ci_url"] = p["ci_url"] or BASE + p["sha"]
         same = prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
+        # With the LLM on, a PR analysed without it (key added later, or the
+        # run's budget spent) is analysed again; the logs come from the cache.
+        if same and llm and not prev.get("llm"):
+            same = False
         if same and (prev.get("result") is not None or prev.get("attempts", 0) >= MAX_ATTEMPTS):
             stats["unchanged"] += 1
             new_state[key] = entry
@@ -204,11 +224,15 @@ def main():
             continue
         t0 = time.monotonic()
         attempts = (prev.get("attempts", 0) if same else 0) + 1
+        use_llm = llm_left > 0
+        extra = ["--llm", "--llm-max", str(min(args.llm_max, llm_left))] if use_llm else []
         result, err, net = run_tool(["suggest", p["sha"], "--json", "--max", str(args.max),
-                                     "--cache-dir", args.cache_dir], args.timeout)
+                                     "--cache-dir", args.cache_dir] + extra, args.timeout)
         net_total.update(net)
+        llm_left -= net.get("llm", 0)
         summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
+                      "llm": use_llm,
                       "analysed_at": now(), "seconds": round(time.monotonic() - t0, 1),
                       "jobs": jobs_overview(summary) if summary else None})
         entry.pop("pending", None)
@@ -225,6 +249,7 @@ def main():
     data = {"generated": now(), "repository": f"{OWNER}/{NAME}", "open_prs": len(prs),
             "failing_prs": len([p for p in prs if p["ci_state"] == "FAILURE"]),
             "limit": args.limit, "max_failures_per_pr": args.max,
+            "llm": {"enabled": llm, "calls": net_total.get("llm", 0)},
             "run": {"github_api_calls": list_calls, "tool_requests": dict(net_total), **stats},
             "prs": sorted(new_state.values(), key=lambda e: e["updated"], reverse=True)}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)

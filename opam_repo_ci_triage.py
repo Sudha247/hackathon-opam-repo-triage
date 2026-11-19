@@ -1104,6 +1104,11 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         out.update(rule="transient", error=f"{m.group(1)} of the CI tool {m.group(2)}",
                    note="The CI tool crashed, not the package. Rerun the job.")
         return out
+    m = re.search(r"runc run failed: [^\n]{0,120}", text)
+    if m:
+        out.update(rule="transient", error="the CI could not start the build container",
+                   note="A CI infrastructure failure (the container did not start). Rerun the job.")
+        return out
     m = re.search(r"HTTP error code (5\d\d|429)|Could not resolve host|Connection (?:reset|timed out)", text)
     if "failing" not in info and m:
         out.update(rule="transient", error=m.group(0), note="Network error. Rerun the job.")
@@ -1448,6 +1453,12 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
     return out
 
 
+# LLM changes shown only as text: version constraints (bounds the model picks
+# from the installed version, not from where the API changed) and depexts
+# (distribution package names it cannot check).
+LLM_UNSAFE_CHANGE = re.compile(r'(?:[<>]=?|!?=)\s*"v?\d|depexts?\s*:|\{[^}]*\bos-(distribution|family)')
+
+
 def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run):
     jobs = {j["variant"]: j for j in data["jobs"]}
     def unexplained(r):
@@ -1476,7 +1487,10 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
             r["llm_prompt"] = res["llm_prompt"]
             continue
         if "llm_error" in res:
-            r["note"] = (r.get("note") or "") + f"; LLM: {res['llm_error']}"
+            # A missing package, a bad key or an API error: the failure stays
+            # unrecognised; the error is logged, not shown in the suggestion.
+            r["llm_error"] = res["llm_error"]
+            print(f"note: LLM not used for {r['variant']}: {res['llm_error']}", file=sys.stderr)
             continue
         pkg = res.get("package") or r.get("failing")
         fix_in = {"this-pr": "this PR" if pkg in pr_packages else f"{pkg} (other package)",
@@ -1489,6 +1503,10 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
             continue
         res, pkg, fix_in = answers[sig_of(r)]
         pre = f"Pre-existing: {r['preexisting']}. " if r.get("preexisting") else ""
+        # The model blames the CI too easily (it said "rerun" for a missing
+        # library): only say so when the job list shows a passing rerun.
+        if res["fix_in"] == "ci":
+            fix_in = "unknown"
         verify = re.sub(r"^(Check|Verify)( that)?:?\s*", "", res["verify"].strip())
         verify = verify[:1].upper() + verify[1:]
         r.update(rule="llm", failing=pkg, fix_in=fix_in, confidence=res["confidence"],
@@ -1496,8 +1514,13 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
                  note=pre + (f"{res['diagnosis']} " if r.get("error") else "") + f"To check: {verify}")
         if not r.get("error"):
             r["error"] = res["diagnosis"]
-        if res.get("change_new"):
-            r.update(old=res.get("change_old") or None, new=res["change_new"])
+        change = res.get("change_new")
+        if change and LLM_UNSAFE_CHANGE.search(change):
+            # Version bounds and depext package names were the model's wrong
+            # changes in the evaluation: shown as text to check, not as a diff.
+            r["note"] += f" Possible change, not checked: `{change.strip()}`."
+        elif change:
+            r.update(old=res.get("change_old") or None, new=change)
     if len(seen) < len({re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
                         for r in todo}):
         print(f"note: LLM used on {limit} unexplained failures (use --llm-max for more)", file=sys.stderr)

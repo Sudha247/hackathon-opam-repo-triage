@@ -157,7 +157,12 @@ def render_suggestion(r, sha=None):
             out.append(f'<details class="jobs"><summary>Same failure on {what}</summary>'
                        f'<ul>{"".join(f"<li>{job_link(sha, v)}</li>" for v in others)}</ul></details>')
     out.append("</div>")
-    return "\n".join(out)
+    html_ = "\n".join(out)
+    if rule == "llm" and str(r.get("confidence") or "").startswith("low"):
+        # Low-confidence LLM answers were never right in the evaluation: folded.
+        html_ = (f'<details class="hint"><summary>Low-confidence LLM hint'
+                 f'{": " + e(r["failing"]) if r.get("failing") else ""}</summary>{html_}</details>')
+    return html_
 
 
 def render_pr(pr):
@@ -300,6 +305,7 @@ pre.err{max-height:16em;overflow-y:auto}
 .alt,.cm{color:var(--mut)}
 .note{font-size:.88rem;overflow-wrap:anywhere}
 .lead{max-width:70ch}.pkg{overflow-wrap:anywhere}
+details.hint>summary{cursor:pointer;color:var(--mut);font-size:.85rem;margin:8px 0}
 ul.jobs{margin:4px 0;padding-left:20px;font-size:.85rem}
 dl.help dt{font-weight:600;margin-top:.6em}dl.help dd{margin:0 0 0 1.2em;font-size:.9rem;max-width:75ch}
 details.jobs{color:var(--mut);font-size:.85rem;overflow-wrap:anywhere}
@@ -361,7 +367,10 @@ def render(data):
         f'For each one, the failures are read from the CI logs and matched against known causes, with a '
         f'suggested change when one can be derived. Nothing is rebuilt, so check a suggestion before '
         f'applying it.</p>'
-        f'<p class="meta">Updated {e(gen[:16].replace("T", " "))} UTC. Up to '
+        + (f'<p class="meta">Failures that no rule recognises get a diagnosis from an LLM (Claude), shown as '
+           f'"LLM diagnosis (unchecked)"; {e((data.get("llm") or {}).get("calls", 0))} new LLM calls in this '
+           f'update.</p>' if (data.get("llm") or {}).get("enabled") else "")
+        + f'<p class="meta">Updated {e(gen[:16].replace("T", " "))} UTC. Up to '
         f'{e(data.get("max_failures_per_pr"))} different failures are analysed per PR. In this update: '
         f'{e(run.get("analysed", 0))} PRs analysed, {e(run.get("unchanged", 0))} unchanged since the last one.'
         f'</p>',
@@ -392,6 +401,10 @@ day10 builder (the jobs named <code>day10,…</code>). When a job fails only on 
 builder passes on the same system, the problem is in the CI setup, not in the package.</dd>
 <dt>Pre-existing</dt><dd>The failure would happen without the PR: it also failed in the CI of the previous
 release, or the PR only adds an upper bound to that package.</dd>
+<dt>LLM diagnosis (unchecked)</dt><dd>For failures that no rule recognises, an LLM reads the log and
+suggests a cause. These answers are not checked: in a test on 25 of them, 15 were right, 7 plausible and 3
+wrong. Changes to version bounds or depexts are shown as text to check, and low-confidence answers are
+folded.</dd>
 <dt>Experimental platform</dt><dd>FreeBSD, macOS and some other jobs are experimental: their failures do not
 block a PR.</dd>
 </dl>

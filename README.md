@@ -141,6 +141,16 @@ publishes the results on the repository's GitHub Pages site:
    `state/prs.json`; closed PRs, and PRs no longer failing, are dropped. It
    writes `site/data.json`. `--time-budget` stops starting new PRs; the next
    run continues.
+
+   With an `ANTHROPIC_API_KEY` repository secret, failures that no rule
+   recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most
+   `--llm-budget 40` calls per run; answers are cached, so only new failures
+   cost anything). Without the secret, or if the API fails, the page is built
+   from the rules alone. On the page, LLM answers are labelled "unchecked",
+   version bounds and depexts they propose are shown as text to check, and
+   low-confidence answers are folded: in an evaluation on 25 answers, 15 were
+   right, 7 plausible, 1 wrong and 2 harmful, all the harmful ones being
+   version bounds.
 2. `scripts/render_page.py` turns it into `site/index.html`: one static page,
    no external resources, with filters (fix for the PR, blocked by other
    packages, CI only), the suggestions of each PR by class, the `review`

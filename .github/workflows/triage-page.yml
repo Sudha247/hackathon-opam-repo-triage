@@ -20,6 +20,12 @@ concurrency:
 jobs:
   triage:
     runs-on: ubuntu-latest
+    env:
+      # Optional: with this repository secret set, failures that no rule
+      # recognises get an LLM diagnosis (costs API tokens; at most
+      # --llm-budget calls per run, and answers are cached). Without it the
+      # page is built from the rules alone.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     timeout-minutes: 55
     environment:
       name: github-pages
@@ -50,15 +56,15 @@ jobs:
             du -sh .opam-ci-cache
           fi
 
+      - name: Install the Anthropic SDK (only with an API key)
+        if: env.ANTHROPIC_API_KEY != ''
+        run: pip install anthropic
+
       - name: Analyse failing PRs
         id: triage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional LLM fallback for failures no rule explains: it needs an
-          # ANTHROPIC_API_KEY secret, `pip install anthropic`, and passing --llm
-          # to `suggest` in scripts/triage_open_prs.py (costs API tokens).
-          # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python3 scripts/triage_open_prs.py --time-budget 2100
+        run: python3 scripts/triage_open_prs.py --time-budget 2100 --llm-budget 40
 
       - name: Save cache and state
         if: always() && steps.triage.outputs.changed != 'false'
