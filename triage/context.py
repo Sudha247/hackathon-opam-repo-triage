@@ -34,6 +34,7 @@ from .ci import (  # noqa: F401
     opam_vcmp,
     parse_commit_page,
     split_pkg,
+    failing_dep,
 )
 from .sources import (  # noqa: F401
     constraint_edit,
@@ -135,10 +136,14 @@ def health_summary(notes, src=None):
         # bound on the new release in the reverse dependency, in the same PR.
         targets = sorted({m.group(1) for _, v in xs for m in [re.search(r",([^,]+),revdeps,", v)] if m})
         target = targets[0] if targets else None
+        via = sorted((notes.get("via") or {}).get(rd, ()))
         r = {"variant": f"{rd}, reverse dependency" + (f" of {target}" if target else ""),
              "rule": "health-check-new", "fix_in": "this PR", "confidence": "medium", "failing": rd,
-             "error": f"{rd} builds on master in opam-health-check{when} but fails here "
-                      f"(OCaml {', '.join(sorted({v for v, _ in xs}))})",
+             "error": (f"{rd} fails here, so {len(via)} reverse dependenc{'ies' if len(via) > 1 else 'y'} that "
+                       f"build on master in opam-health-check{when} fail too ({', '.join(via[:6])}"
+                       f"{' …' if len(via) > 6 else ''})" if via else
+                       f"{rd} builds on master in opam-health-check{when} but fails here")
+                      + f" (OCaml {', '.join(sorted({v for v, _ in xs}))})",
              "note": "Probably broken by this PR: look at it first. opam-health-check builds the newest "
                      "version of each package, without tests.",
              "jobs": sorted({v for _, v in xs})}
@@ -249,9 +254,15 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
                                          f"({when})")
             if status == "good" and not is_newest(j["target"]):
                 continue
+            # A reverse dependency failing because one of its dependencies
+            # failed: the package to bound is that dependency (awa 0.7.0 broke
+            # git-mirage, and 16 packages failed through it).
+            who = (failing_dep(j["reason"]) if j["category"] == "dependency" else None) or rd
             if notes is not None and status in ("bad", "partial", "good"):
-                notes.setdefault("health", {}).setdefault(status, {}).setdefault(rd, set()).add(
+                notes.setdefault("health", {}).setdefault(status, {}).setdefault(who, set()).add(
                     (d["ocaml"], j["variant"]))
+                if who != rd:
+                    notes.setdefault("via", {}).setdefault(who, set()).add(rd)
                 notes.setdefault("run", hc[2])
             if status == "good" and notes is not None:
                 notes.setdefault("new", {})[failure_key(j)] = (

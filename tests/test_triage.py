@@ -178,15 +178,23 @@ CASES = {
     "miaou-lower-bound-candidates": (
         "a8e39569b4d59572ae01a7800cf55dcd9d854d1e", ["--max", "1", "--match", "5.2,miaou-core.0.6.0,lower"],
         [{"failing": "miaou-registry.0.6.0", "rule": "lower-bound", "candidate": '"dune" {>= "3.24.2"}'}]),
-    # A bound the previous release has on master and the new release lacks.
-    "odnnr-previous-release-bound": (
+    # The previous release bounds dolog, and dolog 6 is installed, but the job
+    # fails in an R script that downloads keras: no previous-release bound.
+    "odnnr-previous-release-unrelated": (
         "6b62b33f94fa0d7f64aa4da5cb0c75e78fa3b3ee", ["--max", "1", "--match", "^compilers,4.11,odnnr.2.0.3$"],
-        [{"failing": "odnnr.2.0.3", "rule": "previous-release-bound", "new": '"dolog" {>= "4.0.0" & < "5.0.0"}'}]),
+        [{"not": {"rule": "previous-release-bound"}}]),
     # Platforms other versions of the package already accept failures on.
     "ocaml-r-accepted-elsewhere": (
         "e77d15c9d7a33bd5ce6b889bcaff4fd2ee733e9c", ["--max", "6"],
         [{"failing": "ocaml-r.0.7.0", "rule": "platform-matrix",
           "note": "Other versions already accept failures there: ocaml-r.0.4.0"}]),
+    # A new release breaking reverse dependencies through another one: the
+    # bound goes on the package that actually breaks (git-mirage), as the
+    # author did, not on the 14 packages that fail through it.
+    "awa-revdeps-through-dependency": (
+        "b00f7d80717a0cc3f6d2777cb5e55331607d53d3", ["--max", "8"],
+        [{"rule": "health-check-new", "failing": "git-mirage.3.18.0", "new": '< "0.7.0"'},
+         {"not": {"rule": "health-check-new", "failing": "diffast.0.4"}}]),
 }
 
 

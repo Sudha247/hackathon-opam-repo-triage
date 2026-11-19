@@ -817,6 +817,22 @@ def upper_bounds(opam_text):
     return out
 
 
+def error_mentions(info, dep):
+    """Does the error itself (not the command that failed) name the package
+    `dep`, or a module of it?"""
+    lines = [l for l in info.get("error_lines", [])
+             if not re.match(r"\s*(=== ERROR|context |path |command |exit-code |env-file |output-file |## output|"
+                             r"\(cd _build|\[\.\.\.)", l) and "dune build" not in l]
+    text = "\n".join(lines)
+    if dep == "dune":       # named in many errors ("your dune file"): only a dune version problem counts
+        return bool(re.search(r"dune language|lang dune|dune-project|version of dune", text, re.I))
+    text = re.sub(r'File "[^"]*"', "", text)                       # dune's locations: `File "src/dune", line 3`
+    text = re.sub(r"(?:[\w.+-]*/)+[\w.+-]+", "", text)              # paths
+    words = {norm(w) for w in re.findall(r"[A-Za-z][\w-]+", text)}
+    d = norm(dep)
+    return d in words or (len(d) >= 4 and any(w.startswith(d) for w in words))
+
+
 def previous_release_bound(src, job, text, info, pr_packages, pr_sha, cache):
     """A new release fails with a dependency version that the previous
     release excludes on master (maintainers often add bounds to old versions
@@ -847,7 +863,7 @@ def previous_release_bound(src, job, text, info, pr_packages, pr_sha, cache):
         if any(v in mentioned for _, v in ups) or any(opam_vcmp(lo, v) >= 0 for lo in lowers for _, v in ups):
             continue    # the new release changed this constraint on purpose (e.g. needs a newer API)
         have = info["installed"].get(dep)
-        if not have:
+        if not have or not error_mentions(info, dep):
             continue
         excluded = [(op, v) for op, v in ups if (opam_vcmp(have, v) >= 0 if op == "<" else opam_vcmp(have, v) > 0)]
         if not excluded:
