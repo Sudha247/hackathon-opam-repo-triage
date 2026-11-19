@@ -88,6 +88,45 @@ CASES = {
     "dns-certify-bound": (
         "d1951c34e014d331928d961b53113a61c93b17fe", ["--max", "6"],
         [{"failing": "dns-certify.10.2.7", "new": '"ca-certs-nss" {>= "3.113.1"}'}]),
+    "optint-revdeps": (
+        "83910a8f6a20733de90fcdd822827279971ac3ba", ["--max", "12"],
+        [{"failing": "topojsone.0.1.0", "rule": "test-output-ocaml", "new": '< "5.5" | !with-test'},
+         {"rule": "rerun", "error": "Segmentation fault of the CI tool day10-install"},
+         {"rule": "rerun", "error": "7 cancelled"},
+         {"failing": "solo5-bindings-hvt.0.6.9", "rule": "newer-c-compiler", "note": "-Werror"},
+         {"failing": "tar-eio.3.5.0", "rule": "builder-specific"}]),
+    "frama-clang-llvm": (
+        "8f970cb1aaa9971525c904c59e168a4ab5169d00", ["--max", "8"],
+        [{"failing": "conf-libclang.22", "rule": "system-library-version", "error": "archlinux has LLVM 23"},
+         {"rule": "rerun", "error": "HTTP error code 503"},
+         {"not": {"error": "brew"}}]),
+    "glfw-accepted-failures": (
+        "bac9c3858cff51b3d7c9a6f6990799bbe7582c01", ["--max", "6"],
+        [{"failing": "conf-glfw3.3", "rule": "accept-failures-ignored", "note": "cygwin"},
+         {"failing": "imguiml.v1.90.6", "rule": "builder-specific"},
+         {"not": {"new": 'os != "win32"'}}]),
+    "irmin-watcher-bound-only": (
+        "79e6e2140ee3e82c58d607f1e294e74b3123089a", ["--max", "8"],
+        [{"failing": "slipshow.0.2.0", "note": 'Pre-existing: this PR only adds irmin-watcher {< "0.6.0"}'},
+         {"failing": "irmin-watcher.0.6.0", "rule": "platform-matrix"},
+         {"not": {"failing": "irmin-watcher.0.6.0", "note": "Pre-existing"}},
+         {"rule": "rerun", "error": "9 cancelled"}]),
+    "goblint-cil-baseline": (
+        "eafb2a69786279b98b31f3e5cd8a62ce432cf343", ["--max", "6"],
+        [{"rule": "platform-matrix", "note": "goblint-cil.2.2.0 failed the same job in the CI of #31249"},
+         {"rule": "accept-failures-ignored", "note": "freebsd-15.1"}]),
+    "aslref-sources": (
+        "5a2833e2b7ed465175d6685cd3de0960d38cbabc", ["--max", "4"],
+        [{"rule": "sources", "error": "tar cannot create the symlink", "note": "msys2"}]),
+    "melange-npm-lint": (
+        "4615b601a5d1860114fb109cff54ec33bec76e27", ["--max", "2"],
+        [{"rule": "lint", "note": "npm-version"}]),
+    "binaryen-cstdint": (
+        "6818539645347aa49316df894e8160a9db5a7789", ["--max", "2", "--match", "binaryen"],
+        [{"failing": "libbinaryen.109.0.1", "rule": "newer-c-compiler", "note": "<cstdint>"}]),
+    "bun-afl-implicit-int": (
+        "eb1089be5f315d8d5f5d749ad06f42bd92ae5b4b", ["--max", "2", "--match", "revdeps,bun"],
+        [{"failing": "afl.2.52b", "rule": "newer-c-compiler", "note": "-Wimplicit-int"}]),
 }
 
 
@@ -140,6 +179,10 @@ def make_test(case):
         self.assertIn("offline cache misses: 0", out.stderr, out.stderr[-1500:])
         sugg = json.loads(out.stdout)["suggestions"]
         for exp in CASES[case][2]:
+            if "not" in exp:
+                bad = [s for s in sugg if matches(s, exp["not"])]
+                self.assertFalse(bad, f"unexpected suggestion matching {exp['not']}: {bad[:1]}")
+                continue
             self.assertTrue(any(matches(s, exp) for s in sugg),
                             f"no suggestion matching {exp}; got:\n" + "\n".join(
                                 f"  {s.get('failing')} [{s.get('rule')}] {s.get('new') or s.get('note')}" for s in sugg))

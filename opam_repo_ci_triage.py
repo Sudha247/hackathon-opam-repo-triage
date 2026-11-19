@@ -1056,9 +1056,24 @@ def constraint_edit(opam_text, dep, op, version):
     return old.strip(), f'"{dep}" {{{" & ".join(terms)}}}'
 
 
+TOPLEVEL_LINE = re.compile(r"^[-+]\s*(val [\w'.]+ :|- : |type |module |exception |Line \d+, characters "
+                           r"|Characters \d+-\d+|Error: |Warning \d+)")
+
+
+def toplevel_diff(err):
+    """Changed lines of a test diff, if most of them are OCaml toplevel output
+    (mdx `# expr;;` answers, types, error locations)."""
+    lines = [l for l in err if re.match(r"^[-+](?![-+]{2})", l)]
+    hits = [l for l in lines if TOPLEVEL_LINE.match(l)]
+    return hits if lines and len(hits) * 2 >= len(lines) else None
+
+
 def suggest_for_job(src, job, text, pr_packages, pr_sha):
     info = log_info(text)
+    dd = job_dims(job)
     out = {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"]}
+    if job["platform"][:1] == ["day10"]:
+        out["_distros"] = [dd["distro"] or dd["os"]]   # see accepted_but_failing
     m = re.search(r"These packages are still missing: (.+)", text)
     if "failing" not in info and m:
         names = m.group(1).split()
@@ -1074,6 +1089,15 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                    confidence="medium",
                    note="wrong package name for this distribution, a package needing an extra repository "
                         "(EPEL, CRB, ports), or one that does not exist there")
+        return out
+    m = re.search(r"(Segmentation fault|Bus error|Illegal instruction)\s+(day10[\w-]*|obuilder[\w-]*)", text)
+    if m:
+        out.update(rule="transient", error=f"{m.group(1)} of the CI tool {m.group(2)}",
+                   note="the CI tool crashed, not the package: rerun the job")
+        return out
+    m = re.search(r"HTTP error code (5\d\d|429)|Could not resolve host|Connection (?:reset|timed out)", text)
+    if "failing" not in info and m:
+        out.update(rule="transient", error=m.group(0), note="network failure: rerun the job")
         return out
     if "failing" not in info:
         out["note"] = "no ERROR block in the log (dependency, network or solver failure)"
@@ -1115,12 +1139,19 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         return out
 
     info["pr_packages"] = pr_packages
+    info["_text"] = text
     lr = log_rules(src, err, fname, opam_text, info, job)
     if lr:
         out.update(lr)
         return out
 
-    unb = find_unbound(err)
+    # In a test diff (cram/mdx), errors are part of the expected or actual
+    # output: only the lines before the diff are compiler errors.
+    pre_diff = err
+    if info["test_diff"]:
+        cut = next((i for i, l in enumerate(err) if re.match(r"(diff --git|--- |\S*git --no-pager diff)", l)), len(err))
+        pre_diff = err[:cut]
+    unb = find_unbound(pre_diff)
     if unb:
         kind, mods, ident = unb
         out["error"] = f"Unbound {kind} {'.'.join(mods + [ident])}"
@@ -1227,6 +1258,26 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         return out
 
     if info["test_diff"]:
+        top = toplevel_diff(err)
+        if top and info.get("ocaml"):
+            # Expected toplevel output (types, values, error locations) printed
+            # by an older compiler: the test depends on the OCaml version.
+            mm = ".".join(info["ocaml"].split(".")[:2])
+            m = re.search(r'^[ \t]*"ocaml"[ \t]*(?:\{([^}]*)\})?[^\n]*$', opam_text or "", re.M)
+            term = f'< "{mm}" | !with-test'
+            if m and m.group(1) and m.group(1).strip():
+                new = f'"ocaml" {{{m.group(1).strip()} & ({term})}}'
+            else:
+                new = f'"ocaml" {{{term}}}'
+            out.update(rule="test-output-ocaml", dep="ocaml", confidence="medium",
+                       error=f"toplevel output in the tests differs on OCaml {info['ocaml']}: {top[0][:100]}",
+                       old=m.group(0).strip() if m else None,
+                       new=new + f"   (keeps the package installable, disables its tests on OCaml >= {mm})",
+                       alternative=f'"@runtest" {{with-test & ocaml:version < "{mm}"}}   (on the test command)',
+                       note=f"{mm} is the oldest failing OCaml version in this run: the change may come from an "
+                            f"earlier release (e.g. 5.4 prints shorter type paths); accepting the new output "
+                            f"upstream is the real fix")
+            return out
         out["rule"] = "test-output"
         out["error"] = "test output differs (cram/mdx)"
         return out   # completed by the caller with a passing job's versions
@@ -1409,7 +1460,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
                 else failure_key(j))
     # `merged` keeps every job behind each analysed one, so the report can say how many it stands for.
     merged, uniq = {}, []
-    for j in sorted(sel, key=lambda j: j["experimental"]):
+    # Classic-builder logs first: they show the depext installation (versions).
+    for j in sorted(sel, key=lambda j: (j["experimental"], j["platform"][:1] == ["day10"])):
         key = group_key(j)
         if key not in merged:
             merged[key] = []
@@ -1418,7 +1470,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     if len(uniq) > max_logs:
         print(f"note: {len(uniq)} distinct failures, analysing the first {max_logs} (use --max)", file=sys.stderr)
         uniq = uniq[:max_logs]
-    results = []
+    results, base = [], None
     for j in uniq:
         try:
             text = log_text(fetch(j["url"], cache_dir))
@@ -1426,6 +1478,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
             results.append({"variant": j["variant"], "note": f"log unavailable: {e}",
                             "jobs": merged[group_key(j)]})
             continue
+        base = base or excerpt(text).get("base")      # the master commit the PR was merged with
         r = suggest_for_job(src, j, text, pr_packages, sha)
         if r.get("rule") == "test-output":
             complete_test_output(src, r, j, text, data, cache_dir)
@@ -1433,14 +1486,32 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         r["jobs"] = merged[group_key(j)]
         results.append(r)
     failing_in_log = {r["_key"]: r["failing"] for r in results if r.get("failing")}
-    matrix = collapse_systemic(matrix_rules(data["jobs"], results, match, set(pr_packages), failing_in_log))
+    # Jobs that failed because of the CI (tool crash, network) say nothing
+    # about the package: leave them out of the pass/fail patterns.
+    transient = {r["_key"] for r in results if r.get("rule") == "transient"}
+    jobs = [j for j in data["jobs"] if not (j["status"] == "failed" and failure_key(j) in transient)]
+    matrix = collapse_systemic(matrix_rules(jobs, results, match, set(pr_packages), failing_in_log))
     # A matrix suggestion explains the per-job failures that had no rule.
-    explained = {k for m in matrix for k in m.pop("_keys", [])}
+    explained = {k for m in matrix for k in m.get("_keys", [])}
     results = [r for r in results
-               if not (r.get("_key") in explained and not r.get("new") and not r.get("candidates"))]
+               if r.get("keep") or not (r.get("_key") in explained and not r.get("new") and not r.get("candidates"))]
     results += matrix
+    accepted_but_failing(results, src, sha, set(pr_packages))
+    pre = preexisting_failures(data, sha, base, cache_dir)
+    for r in results:
+        keys = r.get("_keys") or ([r["_key"]] if r.get("_key") else [])
+        why = {pre.get(k) for k in keys}
+        if keys and None not in why:
+            r["preexisting"] = (sorted(why)[0] if len(why) == 1 or not all(w.startswith("this PR only adds")
+                                                                           for w in why)
+                                else "this PR only adds upper bounds to these packages, so their dependencies "
+                                     "are the same as on master")
+            r["note"] = f"Pre-existing: {r['preexisting']}." + (" " + r["note"] if r.get("note") else "")
     for r in results:
         r.pop("_key", None)
+        r.pop("_keys", None)
+        r.pop("_distros", None)
+        r.pop("keep", None)
     if llm:
         data["_sha"] = sha
         apply_llm(results, data, src, cache_dir, pr_packages, llm["limit"], llm["model"], llm["dry_run"])
@@ -1448,7 +1519,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     # Old releases failing on newer platforms: maintainers mark them
     # `x-maintained: false` so that the next archiving round removes them.
     for r in results:
-        if r.get("rule") not in ("platform-matrix", "compiler-matrix", "missing-system-package", "missing-header"):
+        if r.get("rule") not in ("platform-matrix", "compiler-matrix", "missing-system-package", "missing-header",
+                                 "newer-c-compiler"):
             continue
         name, ver = split_pkg(r.get("failing") or "")
         vs = src.versions(name) if name and ver else []
@@ -1460,18 +1532,32 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     # packages is reported once.
     seen, unique = {}, []
     for r in results:
-        k = (r.get("failing"), (r.get("new") or "").split("   ")[0]) if r.get("new") else None
+        plat = r.pop("_plat", None)
+        k = ((r.get("failing"), (r.get("new") or "").split("   ")[0]) if r.get("new")
+             else (r.get("failing"), r["rule"], (r.get("note") or "").replace(plat or "\0", "{P}"))
+             if r.get("rule") in PER_PACKAGE_RULES else None)
         if k and k in seen:
-            seen[k].setdefault("also_seen_on", []).append(r["variant"])
-            seen[k]["jobs"] = merge_jobs(seen[k].get("jobs") or [seen[k]["variant"]],
-                                         r.get("jobs") or [r["variant"]])
+            first = seen[k]
+            first["jobs"] = merge_jobs(first.get("jobs") or [first["variant"]], r.get("jobs") or [r["variant"]])
+            if plat and plat not in first.get("_plats", []):
+                # The same cause on another platform: one entry listing them all.
+                first["_plats"].append(plat)
+                head, _, tail = r["error"].partition("; ")
+                if r["error"] not in first["error"]:
+                    first["error"] += (", " + tail) if tail and first["error"].startswith(head + "; ") \
+                        else "; " + r["error"]
+            first.setdefault("also_seen_on", []).append(r["variant"])
             continue
+        if k and plat:
+            r["_plats"], r["_note"] = [plat], k[2]
         if k:
             seen[k] = r
         unique.append(r)
+    for r in unique:
+        plats, tmpl = r.pop("_plats", None), r.pop("_note", None)
+        if plats and len(plats) > 1:
+            r["note"] = tmpl.replace("{P}", ", ".join(plats))
     results = unique
-    base = next((log_info(log_text(fetch(j["url"], cache_dir))).get("base")
-                 for j in uniq[:1]), None) if uniq else None
     relaxed = relaxed_available_rules(data, sha, base, cache_dir, pr_packages)
     if relaxed:
         cause = ", ".join(r["failing"] for r in relaxed)
@@ -1481,10 +1567,167 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
                 r["note"] = (f"these platforms are tried because this PR relaxed `available` of {cause} "
                              f"(see that suggestion); " + (r.get("note") or ""))
     results += relaxed
+    results = rerun_rules(data, results, match)
+    results += sources_rules(data, cache_dir, match)
     if not match or re.search(match, "(lint)"):
         results += lint_rules(data, src, sha, cache_dir)
     results += skipped_rules(data, src, cache_dir, pr_packages)
     return results
+
+
+def accepted_platforms(opam_text):
+    """The platforms listed in x-ci-accept-failures."""
+    m = re.search(r"x-ci-accept-failures:\s*\[([^\]]*)\]", opam_text or "")
+    return set(re.findall(r'"([^"]+)"', re.sub(r"#[^\n]*", "", m.group(1)))) if m else set()
+
+
+def accepted_but_failing(results, src, sha, pr_packages):
+    """A failure on a platform the failing package already lists in
+    x-ci-accept-failures: the classic builder ignores those, the day10 builder
+    does not (cygwin, freebsd): nothing to change in the package."""
+    for r in results:
+        ds, owner = r.get("_distros"), r.get("failing") or ""
+        name, ver = split_pkg(owner)
+        if not ds or not ver or " " in owner or r.get("rule") in ("rerun", "lint", "transient"):
+            continue
+        text = (src.opam_file(name, ver, sha) if owner in pr_packages else None) or src.opam_file(name, ver)
+        if set(ds) <= accepted_platforms(text):
+            for k in ("new", "old", "alternative", "candidates"):
+                r.pop(k, None)
+            r.update(rule="accept-failures-ignored", fix_in="the CI environment (day10 builder)", confidence="high",
+                     note=f"{owner} already lists {', '.join(ds)} in x-ci-accept-failures, which the day10 "
+                          f"builder does not honour there: nothing to change in the package")
+
+
+def bound_only_changes(base, sha, cache_dir):
+    """{"name.version": 'dep {< "V"}'} for the opam files this PR modifies only
+    by adding an upper bound that excludes a version the PR adds: their
+    dependency solutions are the same as on master."""
+    d = gh_api(f"repos/{REPO}/compare/{base}...{sha}", cache_dir) if base else None
+    files = (d or {}).get("files", [])
+    added = {m.group(1) for f in files if f.get("status") == "added"
+             for m in [re.match(r"packages/[^/]+/([^/]+)/opam$", f.get("filename", ""))] if m}
+    out = {}
+    for f in files:
+        m = re.match(r"packages/[^/]+/([^/]+)/opam$", f.get("filename", ""))
+        if not m or f.get("status") != "modified":
+            continue
+        lines = (f.get("patch") or "").splitlines()
+        rem = [l[1:].strip() for l in lines if l[:1] == "-" and not l.startswith("---")]
+        add = [l[1:].strip() for l in lines if l[:1] == "+" and not l.startswith("+++")]
+        if not rem or len(rem) != len(add):
+            continue
+        bounds = []
+        for r, a in zip(rem, add):
+            ma = re.match(r'"([\w+-]+)"\s*\{(.*)\}$', a)
+            mr = re.match(r'"([\w+-]+)"\s*(?:\{(.*)\})?$', r)
+            if not (ma and mr and ma.group(1) == mr.group(1)):
+                break
+            terms = lambda f: [t.strip() for t in (f or "").split("&") if t.strip()]
+            extra = [t for t in terms(ma.group(2)) if t not in terms(mr.group(2))]
+            mv = re.fullmatch(r'<\s*"([^"]+)"', extra[0]) if len(extra) == 1 else None
+            if not (mv and len(terms(ma.group(2))) == len(terms(mr.group(2))) + 1
+                    and f"{ma.group(1)}.{mv.group(1)}" in added):
+                break
+            bounds.append(f'{ma.group(1)} {{< "{mv.group(1)}"}}')
+        else:
+            out[m.group(1)] = ", ".join(bounds)
+    return out
+
+
+def preexisting_failures(data, sha, base, cache_dir):
+    """{failure_key: why} for the failing jobs that would fail without this PR:
+    packages the PR only bounds, and failures that the CI run of the previous
+    release of a package also had (same platform, same job)."""
+    failing = [j for j in data["jobs"] if j["status"] == "failed" and j["category"] in FAILING_CATS]
+    per_job = {}
+    bound = bound_only_changes(base, sha, cache_dir) if base else {}
+    for j in failing:
+        pkg = j["target"] if not j["revdep"] else None
+        if pkg in bound:
+            per_job[j["variant"]] = (f"this PR only adds {bound[pkg]} to {pkg}, so its dependencies are "
+                                     f"the same as on master")
+    added = sorted({j["target"] for j in failing if j["target"] and j["target"] not in bound})
+    for target in added[:3]:
+        info = find_baseline_commit(target, cache_dir)
+        if not info or "sha" not in info:
+            continue
+        try:
+            prev = parse_commit_page(fetch(BASE + info["sha"], cache_dir))
+        except Exception:
+            continue                         # old runs are purged (404)
+        idx = {(tuple(b["platform"]), b["kind"], b["revdep"]): b for b in prev["jobs"]
+               if b["target"] == info["prev"]}
+        for j in failing:
+            if j["target"] != target or j["variant"] in per_job:
+                continue
+            b = idx.get((tuple(j["platform"]), j["kind"], j["revdep"]))
+            if b and b["category"] in FAILING_CATS:
+                pr = f"#{info['pr']}" if info.get("pr") else info["sha"][:12]
+                per_job[j["variant"]] = f"{info['prev']} failed the same job in the CI of {pr}"
+    out = {}
+    for j in failing:
+        out.setdefault(failure_key(j), []).append(per_job.get(j["variant"]))
+    return {k: v[0] for k, v in out.items() if None not in v}
+
+
+def sources_rules(data, cache_dir, match=None):
+    """Source archives that were downloaded but could not be unpacked, one log
+    per package (e.g. symlinks, which tar cannot create on msys2/cygwin)."""
+    out, seen = [], set()
+    for j in data["jobs"]:
+        if j["status"] != "failed" or j["category"] != "sources" or (match and not re.search(match, j["variant"])):
+            continue
+        pkg = (re.search(r"sources of (\S+?):", j["reason"] or "") or [None, j["revdep"] or j["target"]])[1]
+        dims = job_dims(j)
+        key = (pkg, dims["os"])
+        if key in seen:
+            out[-1].setdefault("also_seen_on", []).append(j["variant"])
+            continue
+        seen.add(key)
+        try:
+            text = log_text(fetch(j["url"], cache_dir))
+        except Exception:
+            text = ""
+        m = re.search(r"([^\s:]+): Cannot create symlink to '([^']+)'", text)
+        r = {"variant": j["variant"], "url": j["url"], "rule": "sources", "failing": pkg,
+             "fix_in": f"{pkg} (upstream archive)", "experimental": j["experimental"],
+             "error": (j["reason"] or "")[:200], "confidence": "medium"}
+        if m:
+            r.update(error=f"tar cannot create the symlink {m.group(1)} -> {m.group(2)} on {dims['distro']}",
+                     confidence="high",
+                     note=f"the source archive contains symlinks, which tar cannot create on {dims['distro']}: "
+                          f"replace them upstream by copies, or `x-ci-accept-failures: [\"{dims['distro']}\"]` "
+                          f"(or `available: os != \"win32\"`) for this release")
+        else:
+            r["note"] = "the archive was downloaded but could not be unpacked: check the url and checksum"
+        out.append(r)
+    return out
+
+
+def rerun_rules(data, results, match=None):
+    """Jobs that failed for reasons unrelated to the packages (network errors,
+    cancelled jobs, CI tool crashes): one entry listing what to rebuild."""
+    jobs = [j for j in data["jobs"] if j["status"] == "failed" and j["category"] in ("network", "cancelled")
+            and j["kind"] not in ("lint", "analysis") and (not match or re.search(match, j["variant"]))]
+    transient = [r for r in results if r.get("rule") == "transient"]
+    if not jobs and not transient:
+        return results
+    counts = collections.Counter()
+    for j in jobs:
+        m = re.search(r"HTTP error code \d+|curl failed|Could not resolve", j["reason"] or "")
+        counts[j["category"] + (f" ({m.group(0)})" if m else "")] += 1
+    for r in transient:
+        counts[r["error"]] += 1 + len(r.get("also_seen_on", []))
+    variants = [j["variant"] for j in jobs] + [v for r in transient for v in [r["variant"]] + r.get("also_seen_on", [])]
+    exp = sum(j["experimental"] for j in jobs)
+    entry = {"variant": f"{len(variants)} job(s) to rerun", "rule": "rerun", "fix_in": "CI (rerun)",
+             "error": ", ".join(f"{n} {k}" for k, n in counts.most_common()),
+             "confidence": "high", "jobs": variants,
+             "note": "transient failures, unrelated to the packages: use \"Rebuild failed\" on the CI page "
+                     "(a maintainer can do it)" + (f"; {exp} of them on experimental platforms" if exp else "")
+                     + ": " + ", ".join(variants[:8]) + (", ..." if len(variants) > 8 else "")}
+    return [r for r in results if r.get("rule") != "transient"] + [entry]
 
 
 def pr_opam_changes(base, sha, cache_dir):
@@ -1587,6 +1830,10 @@ NEUTRAL = {"not-available", "ignored", "network", "cancelled", "sources"}
 FAILING_CATS = {"build", "build-or-test", "dependency", "solver"}
 
 
+# The classic builder's `compilers` jobs run on this image (FROM ocaml/opam:debian-13-ocaml-X).
+CLASSIC_DISTRO = "debian-13"
+
+
 def job_dims(job):
     """Platform of a CI job: OCaml version (X.Y), os (opam variable), distro, arch."""
     p = job["platform"]
@@ -1597,6 +1844,7 @@ def job_dims(job):
         d["ocaml"] = m.group(1)
     if p[:1] == ["compilers"] and len(p) >= 2:
         d["ocaml"] = p[1]
+        d["distro"] = CLASSIC_DISTRO
     elif p[:1] == ["day10"] and len(p) >= 4:
         d["distro"], d["arch"], d["ocaml"] = p[1], p[2], p[3]
     elif p[:1] == ["distributions"] and len(p) >= 2:
@@ -1789,6 +2037,8 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
             new = "x-ci-accept-failures: [" + " ".join(f'"{d}"' for d in vals) + "]"
         reason = sorted({(j["reason"] or "")[:120] for j in fails})[0]
         out.append({"variant": label, "failing": owner, "fix_in": where, "rule": "platform-matrix",
+                    "_distros": (sorted({job_dims(j)["distro"] or job_dims(j)["os"] for j in fails})
+                                 if all(j["platform"][:1] == ["day10"] for j in fails) else None),
                     "error": f"fails only on {what}" + (" (tests only)" if tests_only else "")
                              + (f"; the failure is in the dependency {culprit}" if culprit else "")
                              + f": {reason}",
@@ -1830,12 +2080,97 @@ def collapse_systemic(out, threshold=5):
     return merged
 
 
+# Rules whose explanation does not depend on the platform: reported once.
+PER_PACKAGE_RULES = {"newer-c-compiler", "system-library-version"}
+
+# C/C++ errors that newer compilers introduced: code that built with an older
+# GCC fails on recent distributions (debian-13, fedora, archlinux, ...).
+NEWER_CC = [
+    (re.compile(r"error: .*\[-W(implicit-int|implicit-function-declaration|incompatible-pointer-types|"
+                r"int-conversion|return-mismatch|declaration-missing-parameter-type)\]"),
+     "GCC 14 turned -W{0} into an error by default (C code relying on pre-C99 rules)",
+     "fix the C code upstream; for an old release, a patch or `x-maintained: false`; "
+     "adding -fpermissive or -Wno-error={0} to the C flags also works"),
+    (re.compile(r"'u?int(?:8|16|32|64)_t' (?:does not name a type|was not declared in this scope|has not been declared)"
+                r"|is defined in header '<cstdint>'"),
+     "GCC 13's libstdc++ no longer includes <cstdint> through other headers",
+     "add `#include <cstdint>` upstream (or a patch in the opam file for an old release)"),
+    (re.compile(r"(?:cannot use keyword|expected identifier or '\(' before) '(?:bool|true|false)'"
+                r"|'bool' cannot be defined via 'typedef'"),
+     "GCC 15 compiles C as C23 by default, where bool/true/false are keywords",
+     "fix the C code upstream, or build it with -std=gnu17"),
+    (re.compile(r"error: .*\[-Werror=([\w-]+?)=?\]"),
+     "the package builds with -Werror, and a newer compiler emits a new warning (-W{0})",
+     "drop -Werror from release builds upstream; for an old release, a patch or `x-maintained: false`"),
+]
+
+
+def system_package_version(text, lib):
+    """Version of the system package providing `lib`, from the depext
+    installation lines of a log (apt, dnf/yum, apk, pacman, zypper)."""
+    pats = [r"Setting up (?:lib)?{0}[\w.+-]*?(?:-dev)?:\w+ \(([^)]+)\)",          # apt
+            r"(?m)^[-\s]*(?:lib)?{0}[\w+-]*?-devel\s+\w+\s+(\d\S*)\s",       # dnf table
+            r"Installing\s*:\s*(?:lib)?{0}[\w+-]*?-devel-(\d[^\s]*)",
+            r"Installing (?:lib)?{0}[\w+-]*? \(([^)]+)\)",                     # apk
+            r"installing (?:lib)?{0} \(([^)]+)\)"]                              # pacman
+    for name in dict.fromkeys([lib, re.sub(r"\d+$", "", lib)]):
+        for pat in pats:
+            m = re.search(pat.format(re.escape(name)), text, re.I)
+            if m:
+                return m.group(1)
+    return None
+
+
+def c_compiler_rule(text, platform):
+    for rx, cause, fix in NEWER_CC:
+        m = rx.search(text)
+        if m:
+            arg = m.group(1) if m.groups() else ""
+            line = next((l for l in text.splitlines() if rx.search(l)), m.group(0))
+            return {"rule": "newer-c-compiler", "error": line.strip()[:200], "confidence": "high",
+                    "keep": True, "_plat": platform, "note": f"{cause.format(arg)} (on {platform}); {fix.format(arg)}"}
+    return None
+
+
 def log_rules(src, err, fname, opam_text, info, job):
     """Missing dune language version, tool, library or C header."""
     text = "\n".join(err)
     deps = set(re.findall(r'^\s*"([\w+-]+)"', (opam_text or "").split("depends:", 1)[-1].split("\n]", 1)[0], re.M))
     dims = job_dims(job)
     platform = dims["distro"] or ("debian (classic builder)" if dims["os"] == "linux" else dims["os"])
+    cc = c_compiler_rule(text, platform)
+    if cc:
+        return cc
+    m = re.search(r"maximum_version=(\d+)[\s\S]*?llvm_version=(\d[\w.]*)", text)
+    if m and int(m.group(2).split(".")[0]) > int(m.group(1)):
+        want, have = m.group(1), m.group(2)
+        return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
+                "error": f"LLVM <= {want} required; {platform} has LLVM {have}",
+                "note": f"{fname} needs LLVM {want} or older, but its depexts install the distribution's default "
+                        f"LLVM, now {have.split('.')[0]} on {platform}: {fname} needs versioned depexts there "
+                        f"(e.g. llvm{want}/clang{want} compatibility packages), or a conf-libclang "
+                        f"version matching LLVM {have.split('.')[0]}"}
+    m = re.search(r"No usable version of LLVM <= ([\d.x]+) found", text)
+    if m:
+        return {"rule": "system-library-version", "keep": True, "confidence": "medium", "error": m.group(0),
+                "note": f"no LLVM found on {platform}: {fname} has no depext for it (add one, or "
+                        f"x-ci-accept-failures if LLVM is not packaged there)"}
+    m = (re.search(r"pkg-config (?:--atleast-version[= ](\S+)|--exact-version[= ](\S+)|--max-version[= ](\S+)) "
+                   r"([\w.+-]+)\)?\s*\n(?:.*\n){0,2}?.*(?:exited with code|exit status) 1", text)
+         or re.search(r"Requested '([\w.+-]+) (>=|<=|=) ([\w.~+-]+)' but version of .* is ([\w.~+-]+)", text))
+    if m:
+        if m.re.pattern.startswith("Requested"):
+            lib, op, want, have = m.group(1), m.group(2), m.group(3), m.group(4)
+        else:
+            want = m.group(1) or m.group(2) or m.group(3)
+            op = ">=" if m.group(1) else "=" if m.group(2) else "<="
+            lib, have = m.group(4), system_package_version(info.get("_text", ""), m.group(4))
+        too = "too old" if op == ">=" else "too new" if op == "<=" else "not the expected version"
+        return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
+                "error": f"{lib} {op} {want} required; {platform} has {have or 'an older version'}",
+                "note": f"the system {lib} is {too} on {platform}: no depext change can fix it there; exclude "
+                        f"these distributions (`x-ci-accept-failures`, or `available` on os-distribution/os-version)"
+                        f", or relax the requirement upstream"}
     m = re.search(r"Version (\d+\.\d+) of the dune language is not supported", text)
     if m:
         old, new = constraint_edit(opam_text, "dune", ">=", m.group(1))
@@ -1845,6 +2180,8 @@ def log_rules(src, err, fname, opam_text, info, job):
          or re.search(r"([\w.+-]+): command not found", text)
          or re.search(r"Command not found: ([\w.+-]+)", text)
          or re.search(r"(?m)^\S*?([\w.+-]+): (?:command )?not found$", text))
+    if m and (m.group(1).startswith("-") or (m.group(1) == "brew" and dims["os"] != "macos")):
+        m = None   # an empty variable expanded as a command, or a probe for another platform's tool
     if m:
         tool = m.group(1)
         conf = f"conf-{tool}"
@@ -2086,8 +2423,15 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                     r.update(note="known opam-ci-check false positive for packages without `url` (virtual "
                                   "packages); maintainers waive it", confidence="high")
             elif "conf packages should always use" in text:
-                r.update(note="non-conf package with `depexts`: move them into a conf-* package, or ask the "
-                              "maintainers to waive it (often accepted)", confidence="medium")
+                opam = src.opam_file(name, ver, sha) if sha else None
+                if re.search(r"depexts:[\s\S]*?npm-version", opam or ""):
+                    r.update(note="the depexts are npm packages (`npm-version` filter, checked by "
+                                  "opam-check-npm-deps), the usual convention for Melange bindings: a false "
+                                  "positive of this lint, nothing to change; maintainers waive it",
+                             confidence="high")
+                else:
+                    r.update(note="non-conf package with `depexts`: move them into a conf-* package, or ask the "
+                                  "maintainers to waive it (often accepted)", confidence="medium")
             else:
                 r["note"] = "no rule for this lint message"
             if baseline and (name, text) in baseline[1]:
@@ -2259,11 +2603,11 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
         return body + ["</details>", ""]
 
     out += details("Platform-specific failures: possible workarounds", by["workaround"], lambda r: [
-        f"- **{r.get('failing')}**{' (experimental platform)' if r.get('experimental') else ''}{jobs_note(r)}: "
-        f"{(r.get('error') or '')[:220]}",
+        f"- **{r.get('failing') or r.get('variant')}**{' (experimental platform)' if r.get('experimental') else ''}"
+        f"{jobs_note(r)}: {(r.get('error') or '')[:220]}",
         "  " + diff_block(r).replace("\n", "\n  ")])
     out += details("Failures in other packages or in CI (nothing to change here)", by["elsewhere"], lambda r: [
-        f"- **{r.get('failing')}** ({r.get('fix_in')}){jobs_note(r)}: {(r.get('error') or '')[:200]}"
+        f"- **{r.get('failing') or r.get('variant')}** ({r.get('fix_in')}){jobs_note(r)}: {(r.get('error') or '')[:200]}"
         + (f"<br>suggestion: `{(r.get('new') or '').split('   ')[0]}`" if r.get("new") else "")
         + (f"<br>{r['note'][:200]}" if r.get("note") else "")])
     out += details("Explained but no change suggested", by["explanation"], lambda r: [
@@ -2426,6 +2770,8 @@ def render_suggestions(results):
             print(f"  also released after it (not ranked): {', '.join(r['also_newer'])}")
         if r.get("note"):
             print(f"  note            : {r['note']}")
+        if r.get("also_seen_on"):
+            print(f"  also seen on    : {', '.join(r['also_seen_on'])}")
         if r.get("llm_prompt"):
             print("  LLM prompt (dry run):\n    " + r["llm_prompt"].replace("\n", "\n    "))
 

@@ -69,6 +69,18 @@ Common options:
 | Lint warning 47 / 59, weak checksums, `extra-files`, error 46 / 60 | fixed synopsis line, `checksum: ["sha256=…"]` with the command to compute it, `extra-source` template, `conf` flag advice, archive changed upstream | high |
 | Install failure: files not built | the earlier build error that did not stop the build, then the usual rules on it | low–high |
 | `These packages are still missing: …` (system packages) | the distribution lacking them; correct the depext or `x-ci-accept-failures` | medium |
+| mdx/toplevel test output differs (types, values, error locations) | the expected output depends on the OCaml version: `"ocaml" {< "X" \| !with-test}` (keeps the package installable), or `"@runtest" {with-test & ocaml:version < "X"}` | medium |
+| C/C++ error introduced by a newer compiler: `-Wimplicit-int` and friends (GCC 14), `uint64_t` without `<cstdint>` (GCC 13), `bool` as a keyword (GCC 15, C23), `-Werror=…` | the cause and the upstream fix; `x-maintained: false` for an old release | high |
+| System library at the wrong version (`pkg-config --atleast-version`, `Requested 'x >= V'`, conf-libclang's LLVM) | the required and the installed version per distribution (read from the depext installation); exclude those distributions | high |
+| Network errors, cancelled jobs, CI tool crash (`Segmentation fault day10-install`) | one entry listing the jobs to rebuild | high |
+| Source archive that cannot be unpacked (symlinks on msys2) | replace the symlinks upstream, or exclude the platform | high |
+| A day10 failure on a platform the failing package already lists in `x-ci-accept-failures` | nothing to change: day10 does not honour it there (cygwin, freebsd) | high |
+| Lint "conf packages should always use …" on npm depexts (`npm-version`) | known false positive for Melange bindings | high |
+
+Failures that would happen without the PR are marked "Pre-existing" in the note:
+
+- packages the PR only modifies by adding an upper bound that excludes a version it adds (their dependency solution is the same as on master; read from the PR's diff, the same GitHub call as above);
+- jobs that also failed in the CI run of the PR that published the previous release of the package (same platform, same job; 2 GitHub calls and one page per package, skipped when the old run has been purged).
 
 The matrix rules use only the job list (no fetch); the others reuse the log
 already downloaded, plus at most one small lookup.
