@@ -122,6 +122,11 @@ Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
 fallbacks enabled. Responses are cached in `.opam-ci-cache/`, so re-runs cost
 nothing. The log and opam file are passed as untrusted data.
 
+To evaluate it on the PRs of the triage page that have failures no rule recognises, run
+`.venv/bin/python scripts/llm_eval.py --first 5` (then without `--first`): it saves each PR's
+result in `llm-eval/` and prints the tokens used; `--dry-run` lists the PRs and prompts without
+calling the API.
+
 ## Scheduled page
 
 `.github/workflows/triage-page.yml` runs every hour (and on demand) and
