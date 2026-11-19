@@ -565,3 +565,36 @@ def skipped_rules(data, src, cache_dir, pr_packages):
                             "really fail.")
         out.append(r)
     return out
+
+
+def accepted_elsewhere(results, src, pr_packages, max_versions=3):
+    """For a suggestion that restricts platforms (x-ci-accept-failures, or
+    available on Windows), the other versions of the package that already
+    list those platforms in x-ci-accept-failures: maintainers accepted them
+    there, so the same is likely acceptable here."""
+    cache = {}
+    for r in results:
+        new = r.get("new") or ""
+        failing = r.get("failing") or ""
+        name, ver = split_pkg(failing)
+        if not ver or " " in failing:
+            continue
+        m = re.match(r"x-ci-accept-failures:\s*\[([^\]]*)\]", new)
+        if m:
+            wanted = set(re.findall(r'"([^"]+)"', m.group(1)))
+        elif 'os != "win32"' in new:
+            wanted = {"cygwin", "msys2"}
+        else:
+            continue
+        if name not in cache:
+            others = [v for v in reversed(src.versions(name)) if v != ver][:max_versions]
+            cache[name] = {v: accepted_platforms(src.opam_file(name, v)) for v in others}
+        found = {v: sorted(acc & wanted) for v, acc in cache[name].items() if acc & wanted}
+        if not found:
+            continue
+        where = ", ".join(f"{name}.{v} ({', '.join(ps)})" for v, ps in sorted(found.items()))
+        plats = sorted(set().union(*map(set, found.values())))
+        r["note"] = ((r.get("note") or "").rstrip() + f" Other versions already accept failures there: {where}.").strip()
+        if not m:
+            r["alternative"] = (f'x-ci-accept-failures: [{" ".join(chr(34) + p + chr(34) for p in plats)}]'
+                                f"   (as other versions of {name} do)")

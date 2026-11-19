@@ -97,6 +97,11 @@ recognises are grouped in one "Not recognised" entry listing their jobs.
 | A reverse dependency builds on master (opam-health-check) but fails with the new release | the usual fix in the same PR: `"pkg" {< "new version"}` in its depends, or a `conflicts` entry when it does not depend on it directly; not for a PR that modifies an existing version, nor for a new conf package | medium |
 | A package recompiled at the same version, removed, then failing to build or install (it has a `remove:` field; seen on lower-bounds jobs with opam 2.6) | an opam bug (ocaml/opam#6440 moves the same source directory for both steps), not a bound: the job can be ignored | high |
 
+A suggestion that restricts platforms (`x-ci-accept-failures`, or `available`
+on Windows) says which other versions of the package (up to 3) already accept
+failures on those platforms, and then proposes `x-ci-accept-failures` as the
+alternative to restricting `available`.
+
 Every suggested change is checked before it is shown: a constraint no version
 satisfies, a bound that still allows the version the failing job installed, or
 (when opam is installed) a change on which `opam lint` reports a new problem is
@@ -171,6 +176,9 @@ publishes the results on the repository's GitHub Pages site:
    `state/prs.json`; closed PRs, and PRs no longer failing, are dropped. It
    writes `site/data.json`. `--time-budget` stops starting new PRs; the next
    run continues.
+
+   When a PR gets a new commit, the page says what changed since the
+   previous one: the problems gone, the new ones, and how many remain.
 
    PRs whose CI is still running are included once some job has failed,
    with a "CI running" badge, and analysed again on every run until their CI

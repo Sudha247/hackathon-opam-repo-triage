@@ -168,6 +168,21 @@ def mark_shared_failures(prs):
                 r.pop("also_failing_in", None)
 
 
+def since_last_push(prev, result):
+    """What changed between the analysis of a PR's previous head and this
+    one: the problems gone, the new ones, and how many remain. Problems are
+    (title, failing package) pairs; reruns and unrecognised failures are left
+    out, since they come and go with CI."""
+    def keys(res):
+        return {(s.get("title") or s.get("rule") or "", s.get("failing") or s.get("job") or "")
+                for s in (res or {}).get("suggestions", [])
+                if s.get("rule") not in ("rerun", "unrecognised", "lint")}
+    before, after = keys(prev.get("result")), keys(result)
+    fmt = lambda ks: [f"{t}: {f}" if f else t for t, f in sorted(ks)]
+    return {"previous_sha": prev.get("sha"), "fixed": fmt(before - after), "new": fmt(after - before),
+            "still": len(before & after)}
+
+
 def llm_available():
     """The LLM fallback runs only with an API key and the anthropic package;
     without them the page is built from the rules alone."""
@@ -275,6 +290,10 @@ def main():
         llm_left -= net.get("llm", 0)
         if summary is None:
             summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
+        if prev and prev.get("sha") != p["sha"] and prev.get("result") is not None and result is not None:
+            entry["since_last_push"] = since_last_push(prev, result)
+        elif prev and prev.get("sha") != p["sha"]:
+            entry.pop("since_last_push", None)      # no comparable previous result
         entry.update({"ci_state": p["ci_state"],
                       "ci_unfinished": (result or {}).get("ci_unfinished", 0)})
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,

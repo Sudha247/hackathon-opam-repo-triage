@@ -199,6 +199,18 @@ def render_pr(pr):
             f' · jobs not passing: '
             f'{e(", ".join(f"{v} {JOB_CATEGORIES.get(k, k)}" for k, v in failed) or "?")}'
             "</div>"]
+    since = pr.get("since_last_push")
+    if since and (since.get("fixed") or since.get("new")):
+        def items(xs):
+            return ", ".join(e(x) for x in xs[:8]) + (f" and {len(xs) - 8} more" if len(xs) > 8 else "")
+        parts = []
+        if since.get("fixed"):
+            parts.append(f'<span class="yes">{len(since["fixed"])} gone</span> ({items(since["fixed"])})')
+        if since.get("new"):
+            parts.append(f'<span class="no">{len(since["new"])} new</span> ({items(since["new"])})')
+        parts.append(f'{e(since.get("still", 0))} unchanged')
+        body.append(f'<p class="note since">Since the previous push '
+                    f'({e((since.get("previous_sha") or "")[:12])}): ' + "; ".join(parts) + ".</p>")
     if pr.get("pending"):
         body.append('<p class="note">Not analysed yet: the run ran out of time. The next run continues.</p>')
     elif pr.get("result") is None:

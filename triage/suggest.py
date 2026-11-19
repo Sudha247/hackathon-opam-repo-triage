@@ -53,6 +53,7 @@ from .context import (  # noqa: F401
     rerun_rules,
     skipped_rules,
     sources_rules,
+    accepted_elsewhere,
 )
 from .llm import (  # noqa: F401
     apply_llm,
@@ -204,6 +205,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         results += lint_rules(data, src, sha, cache_dir)
     results += skipped_rules(data, src, cache_dir, pr_packages)
     check_changes(results, src, sha, set(pr_packages))
+    accepted_elsewhere(results, src, set(pr_packages))
     for r in results:
         r.pop("_installed", None)
     return readable(merge_versions(merge_unrecognised(results)))

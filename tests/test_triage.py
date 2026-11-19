@@ -182,6 +182,11 @@ CASES = {
     "odnnr-previous-release-bound": (
         "6b62b33f94fa0d7f64aa4da5cb0c75e78fa3b3ee", ["--max", "1", "--match", "^compilers,4.11,odnnr.2.0.3$"],
         [{"failing": "odnnr.2.0.3", "rule": "previous-release-bound", "new": '"dolog" {>= "4.0.0" & < "5.0.0"}'}]),
+    # Platforms other versions of the package already accept failures on.
+    "ocaml-r-accepted-elsewhere": (
+        "e77d15c9d7a33bd5ce6b889bcaff4fd2ee733e9c", ["--max", "6"],
+        [{"failing": "ocaml-r.0.7.0", "rule": "platform-matrix",
+          "note": "Other versions already accept failures there: ocaml-r.0.4.0"}]),
 }
 
 
