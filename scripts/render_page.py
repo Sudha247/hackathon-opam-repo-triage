@@ -173,6 +173,10 @@ def render_pr(pr):
               f'{"s" if len(groups[k]) != 1 and k != "elsewhere" else ""}</span>'
               for k, label, word in CLASSES if groups.get(k)]
     badges = "".join(f'<span class="badge b-{c}">{e(label)}</span>' for c, label in CATEGORIES if c in cats)
+    if pr.get("ci_state") == "PENDING":
+        left = pr.get("ci_unfinished")
+        badges = (f'<span class="badge b-running" title="These are the failures so far; the page is updated '
+                  f'when CI finishes">CI running{f": {e(left)} jobs left" if left else ""}</span>') + badges
     title = pr.get("title") or ""
     search = f"{n} {title} {pr.get('author') or ''}".lower()
     head = (f'<summary><span class="num">{link(f"{REPO_URL}/pull/{n}", f"#{n}")}</span>'
@@ -290,7 +294,7 @@ details.pr>summary::before{content:"\\25B8";color:var(--mut)}details.pr[open]>su
 .row2{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;font-size:.8rem;width:100%;padding-left:1.1em}
 .badge,.tag,.cnt{border-radius:10px;padding:1px 7px;font-size:.78rem;border:1px solid var(--bd);white-space:nowrap}
 .b-fix{color:var(--fix);border-color:var(--fix)}.b-blocked{color:var(--else);border-color:var(--else)}
-.b-ci{color:var(--wk);border-color:var(--wk)}.b-error{color:var(--err);border-color:var(--err)}
+.b-ci{color:var(--wk);border-color:var(--wk)}.b-running{color:var(--acc);border-color:var(--acc)}.b-error{color:var(--err);border-color:var(--err)}
 .c-fix{color:var(--fix)}.c-workaround{color:var(--wk)}.c-elsewhere{color:var(--else)}.c-explanation{color:var(--exp)}
 .date{color:var(--mut);margin-left:auto}
 .body{padding:0 12px 12px;border-top:1px solid var(--bd)}
@@ -363,7 +367,9 @@ def render(data):
         "<title>opam-repository CI triage</title>", f"<style>{CSS}</style></head><body><main>",
         "<h1>opam-repository CI triage</h1>",
         f'<p class="lead">The open pull requests of {link(REPO_URL, "ocaml/opam-repository")} whose CI '
-        f'(opam-repo-ci) fails: {e(data.get("failing_prs"))} of {e(data.get("open_prs"))} open PRs{limit}. '
+        f'(opam-repo-ci) fails: {e(data.get("failing_prs"))} of {e(data.get("open_prs"))} open PRs{limit}'
+        + (f', and {e(data.get("running_prs"))} whose CI is still running but already has failures'
+           if data.get("running_prs") else "") + '. '
         f'For each one, the failures are read from the CI logs and matched against known causes, with a '
         f'suggested change when one can be derived. Nothing is rebuilt, so check a suggestion before '
         f'applying it.</p>'

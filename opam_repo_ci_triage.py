@@ -67,9 +67,12 @@ USER_AGENT = "opam-ci-triage"
 # Fetching
 
 
+def cache_path(url, cache_dir):
+    return os.path.join(cache_dir, hashlib.sha256(url.encode()).hexdigest()[:32] + ".html")
+
+
 def fetch(url, cache_dir, refresh=False):
-    key = hashlib.sha256(url.encode()).hexdigest()[:32]
-    path = os.path.join(cache_dir, key + ".html")
+    path = cache_path(url, cache_dir)
     if not refresh and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             return f.read()
@@ -102,6 +105,31 @@ def fetch(url, cache_dir, refresh=False):
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
     return body
+
+
+def unfinished_jobs(data):
+    """Jobs still running or queued (status `active`, ...)."""
+    return [j for j in data["jobs"] if j["status"] not in ("passed", "failed")]
+
+
+def load_commit(sha, cache_dir, refresh=False):
+    """The CI page of a commit, parsed. A page whose CI is still running is
+    not kept in the cache (it changes until every job has finished), and one
+    cached as running before is fetched again."""
+    url = BASE + sha
+    before = NET["http"]
+    page = fetch(url, cache_dir, refresh=refresh)
+    data = parse_commit_page(page)
+    if unfinished_jobs(data) and NET["http"] == before and not OFFLINE:
+        page = fetch(url, cache_dir, refresh=True)
+        data = parse_commit_page(page)
+    data["unfinished"] = len(unfinished_jobs(data))
+    if data["unfinished"]:
+        try:
+            os.remove(cache_path(url, cache_dir))
+        except OSError:
+            pass
+    return page, data
 
 
 def resolve_sha(target, pr):
@@ -385,6 +413,8 @@ def platform_str(job):
 def render_summary(sha, data, show_all):
     jobs = data["jobs"]
     print(f"PR #{data['pr']}  commit {sha[:12]}  {BASE}{sha}")
+    if data.get("unfinished"):
+        print(f"CI still running: {data['unfinished']} of {len(jobs)} jobs not finished")
     counts = {}
     for j in jobs:
         counts[j["category"]] = counts.get(j["category"], 0) + 1
@@ -1588,6 +1618,10 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     explained = {k for m in matrix for k in m.get("_keys", [])}
     results = [r for r in results
                if r.get("keep") or not (r.get("_key") in explained and not r.get("new") and not r.get("candidates"))]
+    if data.get("unfinished"):
+        for m in matrix:
+            m["note"] = ("CI is still running: this pattern comes from the jobs finished so far and may "
+                         "change. " + (m.get("note") or ""))
     results += matrix
     accepted_but_failing(results, src, sha, set(pr_packages))
     pre = preexisting_failures(data, sha, base, cache_dir)
@@ -2878,6 +2912,9 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
            f"From the [CI results]({BASE}{sha}) for commit `{sha[:12]}`. Nothing was rebuilt: these "
            "suggestions come from the CI logs, the documentation of each package version on ocaml.org, and "
            "the opam files. Please check them before applying them.", ""]
+    if data.get("unfinished"):
+        out += [f"**CI is still running** ({data['unfinished']} of {len(data['jobs'])} jobs not finished): "
+                "these are the failures so far.", ""]
     fixes = by["fix"]
     if placed:
         out += [f"{placed} suggested change{'s are' if placed > 1 else ' is'} attached to "
@@ -3130,10 +3167,12 @@ def main():
     args = ap.parse_args()
 
     sha = resolve_sha(args.target, args.pr)
-    page = fetch(BASE + sha, args.cache_dir, refresh=args.refresh)
-    data = parse_commit_page(page)
+    page, data = load_commit(sha, args.cache_dir, refresh=args.refresh)
     if not data["jobs"]:
         sys.exit("no jobs found (CI not started yet, or the page layout changed)")
+    if data["unfinished"]:
+        print(f"note: CI still running: {data['unfinished']} of {len(data['jobs'])} jobs not finished; "
+              f"these are the failures so far", file=sys.stderr)
 
     if args.command in ("suggest", "comment", "review"):
         src = Sources(args.cache_dir)
@@ -3168,7 +3207,8 @@ def main():
             print("network requests: " + ", ".join(f"{k}={v}" for k, v in NET.items()), file=sys.stderr)
             return
         if args.json:
-            json.dump({"sha": sha, "pr": data["pr"], "suggestions": results}, sys.stdout, indent=2)
+            json.dump({"sha": sha, "pr": data["pr"], "ci_unfinished": data["unfinished"],
+                       "ci_jobs": len(data["jobs"]), "suggestions": results}, sys.stdout, indent=2)
             print()
         else:
             render_suggestions(results)

@@ -185,8 +185,10 @@ def main():
     old = state.get("prs", {})
 
     prs, list_calls = list_open_prs(token)
-    failing = [p for p in prs if p["ci_state"] == "FAILURE"]
-    print(f"{len(prs)} open PRs, {len(failing)} with {CONTEXT} = failure ({list_calls} GitHub API call(s))",
+    # Failed CI, and CI still running (shown if some jobs have already failed).
+    failing = [p for p in prs if p["ci_state"] in ("FAILURE", "PENDING")]
+    print(f"{len(prs)} open PRs, {sum(p['ci_state'] == 'FAILURE' for p in prs)} with {CONTEXT} = failure, "
+          f"{sum(p['ci_state'] == 'PENDING' for p in prs)} running ({list_calls} GitHub API call(s))",
           file=sys.stderr)
     if args.limit is not None:
         failing = failing[:args.limit]
@@ -205,7 +207,9 @@ def main():
         entry = dict(prev or {})
         entry.update({k: p[k] for k in ("number", "title", "url", "draft", "updated", "sha", "author")})
         entry["ci_url"] = p["ci_url"] or BASE + p["sha"]
-        same = prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
+        # A PR whose CI is running is analysed again on every run, until its CI finishes.
+        same = (prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
+                and prev.get("ci_state") == p["ci_state"] and p["ci_state"] != "PENDING")
         # With the LLM on, a PR analysed without it (key added later, or the
         # run's budget spent) is analysed again; the logs come from the cache.
         if same and llm and not prev.get("llm"):
@@ -223,6 +227,16 @@ def main():
             new_state[key] = entry
             continue
         t0 = time.monotonic()
+        summary = None
+        if p["ci_state"] == "PENDING":
+            # Only worth showing once some job has failed: `summary` reads the
+            # CI page (not cached while CI runs) and gives the counts.
+            summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
+            failed = [j for j in (summary or {}).get("jobs", []) if j.get("status") == "failed"
+                      and j.get("category") not in NOISE]
+            if not failed:
+                stats["running, no failure yet"] += 1
+                continue
         attempts = (prev.get("attempts", 0) if same else 0) + 1
         use_llm = llm_left > 0
         extra = ["--llm", "--llm-max", str(min(args.llm_max, llm_left))] if use_llm else []
@@ -230,7 +244,10 @@ def main():
                                      "--cache-dir", args.cache_dir] + extra, args.timeout)
         net_total.update(net)
         llm_left -= net.get("llm", 0)
-        summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
+        if summary is None:
+            summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
+        entry.update({"ci_state": p["ci_state"],
+                      "ci_unfinished": (result or {}).get("ci_unfinished", 0)})
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
                       "llm": use_llm,
                       "analysed_at": now(), "seconds": round(time.monotonic() - t0, 1),
@@ -248,6 +265,7 @@ def main():
 
     data = {"generated": now(), "repository": f"{OWNER}/{NAME}", "open_prs": len(prs),
             "failing_prs": len([p for p in prs if p["ci_state"] == "FAILURE"]),
+            "running_prs": len([p for p in new_state.values() if p.get("ci_state") == "PENDING"]),
             "limit": args.limit, "max_failures_per_pr": args.max,
             "llm": {"enabled": llm, "calls": net_total.get("llm", 0)},
             "run": {"github_api_calls": list_calls, "tool_requests": dict(net_total), **stats},
@@ -256,6 +274,7 @@ def main():
     with open(args.out, "w") as f:
         json.dump(data, f, indent=1)
     print(f"analysed {stats['analysed']}, failed {stats['failed']}, unchanged {stats['unchanged']}, "
+          f"running without failure {stats['running, no failure yet']}, "
           f"deferred {stats['deferred']}, dropped {stats['dropped']}; tool requests: "
           + (", ".join(f"{k}={v}" for k, v in net_total.items()) or "none") + f"; wrote {args.out}",
           file=sys.stderr)

@@ -142,6 +142,12 @@ publishes the results on the repository's GitHub Pages site:
    writes `site/data.json`. `--time-budget` stops starting new PRs; the next
    run continues.
 
+   PRs whose CI is still running are included once some job has failed,
+   with a "CI running" badge, and analysed again on every run until their CI
+   finishes. The tool never caches the CI page of a commit while jobs are
+   still running (it fetches it again next time), and says when the results
+   are partial.
+
    With an `ANTHROPIC_API_KEY` repository secret, failures that no rule
    recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most
    `--llm-budget 40` calls per run; answers are cached, so only new failures
