@@ -1087,20 +1087,20 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                    error=f"system packages not available on {plat}: {', '.join(names)}",
                    new=f'x-ci-accept-failures: ["{plat}"]   (or correct the depext names for {plat})',
                    confidence="medium",
-                   note="wrong package name for this distribution, a package needing an extra repository "
-                        "(EPEL, CRB, ports), or one that does not exist there")
+                   note="Either the depext name is wrong for this distribution, the package needs an extra "
+                        "repository (EPEL, CRB, ports), or it does not exist there.")
         return out
     m = re.search(r"(Segmentation fault|Bus error|Illegal instruction)\s+(day10[\w-]*|obuilder[\w-]*)", text)
     if m:
         out.update(rule="transient", error=f"{m.group(1)} of the CI tool {m.group(2)}",
-                   note="the CI tool crashed, not the package: rerun the job")
+                   note="The CI tool crashed, not the package. Rerun the job.")
         return out
     m = re.search(r"HTTP error code (5\d\d|429)|Could not resolve host|Connection (?:reset|timed out)", text)
     if "failing" not in info and m:
-        out.update(rule="transient", error=m.group(0), note="network failure: rerun the job")
+        out.update(rule="transient", error=m.group(0), note="Network error. Rerun the job.")
         return out
     if "failing" not in info:
-        out["note"] = "no ERROR block in the log (dependency, network or solver failure)"
+        out["note"] = "The log has no opam error block (a dependency, network or solver failure)."
         return out
     fname, fver = info["failing"]
     out["failing"] = f"{fname}.{fver}"
@@ -1120,14 +1120,16 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         earlier = [re.sub(r"^[-#] ?", "", l).strip() for l in text[:cut].splitlines()
                    if re.search(r"\bError\b|error:|Parse error|fatal error", l)
                    and not re.search(r"Error report|\[ERROR\] The (compilation|installation)", l)]
-        out["install"] = f"files listed for installation were not built: {dict(exts)}"
+        out["install"] = ("files listed for installation were not built: "
+                          + ", ".join(f"{n} {x}" for x, n in exts.most_common()))
         if earlier:
             err = earlier[-15:]
             out["install"] += f"; earlier build error: {err[-1][:150]}"
         else:
             out.update(rule="install-missing-files", error=out.pop("install"), confidence="low",
-                       note="the build does not produce these files on this platform (e.g. .cmxs needs native "
-                            "dynlink): make them optional in the .install / build, or restrict `available`")
+                       note="The build does not produce these files on this platform (.cmxs files need native "
+                            "dynlink, for example). Make them optional in the .install file or the build, or "
+                            "restrict `available`.")
             return out
 
     # Rule: safe-string
@@ -1157,7 +1159,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         out["error"] = f"Unbound {kind} {'.'.join(mods + [ident])}"
         top = mods[0] if mods else (ident if kind == "module" else None)
         if top is None:
-            out["note"] = "unqualified identifier: cannot attribute it to a package"
+            out["note"] = "The identifier has no module path, so the tool cannot tell which package it comes from."
             return out
         # Stdlib?
         rel = ocaml_releases(src)
@@ -1187,7 +1189,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                 old, new = constraint_edit(opam_text, "ocaml", op, v)
                 out.update(rule="stdlib", dep="ocaml", old=old, new=new, confidence="high")
             else:
-                out["note"] = "stdlib identifier, but no OCaml release boundary found"
+                out["note"] = "Standard library identifier, but no OCaml release adds or removes it."
             return out
         # Library: candidate packages whose name matches the top module.
         cands = [p for p in info["installed"] if norm(top).startswith(norm(p)) and len(norm(p)) >= 2]
@@ -1254,7 +1256,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                 if f"{pkg}.{fver}" in pr_packages and src.upstream(fname, fver, ref) == src.upstream(pkg, fver, ref):
                     out["alternative"] = f'"{pkg}" {{= version}}  (same upstream repository and version)'
                 return out
-        out.setdefault("note", "could not locate the identifier in any candidate package's history")
+        out.setdefault("note", "The identifier was not found in the history of any candidate package.")
         return out
 
     if info["test_diff"]:
@@ -1270,19 +1272,19 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
             else:
                 new = f'"ocaml" {{{term}}}'
             out.update(rule="test-output-ocaml", dep="ocaml", confidence="medium",
-                       error=f"toplevel output in the tests differs on OCaml {info['ocaml']}: {top[0][:100]}",
+                       error=f"Toplevel output in the tests differs on OCaml {info['ocaml']}: {top[0][:100]}",
                        old=m.group(0).strip() if m else None,
                        new=new + f"   (keeps the package installable, disables its tests on OCaml >= {mm})",
                        alternative=f'"@runtest" {{with-test & ocaml:version < "{mm}"}}   (on the test command)',
-                       note=f"{mm} is the oldest failing OCaml version in this run: the change may come from an "
-                            f"earlier release (e.g. 5.4 prints shorter type paths); accepting the new output "
-                            f"upstream is the real fix")
+                       note=f"{mm} is the oldest OCaml version that fails in this run; the output may have changed in "
+                            f"an earlier release (5.4 prints shorter type paths, for example). Updating the "
+                            f"expected output upstream fixes it for good.")
             return out
         out["rule"] = "test-output"
         out["error"] = "test output differs (cram/mdx)"
         return out   # completed by the caller with a passing job's versions
     if out.get("install"):
-        out.update(error=out.pop("install"), note="no rule matched the earlier build error")
+        out.update(error=out.pop("install"), note="No rule recognises the earlier build error.")
         return out
     out["note"] = "no rule matched"
     return out
@@ -1294,9 +1296,9 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
 # (ANTHROPIC_API_KEY, or an `ant auth login` profile). Responses are cached.
 
 LLM_MODEL = "claude-opus-5-5"
-LLM_UNEXPLAINED = ("no rule matched", "no rule matched the earlier build error",
-                   "unqualified identifier: cannot attribute it to a package",
-                   "could not locate the identifier in any candidate package's history")
+LLM_UNEXPLAINED = ("no rule matched", "No rule recognises the earlier build error.",
+                   "The identifier has no module path, so the tool cannot tell which package it comes from.",
+                   "The identifier was not found in the history of any candidate package.")
 
 LLM_SYSTEM = """You triage failures reported by opam-repo-ci on pull requests to ocaml/opam-repository.
 
@@ -1475,7 +1477,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         try:
             text = log_text(fetch(j["url"], cache_dir))
         except Exception as e:
-            results.append({"variant": j["variant"], "note": f"log unavailable: {e}",
+            results.append({"variant": j["variant"], "note": f"Could not read the log: {e}",
                             "jobs": merged[group_key(j)]})
             continue
         base = base or excerpt(text).get("base")      # the master commit the PR was merged with
@@ -1533,6 +1535,19 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     seen, unique = {}, []
     for r in results:
         plat = r.pop("_plat", None)
+        if r.get("rule") == "install-missing-files" and not r.get("new"):
+            k = ("install", split_pkg(r.get("failing") or "")[0], r.get("fix_in") == "this PR")
+            if k in seen:
+                seen[k]["failing"] += ", " + r["failing"]
+                seen[k]["jobs"] = merge_jobs(seen[k].get("jobs") or [seen[k]["variant"]],
+                                             r.get("jobs") or [r["variant"]])
+                if r.get("fix_in") != "this PR":
+                    seen[k]["fix_in"] = f"{k[1]} (other package)"
+                seen[k].setdefault("also_seen_on", []).append(r["variant"])
+                continue
+            seen[k] = r
+            unique.append(r)
+            continue
         k = ((r.get("failing"), (r.get("new") or "").split("   ")[0]) if r.get("new")
              else (r.get("failing"), r["rule"], (r.get("note") or "").replace(plat or "\0", "{P}"))
              if r.get("rule") in PER_PACKAGE_RULES else None)
@@ -1564,14 +1579,115 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         for r in results:
             if r.get("rule", "").startswith("platform-matrix") and re.search(
                     r"Windows|freebsd|macos", r.get("error", "")):
-                r["note"] = (f"these platforms are tried because this PR relaxed `available` of {cause} "
-                             f"(see that suggestion); " + (r.get("note") or ""))
+                r["note"] = (f"CI tries these platforms only because this PR relaxed `available` of {cause} "
+                             f"(see that suggestion). " + (r.get("note") or ""))
     results += relaxed
     results = rerun_rules(data, results, match)
     results += sources_rules(data, cache_dir, match)
     if not match or re.search(match, "(lint)"):
         results += lint_rules(data, src, sha, cache_dir)
     results += skipped_rules(data, src, cache_dir, pr_packages)
+    return readable(merge_unrecognised(results))
+
+
+def merge_unrecognised(results):
+    """The failures no rule recognises, as one entry listing their jobs."""
+    unk = [r for r in results if not (r.get("rule") or r.get("new") or r.get("candidates") or r.get("error"))]
+    if not unk:
+        return results
+    jobs = merge_jobs([], [v for r in unk for v in (r.get("jobs") or [r["variant"]])])
+    names = sorted({r["failing"] for r in unk if r.get("failing")})
+    return [r for r in results if r not in unk] + [{
+        "variant": "unrecognised", "rule": "unrecognised", "fix_in": "unknown", "confidence": "low",
+        "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else "") if names else None,
+        "error": f"{len(jobs)} failed job{'s' if len(jobs) != 1 else ''} that no rule recognises",
+        "note": "Read the logs of these jobs.", "jobs": jobs,
+        "experimental": all(r.get("experimental") for r in unk)}]
+
+
+RULE_TITLES = {
+    "library-api": "API change in a dependency", "stdlib": "Standard library change",
+    "safe-string": "Needs OCaml < 4.06 (safe-string)", "dune-lang": "dune too old",
+    "missing-tool": "Missing tool", "missing-pkg-config": "Missing pkg-config file",
+    "missing-library": "Missing library", "missing-header": "Missing C header",
+    "missing-system-package": "System package not found", "install-missing-files": "Files not built",
+    "test-output": "Test output differs", "test-output-ocaml": "Test output depends on the OCaml version",
+    "compiler-matrix": "Fails on some OCaml versions", "platform-matrix": "Fails on some platforms",
+    "platform-matrix-systemic": "Fails on some platforms, several packages",
+    "compiler-matrix-systemic": "Fails on some OCaml versions, several packages",
+    "builder-specific": "Fails only on the day10 builder",
+    "builder-specific-systemic": "Fails only on the day10 builder, several packages",
+    "pr-relaxed-available": "`available` relaxed by this PR", "lint": "Lint",
+    "uninstallable": "Not installable anywhere", "newer-c-compiler": "Newer C compiler",
+    "system-library-version": "System library version", "rerun": "Jobs to rerun",
+    "sources": "Source archive cannot be unpacked", "accept-failures-ignored": "Accepted failure not ignored",
+    "unrecognised": "Not recognised", "llm": "LLM diagnosis (unchecked)",
+}
+
+
+def describe_job(variant):
+    """A CI job name in words: 'day10,archlinux,x86_64,5.5,pkg.1' ->
+    'pkg.1 on archlinux x86_64, OCaml 5.5 (day10 builder)'."""
+    parts = (variant or "").split(",")
+    m = re.match(r"^(\S+) \[(build|tests|revdeps|lower-bounds)(?:, revdep of (\S+))?\]$", variant or "")
+    if m:            # a pattern over several jobs (from matrix_rules)
+        pkg, kind, target = m.groups()
+        return (f"{pkg}, reverse dependency of {target}" if target
+                else pkg + {"tests": " (tests)", "lower-bounds": " (lower bounds)"}.get(kind, ""))
+    if variant == "(lint)":
+        return "opam lint"
+    m = re.match(r"^(\d+ packages) \[", variant or "")
+    if m:
+        return m.group(1)
+    builder = parts[0]
+    if builder == "day10" and len(parts) >= 5:
+        plat, rest = f"{parts[1]} {parts[2]}, OCaml {parts[3]} (day10 builder)", parts[4:]
+    elif builder == "compilers" and len(parts) >= 3:
+        plat, rest = f"OCaml {parts[1]}", parts[2:]
+    elif builder in ("distributions", "extras", "freebsd", "macos") and len(parts) >= 3:
+        m = re.match(r"^(?:(.+?)-)?ocaml-(\d+\.\d+)(?:-(.+))?$", parts[1])
+        if m:
+            pre, ver, post = m.groups()
+            plat = ", ".join(x for x in [(pre or "").replace("opam-", "opam "), f"OCaml {ver}" +
+                                         (f" {post}" if post and post not in ARCHES and post != "amd64" else "")] if x)
+            if post in ARCHES or post == "amd64":
+                plat = f"{pre} {post}, OCaml {ver}"
+        else:
+            plat = parts[1]
+        rest = parts[2:]
+    else:
+        return variant
+    pkg, extra = rest[0], rest[1:]
+    if extra[:1] == ["revdeps"] and len(extra) >= 2:
+        what = f"{extra[1]}, reverse dependency of {pkg}"
+        extra = extra[2:]
+    else:
+        what = pkg
+    what += "".join({"tests": " (tests)", "lower-bounds": " (lower bounds)"}.get(x, f" ({x})") for x in extra)
+    return f"{what} on {plat}"
+
+
+WHERE = {"this PR": "this PR", "unknown": "unknown", "CI (rerun)": "the CI",
+         "the CI environment (day10 builder)": "the day10 builder", "the CI environment": "the CI"}
+
+
+def readable(results):
+    """Display fields for people: a title for the rule, the job in words,
+    where the fix goes, and notes as sentences."""
+    for r in results:
+        if r.get("rule"):
+            r["title"] = RULE_TITLES.get(r["rule"], r["rule"])
+        if r.get("variant"):
+            r["job"] = describe_job(r["variant"])
+        f = r.get("fix_in") or ""
+        r["where"] = (WHERE.get(f) or (f[:-len(" (other package)")] + ", another package"
+                                       if f.endswith(" (other package)") else f)) if f else None
+        for k in ("note", "error"):
+            v = (r.get(k) or "").strip()
+            if v and k == "note" and v[-1] not in ".)`!?":
+                v += "."
+            if v:
+                r[k] = v
     return results
 
 
@@ -1595,8 +1711,8 @@ def accepted_but_failing(results, src, sha, pr_packages):
             for k in ("new", "old", "alternative", "candidates"):
                 r.pop(k, None)
             r.update(rule="accept-failures-ignored", fix_in="the CI environment (day10 builder)", confidence="high",
-                     note=f"{owner} already lists {', '.join(ds)} in x-ci-accept-failures, which the day10 "
-                          f"builder does not honour there: nothing to change in the package")
+                     note=f"{owner} already lists {', '.join(ds)} in x-ci-accept-failures, but the day10 builder "
+                          f"ignores that field there. Nothing to change in the package.")
 
 
 def bound_only_changes(base, sha, cache_dir):
@@ -1683,6 +1799,7 @@ def sources_rules(data, cache_dir, match=None):
         key = (pkg, dims["os"])
         if key in seen:
             out[-1].setdefault("also_seen_on", []).append(j["variant"])
+            out[-1]["jobs"].append(j["variant"])
             continue
         seen.add(key)
         try:
@@ -1690,17 +1807,17 @@ def sources_rules(data, cache_dir, match=None):
         except Exception:
             text = ""
         m = re.search(r"([^\s:]+): Cannot create symlink to '([^']+)'", text)
-        r = {"variant": j["variant"], "url": j["url"], "rule": "sources", "failing": pkg,
+        r = {"variant": j["variant"], "url": j["url"], "rule": "sources", "failing": pkg, "jobs": [j["variant"]],
              "fix_in": f"{pkg} (upstream archive)", "experimental": j["experimental"],
              "error": (j["reason"] or "")[:200], "confidence": "medium"}
         if m:
             r.update(error=f"tar cannot create the symlink {m.group(1)} -> {m.group(2)} on {dims['distro']}",
                      confidence="high",
-                     note=f"the source archive contains symlinks, which tar cannot create on {dims['distro']}: "
-                          f"replace them upstream by copies, or `x-ci-accept-failures: [\"{dims['distro']}\"]` "
-                          f"(or `available: os != \"win32\"`) for this release")
+                     note=f"The source archive contains symlinks, which tar cannot create on {dims['distro']}. "
+                          f"Replace them upstream by copies, or add `x-ci-accept-failures: [\"{dims['distro']}\"]` "
+                          f"(or `available: os != \"win32\"`) to this release.")
         else:
-            r["note"] = "the archive was downloaded but could not be unpacked: check the url and checksum"
+            r["note"] = "The archive was downloaded but could not be unpacked. Check the url and the checksum."
         out.append(r)
     return out
 
@@ -1718,15 +1835,15 @@ def rerun_rules(data, results, match=None):
         m = re.search(r"HTTP error code \d+|curl failed|Could not resolve", j["reason"] or "")
         counts[j["category"] + (f" ({m.group(0)})" if m else "")] += 1
     for r in transient:
-        counts[r["error"]] += 1 + len(r.get("also_seen_on", []))
-    variants = [j["variant"] for j in jobs] + [v for r in transient for v in [r["variant"]] + r.get("also_seen_on", [])]
+        counts[r["error"]] += len(r.get("jobs") or [r["variant"]])
+    variants = merge_jobs([j["variant"] for j in jobs], [v for r in transient for v in r.get("jobs") or [r["variant"]]])
     exp = sum(j["experimental"] for j in jobs)
-    entry = {"variant": f"{len(variants)} job(s) to rerun", "rule": "rerun", "fix_in": "CI (rerun)",
+    entry = {"variant": f"{len(variants)} job{'s' if len(variants) != 1 else ''}", "rule": "rerun", "fix_in": "CI (rerun)",
              "error": ", ".join(f"{n} {k}" for k, n in counts.most_common()),
              "confidence": "high", "jobs": variants,
-             "note": "transient failures, unrelated to the packages: use \"Rebuild failed\" on the CI page "
-                     "(a maintainer can do it)" + (f"; {exp} of them on experimental platforms" if exp else "")
-                     + ": " + ", ".join(variants[:8]) + (", ..." if len(variants) > 8 else "")}
+             "note": "These jobs failed for reasons unrelated to the packages. Use \"Rebuild failed\" on the "
+                     "CI page (opam-repository maintainers can do it)."
+                     + (f" {exp} of them are on experimental platforms." if exp else "")}
     return [r for r in results if r.get("rule") != "transient"] + [entry]
 
 
@@ -1773,7 +1890,7 @@ def relaxed_available_rules(data, sha, base, cache_dir, pr_packages):
                    and j["kind"] in ("build", "tests") and job_dims(j)["os"] != "linux"]
         if not failing:
             continue
-        plats = sorted({(job_dims(j)["distro"] or job_dims(j)["os"]) + (" (exp)" if j["experimental"] else "")
+        plats = sorted({(job_dims(j)["distro"] or job_dims(j)["os"]) + (" (experimental)" if j["experimental"] else "")
                         for j in failing})
         linux_only = 'os = "linux"' in old
         out.append({"variant": f"{pkg} [available changed by this PR]", "failing": pkg, "fix_in": "this PR",
@@ -1783,8 +1900,8 @@ def relaxed_available_rules(data, sha, base, cache_dir, pr_packages):
                     "old": f"available: {new}" if new else None,
                     "new": f"available: {old}   (restore it, or narrow it to the platforms that build)",
                     "confidence": "high" if linux_only else "medium",
-                    "note": "the failing platforms were excluded by the previous filter"
-                            if linux_only else "check which of these platforms the previous filter excluded"})
+                    "note": "The previous filter excluded every failing platform."
+                            if linux_only else "Check which of these platforms the previous filter excluded."})
     return out
 
 
@@ -1868,6 +1985,11 @@ def job_dims(job):
 
 def vkey(v):
     return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+def platform_words(job):
+    """Where a job ran, in words: 'archlinux x86_64, OCaml 5.5 (day10 builder)'."""
+    return describe_job(job["variant"]).rsplit(" on ", 1)[-1]
 
 
 def failing_dep(reason):
@@ -1977,14 +2099,14 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
                              if r.get("failing") == culprit and r.get("rule") == "missing-tool"), None)
             out.append({"variant": label, "failing": culprit or pkg,
                         "fix_in": "the CI environment (day10 builder)", "rule": "builder-specific",
-                        "error": f"fails only on the day10 builder on {', '.join(dists)}: the classic "
+                        "error": f"Fails only on the day10 builder on {', '.join(dists)}: the classic "
                                  f"builder passes on the same distributions and OCaml versions",
                         "confidence": "high",
-                        "note": f"e.g. {'/'.join(twins[0][0]['platform'])} fails "
-                                f"({(twins[0][0]['reason'] or '')[:80]}) while "
-                                f"{'/'.join(twins[0][1]['platform'])} passes"
-                                + (f"; {evidence}" if evidence else "")
-                                + "; nothing to change in the package metadata",
+                        "note": f"For example, it fails on {platform_words(twins[0][0])} and passes on "
+                                f"{platform_words(twins[0][1])}."
+                                + (f" {evidence}" if evidence else "")
+                                + ("" if "Nothing to change" in (evidence or "")
+                                   else " Nothing to change in the package metadata."),
                         "_keys": [failure_key(j) for j, _ in twins],
                         "jobs": [j["variant"] for j, _ in twins]})
             gone = {id(j) for j, _ in twins}
@@ -1998,14 +2120,14 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
             filt = f'with-test & {op} "{v}"' if tests_only else f'{op} "{v}"'
             gap = ""
             if op == ">=":
-                gap = f"; versions between {fv[-1]} and {v} were not tested, the bound may be lower"
+                gap = f" OCaml versions between {fv[-1]} and {v} were not tested, so the bound may be lower."
             out.append({"variant": label, "failing": owner, "fix_in": where, "rule": "compiler-matrix",
-                        "error": f"fails on OCaml {', '.join(fv)}, passes on {', '.join(pv)}"
+                        "error": f"Fails on OCaml {', '.join(fv)}, passes on {', '.join(pv)}"
                                  + (" (tests only)" if tests_only else "")
                                  + (f"; the failure is in the dependency {culprit}" if culprit else ""),
                         "dep": "ocaml", "old": None,
                         "new": f'"ocaml" {{{filt}}}' + ("   (new line in depends)" if tests_only else ""),
-                        "confidence": "medium", "note": ("job matrix only" + gap),
+                        "confidence": "medium", "note": ("Based only on which jobs pass and fail." + gap),
                         "_keys": [failure_key(j) for j in fails], "jobs": [j["variant"] for j in fails]})
             continue
         pm = platform_matrix(js)
@@ -2039,12 +2161,13 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
         out.append({"variant": label, "failing": owner, "fix_in": where, "rule": "platform-matrix",
                     "_distros": (sorted({job_dims(j)["distro"] or job_dims(j)["os"] for j in fails})
                                  if all(j["platform"][:1] == ["day10"] for j in fails) else None),
-                    "error": f"fails only on {what}" + (" (tests only)" if tests_only else "")
+                    "error": f"Fails only on {what}" + (" (tests only)" if tests_only else "")
                              + (f"; the failure is in the dependency {culprit}" if culprit else "")
                              + f": {reason}",
                     "old": None, "new": new, "confidence": "medium",
-                    "note": ("nothing to change in " + pkg if culprit else
-                             "restricting the platform hides the problem; an upstream fix (or a depext) is better"),
+                    "note": (f"Nothing to change in {pkg}." if culprit else
+                             "This only hides the problem on those platforms: an upstream fix, or a missing "
+                             "depext, is better."),
                     "_keys": [failure_key(j) for j in fails], "jobs": [j["variant"] for j in fails]})
     return out
 
@@ -2069,12 +2192,13 @@ def collapse_systemic(out, threshold=5):
         merged.append({
             "variant": f"{len(rs)} packages [{rule}]", "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else ""),
             "fix_in": (rs[0]["fix_in"] if rule == "builder-specific"
-                       else "systemic: the PR itself, a shared dependency, or the CI environment"),
-            "rule": rule + "-systemic", "error": f"{len(rs)} packages: {pattern}",
+                       else "the PR, a shared dependency, or the CI"),
+            "rule": rule + "-systemic", "error": f"{len(rs)} packages: {pattern[:1].lower()}{pattern[1:]}",
             "confidence": "medium",
             "note": (rs[0].get("note") if rule == "builder-specific" else
-                     (f"shared failing dependencies: {dict(culprits.most_common(3))}; " if culprits else "")
-                     + f"per-package fix if needed: {rs[0].get('new', '')}"),
+                     (("Failing dependencies: " + ", ".join(f"{d} ({n} packages)" for d, n in culprits.most_common(3))
+                       + ". ") if culprits else "")
+                     + f"Fix per package if needed: {rs[0].get('new', '')}"),
             "_keys": [k for r in rs for k in r.get("_keys", [])],
             "jobs": merge_jobs([], [v for r in rs for v in r.get("jobs", [])])})
     return merged
@@ -2088,20 +2212,20 @@ PER_PACKAGE_RULES = {"newer-c-compiler", "system-library-version"}
 NEWER_CC = [
     (re.compile(r"error: .*\[-W(implicit-int|implicit-function-declaration|incompatible-pointer-types|"
                 r"int-conversion|return-mismatch|declaration-missing-parameter-type)\]"),
-     "GCC 14 turned -W{0} into an error by default (C code relying on pre-C99 rules)",
-     "fix the C code upstream; for an old release, a patch or `x-maintained: false`; "
-     "adding -fpermissive or -Wno-error={0} to the C flags also works"),
+     "GCC 14 turned -W{0} into an error by default: the C code relies on pre-C99 rules",
+     "Fix the C code upstream. For an old release, add a patch or `x-maintained: false`; "
+     "adding -fpermissive or -Wno-error={0} to the C flags also works."),
     (re.compile(r"'u?int(?:8|16|32|64)_t' (?:does not name a type|was not declared in this scope|has not been declared)"
                 r"|is defined in header '<cstdint>'"),
-     "GCC 13's libstdc++ no longer includes <cstdint> through other headers",
-     "add `#include <cstdint>` upstream (or a patch in the opam file for an old release)"),
+     "Since GCC 13, libstdc++ headers no longer include <cstdint> for you",
+     "Add `#include <cstdint>` upstream, or a patch in the opam file for an old release."),
     (re.compile(r"(?:cannot use keyword|expected identifier or '\(' before) '(?:bool|true|false)'"
                 r"|'bool' cannot be defined via 'typedef'"),
-     "GCC 15 compiles C as C23 by default, where bool/true/false are keywords",
-     "fix the C code upstream, or build it with -std=gnu17"),
+     "GCC 15 compiles C as C23 by default, where bool, true and false are keywords",
+     "Fix the C code upstream, or build it with -std=gnu17."),
     (re.compile(r"error: .*\[-Werror=([\w-]+?)=?\]"),
-     "the package builds with -Werror, and a newer compiler emits a new warning (-W{0})",
-     "drop -Werror from release builds upstream; for an old release, a patch or `x-maintained: false`"),
+     "The package builds with -Werror, and a newer compiler emits a new warning (-W{0})",
+     "Drop -Werror from release builds upstream. For an old release, add a patch or `x-maintained: false`."),
 ]
 
 
@@ -2128,7 +2252,7 @@ def c_compiler_rule(text, platform):
             arg = m.group(1) if m.groups() else ""
             line = next((l for l in text.splitlines() if rx.search(l)), m.group(0))
             return {"rule": "newer-c-compiler", "error": line.strip()[:200], "confidence": "high",
-                    "keep": True, "_plat": platform, "note": f"{cause.format(arg)} (on {platform}); {fix.format(arg)}"}
+                    "keep": True, "_plat": platform, "note": f"{cause.format(arg)} (seen on {platform}). {fix.format(arg)}"}
     return None
 
 
@@ -2147,14 +2271,14 @@ def log_rules(src, err, fname, opam_text, info, job):
         return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
                 "error": f"LLVM <= {want} required; {platform} has LLVM {have}",
                 "note": f"{fname} needs LLVM {want} or older, but its depexts install the distribution's default "
-                        f"LLVM, now {have.split('.')[0]} on {platform}: {fname} needs versioned depexts there "
-                        f"(e.g. llvm{want}/clang{want} compatibility packages), or a conf-libclang "
-                        f"version matching LLVM {have.split('.')[0]}"}
+                        f"LLVM, which is now {have.split('.')[0]} on {platform}. It needs versioned depexts there "
+                        f"(llvm{want} and clang{want} compatibility packages, for example), or a new "
+                        f"conf-libclang version for LLVM {have.split('.')[0]}."}
     m = re.search(r"No usable version of LLVM <= ([\d.x]+) found", text)
     if m:
         return {"rule": "system-library-version", "keep": True, "confidence": "medium", "error": m.group(0),
-                "note": f"no LLVM found on {platform}: {fname} has no depext for it (add one, or "
-                        f"x-ci-accept-failures if LLVM is not packaged there)"}
+                "note": f"No LLVM found on {platform}: {fname} has no depext for it. Add one, or "
+                        f"x-ci-accept-failures if LLVM is not packaged there."}
     m = (re.search(r"pkg-config (?:--atleast-version[= ](\S+)|--exact-version[= ](\S+)|--max-version[= ](\S+)) "
                    r"([\w.+-]+)\)?\s*\n(?:.*\n){0,2}?.*(?:exited with code|exit status) 1", text)
          or re.search(r"Requested '([\w.+-]+) (>=|<=|=) ([\w.~+-]+)' but version of .* is ([\w.~+-]+)", text))
@@ -2168,9 +2292,9 @@ def log_rules(src, err, fname, opam_text, info, job):
         too = "too old" if op == ">=" else "too new" if op == "<=" else "not the expected version"
         return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
                 "error": f"{lib} {op} {want} required; {platform} has {have or 'an older version'}",
-                "note": f"the system {lib} is {too} on {platform}: no depext change can fix it there; exclude "
-                        f"these distributions (`x-ci-accept-failures`, or `available` on os-distribution/os-version)"
-                        f", or relax the requirement upstream"}
+                "note": f"The system {lib} is {too} on {platform}, and no depext can change that. Exclude "
+                        f"these distributions (`x-ci-accept-failures`, or `available` on os-distribution and "
+                        f"os-version), or relax the requirement upstream."}
     m = re.search(r"Version (\d+\.\d+) of the dune language is not supported", text)
     if m:
         old, new = constraint_edit(opam_text, "dune", ">=", m.group(1))
@@ -2199,35 +2323,35 @@ def log_rules(src, err, fname, opam_text, info, job):
         if fname.startswith("conf-") and dims["distro"] and dims["distro"] in accepted:
             r.update(fix_in="the CI environment",
                      note=f"{fname} lists {dims['distro']} in x-ci-accept-failures, so CI should have "
-                          f"ignored this failure (and the failures of the packages depending on it)",
+                          f"ignored this failure and the failures of the packages that depend on it.",
                      confidence="high")
         elif fname.startswith("conf-") and declared:
             r.update(fix_in="the CI environment",
-                     note=f"{fname} declares a depext for {family} ({', '.join(declared)}), yet `{tool}` "
-                          f"is missing on {platform}: the CI did not install it; nothing to change in "
-                          f"{fname}", confidence="high")
+                     note=f"{fname} declares a depext for {family} ({', '.join(declared)}), but `{tool}` "
+                          f"is missing on {platform}: the CI did not install it. Nothing to change in "
+                          f"{fname}.", confidence="high")
         elif fname.startswith("conf-"):
-            r.update(note=f"{fname} does not provide `{tool}` on {platform}: its depexts lack an entry for that "
-                          f"platform (add one), or the CI image is missing it", confidence="medium")
+            r.update(note=f"{fname} does not provide `{tool}` on {platform}: its depexts have no entry for that "
+                          f"platform. Add one, unless the CI image should already have it.", confidence="medium")
         elif conf in deps:
-            r.update(note=f"{conf} is a dependency but `{tool}` is missing on {platform}: depext gap in {conf}",
+            r.update(note=f"{conf} is a dependency, but `{tool}` is missing on {platform}: {conf} lacks a depext for it.",
                      confidence="medium")
         elif src.versions(conf):
             r.update(dep=conf, old=None, new=f'"{conf}" {{build}}   (new line in depends)', confidence="medium")
         else:
-            r.update(note=f"no {conf} package: add a depext providing `{tool}` for {platform}", confidence="low")
+            r.update(note=f"There is no {conf} package: add a depext providing `{tool}` on {platform}.", confidence="low")
         return r
     m = re.search(r"Package (\S+) was not found in the pkg-config search path", text)
     if m:
         conf = f"conf-{m.group(1)}"
         r = {"rule": "missing-pkg-config", "error": m.group(0)}
         if conf in deps:
-            r.update(note=f"{conf} is a dependency but its pkg-config file is missing on {platform}: depext gap in {conf}",
+            r.update(note=f"{conf} is a dependency, but its pkg-config file is missing on {platform}: {conf} lacks a depext for it.",
                      confidence="medium")
         elif src.versions(conf):
             r.update(dep=conf, old=None, new=f'"{conf}"   (new line in depends)', confidence="medium")
         else:
-            r.update(note=f"add a depext providing {m.group(1)}.pc for {platform}", confidence="low")
+            r.update(note=f"Add a depext providing {m.group(1)}.pc on {platform}.", confidence="low")
         return r
     m = re.search(r'Library "([\w.-]+)" not found', text) or re.search(r"Package `([\w.-]+)' not found", text)
     if m:
@@ -2248,24 +2372,24 @@ def log_rules(src, err, fname, opam_text, info, job):
                 r["alternative"] = f'"{pkg}" {{= version}}  (released together, same version)'
         elif pkg in siblings and pkg not in deps and pkg != fname:
             r.update(note=f"`{lib}` comes from {pkg}, another package of this PR: the tests of {fname} use a sibling "
-                          f"package; restrict them (dune `(package ...)` on the test stanza, or no `@runtest` under "
-                          f"`-p {fname}`) rather than adding a dependency, which would create a cycle",
+                          f"package. Restrict them (a dune `(package ...)` field on the test stanza, or no `@runtest` "
+                          f"under `-p {fname}`) instead of adding a dependency, which would create a cycle.",
                      confidence="medium")
         elif pkg in deps or pkg == fname:
             r.update(note=f"{pkg} is already a dependency: `{lib}` may only exist in other versions of {pkg}, "
-                          f"or be an optional sub-library", confidence="low")
+                          f"or be an optional sub-library.", confidence="low")
         elif src.versions(pkg):
             filt = " {with-test}" if in_tests else ""
             r.update(dep=pkg, old=None, new=f'"{pkg}"{filt}   (new line in depends)', confidence="medium")
         else:
-            r.update(note=f"`{lib}` is not an opam package: an internal library, probably missing from the "
-                          f"release archive or excluded by `-p {fname}`", confidence="medium")
+            r.update(note=f"`{lib}` is not an opam package. It is probably an internal library missing from the "
+                          f"release archive, or excluded by `-p {fname}`.", confidence="medium")
         return r
     m = re.search(r"fatal error: ([\w/.+-]+): No such file or directory", text)
     if m:
         return {"rule": "missing-header", "error": m.group(0), "confidence": "low",
-                "note": f"system header missing on {platform}: add the depext (or conf-* dependency) that provides "
-                        f"{m.group(1)}, or x-ci-accept-failures for platforms without it"}
+                "note": f"A system header is missing on {platform}. Add the depext (or conf-* dependency) that provides "
+                        f"{m.group(1)}, or x-ci-accept-failures for the platforms without it."}
     return None
 
 
@@ -2344,9 +2468,9 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                 if lid:
                     r.update(old=f'license: "{val}"', new=f'license: "{lid.split(" ")[0]}"',
                              confidence="high" if "check" not in lid else "medium",
-                             note=f"detected from the license text: {lid}")
+                             note=f"Detected from the license text ({lid}).")
                 else:
-                    r.update(note="use an SPDX identifier (https://spdx.org/licenses/)", confidence="medium")
+                    r.update(note="Use an SPDX identifier (https://spdx.org/licenses/).", confidence="medium")
             elif "warning 68" in text and "license" in text:
                 lic, origin = None, None
                 for v in [v for v in reversed(src.versions(name)) if v != ver][:2]:
@@ -2364,9 +2488,9 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                             break
                 if lic:
                     r.update(old=None, new=f'license: "{lic}"', confidence="high" if "(check)" not in origin else "medium",
-                             note=f"taken from {origin}")
+                             note=f"Taken from {origin}.")
                 else:
-                    r.update(note="add a `license:` field with an SPDX identifier", confidence="medium")
+                    r.update(note="Add a `license:` field with an SPDX identifier.", confidence="medium")
             elif "warning 47" in text:
                 opam = src.opam_file(name, ver, sha) if sha else None
                 syn = opam_field(opam, "synopsis")
@@ -2375,12 +2499,12 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                     fixed = fixed[:1].upper() + fixed[1:]
                     r.update(old=f'synopsis: "{syn}"', new=f'synopsis: "{fixed}"', confidence="high")
                 else:
-                    r.update(note="start the synopsis with a capital letter, no final dot", confidence="high")
+                    r.update(note="Start the synopsis with a capital letter, without a final dot.", confidence="high")
             elif "warning 59" in text or ("Weak checksum" in text and "field url" in text):
                 opam = src.opam_file(name, ver, sha) if sha else None
                 u = url_src(opam) or "<archive URL>"
                 r.update(new='checksum: ["sha256=<hash>" "sha512=<hash>"]   (in the url section)',
-                         note=f"compute with: curl -sL {u} | sha256sum   (and sha512sum)", confidence="high")
+                         note=f"Compute it with: curl -sL {u} | sha256sum (or sha512sum).", confidence="high")
             elif "extra-files" in text or "Unexpected file in packages/" in text:
                 opam = src.opam_file(name, ver, sha) if sha else None
                 section = (opam or "").split("extra-files:", 1)[1] if "extra-files:" in (opam or "") else ""
@@ -2389,55 +2513,61 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                 f0 = files[0] if files else "<file>"
                 r.update(new=f'extra-source "{f0}" {{ src: "<URL where {f0} is published>" '
                              f'checksum: ["sha256=<hash>"] }}',
-                         note="opam-repository does not accept files/ any more: publish the file (upstream "
-                              "repository, release asset), refer to it with extra-source, and delete "
-                              f"extra-files and packages/{name}/{name}.{ver}/files/"
-                              + (f"; files: {', '.join(files)}" if files else ""), confidence="high")
+                         note="opam-repository no longer accepts files/: publish the file (in the upstream "
+                              "repository, or as a release asset), refer to it with extra-source, and delete "
+                              f"extra-files and packages/{name}/{name}.{ver}/files/."
+                              + (f" Files: {', '.join(files)}." if files else ""), confidence="high")
             elif "Weak checksum" in text:
-                r.update(note="use SHA-256 or SHA-512 checksums (compute with sha256sum / sha512sum)",
+                r.update(note="Use SHA-256 or SHA-512 checksums (compute them with sha256sum or sha512sum).",
                          confidence="high")
             elif "error 60" in text:
                 opam = src.opam_file(name, ver, sha) if sha else None
                 u = url_src(opam) or "<archive URL>"
-                r.update(note="the upstream archive no longer matches the checksum (tag moved or archive "
-                              f"regenerated): recompute with curl -sL {u} | sha256sum, and check with upstream "
-                              "that the release did not change", confidence="high")
+                r.update(note="The upstream archive no longer matches the checksum (the tag moved, or the archive "
+                              f"was regenerated). Recompute it with curl -sL {u} | sha256sum, and check with "
+                              "upstream that the release did not change.", confidence="high")
             elif "error 46" in text:
-                r.update(note='flagged "conf" but has url/build/install: conf packages only check for system '
-                              'packages. Either remove the `conf` flag (and `conf-` prefix) if it really builds '
-                              'something, or drop url/build/install. A conf package that must build needs the '
-                              'maintainers\' agreement', confidence="medium")
+                r.update(note='Flagged "conf" but has url, build or install, while conf packages only check for system '
+                              'packages. Remove the `conf` flag (and the `conf-` prefix) if it really builds '
+                              'something, or drop url, build and install. A conf package that builds something '
+                              'needs the maintainers\' agreement.', confidence="medium")
             elif "warning 41" in text:
                 named = re.findall(r'"([\w+-]+)"', text)
                 if name in named:
                     r.update(old=f"%{{{name}:VAR}}%", new="%{_:VAR}%   (in build/install/remove)",
-                             confidence="high", note="the package refers to itself: use the `_` prefix")
+                             confidence="high", note="The package refers to its own variables by name: use the `_` prefix.")
                 else:
-                    r.update(note=f"add {', '.join(named)} to depends or depopts", confidence="high")
+                    r.update(note=f"Add {', '.join(named)} to depends or depopts.", confidence="high")
             elif "No package source directory" in text:
                 opam = src.opam_file(name, ver, sha) if sha else None
                 if url_src(opam):
-                    r.update(note="the package has a url but its source could not be fetched or verified "
-                                  "(see the other lint errors, e.g. a checksum mismatch)", confidence="medium")
+                    r.update(note="The package has a url, but its source could not be fetched or verified (see the "
+                                  "other lint errors, such as a checksum mismatch).", confidence="medium")
                 else:
-                    r.update(note="known opam-ci-check false positive for packages without `url` (virtual "
-                                  "packages); maintainers waive it", confidence="high")
+                    r.update(note="Known false positive of opam-ci-check for packages without `url` (virtual "
+                                  "packages): maintainers accept it.", confidence="high")
             elif "conf packages should always use" in text:
                 opam = src.opam_file(name, ver, sha) if sha else None
                 if re.search(r"depexts:[\s\S]*?npm-version", opam or ""):
-                    r.update(note="the depexts are npm packages (`npm-version` filter, checked by "
-                                  "opam-check-npm-deps), the usual convention for Melange bindings: a false "
-                                  "positive of this lint, nothing to change; maintainers waive it",
+                    r.update(note="The depexts are npm packages (`npm-version` filter, checked by "
+                                  "opam-check-npm-deps), the usual convention for Melange bindings. This lint "
+                                  "error is a false positive: nothing to change, maintainers accept it.",
                              confidence="high")
                 else:
-                    r.update(note="non-conf package with `depexts`: move them into a conf-* package, or ask the "
-                                  "maintainers to waive it (often accepted)", confidence="medium")
+                    r.update(note="This package has `depexts` but is not a conf package: move them into a conf-* "
+                                  "package, or ask the maintainers to accept it (they often do).", confidence="medium")
             else:
-                r["note"] = "no rule for this lint message"
+                r["note"] = "No rule for this lint message."
             if baseline and (name, text) in baseline[1]:
                 prev = (r.get("note") or "").rstrip(".")
                 r["note"] = ((prev + ". " if prev else "") + f"Already reported in the CI of #{baseline[0]} "
                              "(the previous release), which was merged.")
+            # one entry for the same message and explanation on several packages
+            same = next((o for o in out if not r.get("new") and not o.get("new") and o["error"] == r["error"]
+                         and o.get("note") == r.get("note")), None)
+            if same:
+                same["failing"] += ", " + r["failing"]
+                continue
             # one entry per (package, fix): several lint messages often share a fix
             if r.get("new") and any(o["failing"] == r["failing"] and o.get("new") == r["new"] for o in out):
                 prev = next(o for o in out if o["failing"] == r["failing"] and o.get("new") == r["new"])
@@ -2471,9 +2601,10 @@ def skipped_rules(data, src, cache_dir, pr_packages):
             first = firsts.pop()
             ends = sorted({c.split(" -> ")[2] for c in chains if c.count(" -> ") >= 2})
             r.update(confidence="high",
-                     note=f"every conflict goes through `{first}`"
+                     note=f"Every solver conflict goes through `{first}`"
                           + (f", which requires {' or '.join(ends)}" if ends else "")
-                          + ": relax or drop that constraint (check which versions of the dependency really fail)")
+                          + ". Relax or drop that constraint, after checking which versions of the dependency "
+                            "really fail.")
         out.append(r)
     return out
 
@@ -2491,7 +2622,7 @@ def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
     over dates for the candidates."""
     day = src.published(fname, fver)
     if not day:
-        r["note"] = "no passing job to compare with, and no release date for the package"
+        r["note"] = "No passing job to compare with, and no release date for the package."
         return
     opam_text = src.opam_file(fname, fver) or ""
     dep_lines = re.findall(r'^\s*"([\w+-]+)"([^\n]*)$', opam_text.split("depends:", 1)[-1].split("\n]", 1)[0], re.M)
@@ -2528,7 +2659,7 @@ def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
     r["also_newer"] = [d for _, _, d, _ in newer[3:]]
     r["confidence"] = "low (dependencies released after the package; check their changelogs)"
     if not cands:
-        r["note"] = f"none of the {min(len(deps), max_lookups)} dependencies checked was released after {fname}.{fver} ({day})"
+        r["note"] = f"None of the {min(len(deps), max_lookups)} dependencies checked was released after {fname}.{fver} ({day})."
 
 
 def opam_path(pkg):
@@ -2564,9 +2695,10 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
     for r in results:
         if not r.get("_placed"):
             by[r["class"]].append(r)
-    out = ["### opam-repo-ci triage (automated, please double-check)", "",
-           f"Based on the [CI results]({BASE}{sha}) for `{sha[:12]}`. Nothing was rebuilt: the suggestions "
-           "come from the CI logs, the per-version API docs on ocaml.org and the opam files.", ""]
+    out = ["### Automated triage of the opam-repo-ci failures", "",
+           f"From the [CI results]({BASE}{sha}) for commit `{sha[:12]}`. Nothing was rebuilt: these "
+           "suggestions come from the CI logs, the documentation of each package version on ocaml.org, and "
+           "the opam files. Please check them before applying them.", ""]
     fixes = by["fix"]
     if placed:
         out += [f"{placed} suggested change{'s are' if placed > 1 else ' is'} attached to "
@@ -2576,8 +2708,8 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
         out += [f"#### {'Other suggested' if placed else 'Suggested'} changes ({len(fixes)})", ""]
         for r in fixes:
             path = opam_path(r.get("failing"))
-            out.append(f"**`{path or r.get('failing')}`** ({r.get('rule')}, {r.get('confidence')} confidence)"
-                       + jobs_note(r))
+            out.append(f"**`{path or r.get('failing')}`**: {r.get('title') or r.get('rule')} "
+                       f"({r.get('confidence')} confidence){jobs_note(r)}")
             if r.get("error"):
                 out.append(f"> {r['error'][:300]}")
             if r.get("candidates"):
@@ -2586,7 +2718,8 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
             else:
                 out.append(diff_block(r))
                 if r.get("alternative"):
-                    out.append(f"or `{r['alternative'].split('  (')[0]}` ({r['alternative'].split('(')[-1].rstrip(')')})")
+                    alt = re.split(r"\s{2,}(?=\()", r["alternative"], maxsplit=1)
+                    out.append(f"Or `{alt[0].strip()}`" + (f" {alt[1].strip()}" if len(alt) > 1 else ""))
             ev = evidence_line(r)
             if ev:
                 out.append(f"<sub>{ev[:400]}</sub>")
@@ -2602,18 +2735,33 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
             body += fmt(r) + [""]
         return body + ["</details>", ""]
 
-    out += details("Platform-specific failures: possible workarounds", by["workaround"], lambda r: [
-        f"- **{r.get('failing') or r.get('variant')}**{' (experimental platform)' if r.get('experimental') else ''}"
-        f"{jobs_note(r)}: {(r.get('error') or '')[:220]}",
+    def head(r, where=False):
+        exp = " (experimental platform)" if r.get("experimental") else ""
+        what = [r.get("title") or r.get("rule")] + ([f"fix in {r.get('where') or r.get('fix_in')}"] if where else [])
+        if r.get("failing"):
+            return f"- **{r['failing']}**{exp} ({'; '.join(what)}){jobs_note(r)}"
+        return f"- **{what[0]}**{exp} ({'; '.join([r.get('job') or r['variant']] + what[1:])})"
+
+    def job_links(r, n=10):
+        # For the entries whose content is the list of jobs (reruns, failures no rule recognises).
+        if r.get("rule") not in ("rerun", "unrecognised"):
+            return ""
+        js = r.get("jobs") or []
+        links = [f"[{describe_job(v)}]({BASE}{sha}/variant/{v})" for v in js[:n]]
+        return (f"<br>Jobs: {', '.join(links)}" + (f" and {len(js) - n} more" if len(js) > n else "")) if js else ""
+
+    out += details("Workarounds: restrict where this PR is built or tested", by["workaround"], lambda r: [
+        f"{head(r)}: {(r.get('error') or '')[:220]}",
         "  " + diff_block(r).replace("\n", "\n  ")])
-    out += details("Failures in other packages or in CI (nothing to change here)", by["elsewhere"], lambda r: [
-        f"- **{r.get('failing') or r.get('variant')}** ({r.get('fix_in')}){jobs_note(r)}: {(r.get('error') or '')[:200]}"
-        + (f"<br>suggestion: `{(r.get('new') or '').split('   ')[0]}`" if r.get("new") else "")
-        + (f"<br>{r['note'][:200]}" if r.get("note") else "")])
-    out += details("Explained but no change suggested", by["explanation"], lambda r: [
-        f"- **{r.get('failing') or r.get('variant')}**{jobs_note(r)}: {(r.get('error') or '')[:150]}"
-        + (f" — {r['note'][:200]}" if r.get("note") else "")
-        + (f" ([log]({r['url']}))" if r.get("url") else "")])
+    out += details("Problems in other packages or in the CI (nothing to change in this PR)", by["elsewhere"],
+                   lambda r: [
+        f"{head(r, where=True)}: {(r.get('error') or '')[:200]}"
+        + (f"<br>Suggested change: `{(r.get('new') or '').split('   ')[0]}`" if r.get("new") else "")
+        + (f"<br>{r['note'][:300]}" if r.get("note") else "") + job_links(r)])
+    out += details("Other findings (no change suggested)", by["explanation"], lambda r: [
+        f"{head(r)}: {(r.get('error') or '')[:150]}"
+        + (f"<br>{r['note'][:300]}" if r.get("note") else "")
+        + (f" ([log]({r['url']}))" if r.get("url") else "") + job_links(r)])
     out.append("<sub>Generated by opam_repo_ci_triage.py</sub>")
     return "\n".join(out)
 
@@ -2732,13 +2880,17 @@ def rank(results):
 def render_suggestions(results):
     for r in results:
         print("=" * 100)
-        print(f"{r['variant']}")
-        if len(r.get("jobs") or []) > 1:
+        print(f"{r.get('title') or r.get('rule') or 'Note'}: {r.get('job') or r['variant']}")
+        if r.get("rule") in ("rerun", "unrecognised"):
+            for v in r.get("jobs") or []:
+                print(f"  job             : {describe_job(v)}")
+        elif len(r.get("jobs") or []) > 1:
             others = [v for v in r["jobs"] if v != r["variant"]]
-            print(f"  same failure on : {len(r['jobs'])} failed jobs; also " + ", ".join(others[:5])
+            print(f"  same failure on : {len(r['jobs'])} failed jobs; also "
+                  + ", ".join(describe_job(v) for v in others[:5])
                   + (f", ... ({len(others) - 5} more)" if len(others) > 5 else ""))
         if r.get("failing"):
-            print(f"  failing package : {r['failing']}   fix goes in: {r.get('fix_in')}"
+            print(f"  failing package : {r['failing']}   fix in: {r.get('where') or r.get('fix_in')}"
                   + ("   (experimental platform: does not block)" if r.get("experimental") else ""))
         if r.get("error"):
             print(f"  error           : {r['error']}")
@@ -2749,8 +2901,8 @@ def render_suggestions(results):
         for t in r.get("tried", []):
             print(f"  tried           : {t}")
         if r.get("new"):
-            label = {"workaround": "workaround", "elsewhere": "in another package"}.get(r.get("class"), "suggestion")
-            print(f"  {label} ({r.get('rule')}, {r.get('confidence')}):")
+            label = {"workaround": "workaround", "elsewhere": "change elsewhere"}.get(r.get("class"), "suggested change")
+            print(f"  {label} ({r.get('confidence')} confidence):")
             if r.get("old"):
                 print(f"    - {r['old']}")
             print(f"    + {r['new']}")
@@ -2770,8 +2922,6 @@ def render_suggestions(results):
             print(f"  also released after it (not ranked): {', '.join(r['also_newer'])}")
         if r.get("note"):
             print(f"  note            : {r['note']}")
-        if r.get("also_seen_on"):
-            print(f"  also seen on    : {', '.join(r['also_seen_on'])}")
         if r.get("llm_prompt"):
             print("  LLM prompt (dry run):\n    " + r["llm_prompt"].replace("\n", "\n    "))
 

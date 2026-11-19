@@ -46,6 +46,11 @@ Common options:
 
 ### suggest
 
+Each suggestion in the `--json` output has machine fields (`rule`, `variant`, `fix_in`, `jobs`) and fields
+for people: `title` (the rule in words), `job` (the CI job in words, e.g. "frama-clang.0.0.21~beta on
+archlinux x86_64, OCaml 5.5 (day10 builder)") and `where` (where the fix goes). Failures that no rule
+recognises are grouped in one "Not recognised" entry listing their jobs.
+
 | Failure | Suggestion | Confidence |
 |---|---|---|
 | Unbound value / module / constructor / record field / type from a library | `>=` the version that introduced it, or `<` the version that removed it, found from per-version API docs; `{= version}` when both packages come from the same repository | high |

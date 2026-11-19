@@ -14,15 +14,23 @@ import html
 import json
 import os
 import re
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from opam_repo_ci_triage import BASE, RULE_TITLES, describe_job  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
-CLASSES = [("fix", "Fixes for this PR"),
-           ("workaround", "Workarounds (restrict where it is built or tested)"),
-           ("elsewhere", "Elsewhere (another package, CI, systemic)"),
-           ("explanation", "Explanations (no change suggested)")]
-CATEGORIES = [("fix", "Fix for the PR itself"), ("blocked", "Blocked by other packages"),
-              ("ci", "CI only"), ("other", "Needs a look"), ("error", "Not analysed")]
+CLASSES = [("fix", "Changes to this PR", "change"),
+           ("workaround", "Workarounds: restrict where this PR is built or tested", "workaround"),
+           ("elsewhere", "Problems in other packages or in the CI", "elsewhere"),
+           ("explanation", "Other findings, no change suggested", "other finding")]
+CATEGORIES = [("fix", "Has a fix for the PR"), ("blocked", "Blocked by other packages"),
+              ("ci", "CI problems only"), ("other", "Needs a look"), ("error", "Not analysed")]
+# Job categories (from `summary`), in words.
+JOB_CATEGORIES = {"build": "build failed", "build-or-test": "build or tests failed",
+                  "dependency": "a dependency failed", "solver": "no solution", "network": "network error",
+                  "cancelled": "cancelled", "sources": "sources not unpacked", "lint": "lint",
+                  "not-available": "skipped (not installable there)", "ignored": "ignored (accepted failure)"}
 NOISE = {"passed", "network", "cancelled", "not-available", "ignored"}
 
 
@@ -71,33 +79,33 @@ def failed_count(pr):
     return sum(v for k, v in failed.items() if k not in NOISE), sum(failed.values())
 
 
-def render_suggestion(r):
-    out = ['<div class="sugg">', '<div class="sh">']
+def job_link(sha, variant):
+    return link(f"{BASE}{sha}/variant/{variant}" if sha else None, describe_job(variant))
+
+
+def render_suggestion(r, sha=None):
+    rule = r.get("rule")
+    title = r.get("title") or RULE_TITLES.get(rule, rule) or "Note"
+    out = ['<div class="sugg">', '<div class="sh">', f'<b>{e(title)}</b>']
     if r.get("failing"):
-        out.append(f'<b>{e(r["failing"])}</b>')
-    if r.get("rule"):
-        out.append(f'<span class="tag">{e(r["rule"])}</span>')
+        out.append(f'<span class="pkg">{e(r["failing"])}</span>')
     if r.get("confidence"):
         conf = str(r["confidence"]).split(" ")[0]
-        out.append(f'<span class="tag conf-{e(conf)}" title="{e(r["confidence"])}">{e(conf)}</span>')
+        out.append(f'<span class="tag conf-{e(conf)}" title="{e(r["confidence"])}">{e(conf)} confidence</span>')
     if r.get("experimental"):
-        out.append('<span class="tag">experimental platform</span>')
+        out.append('<span class="tag" title="Failures on experimental platforms do not block the PR">'
+                   'experimental platform</span>')
     out.append("</div>")
     meta = []
-    if r.get("variant"):
-        meta.append("job: " + link(r.get("url"), r["variant"]))
-    if r.get("fix_in"):
-        meta.append("fix goes in: " + e(r["fix_in"]))
+    jobs = r.get("jobs") or []
+    lists_jobs = rule in ("rerun", "unrecognised")
+    if r.get("variant") and r.get("url") and not lists_jobs:
+        meta.append("Job: " + link(r.get("url"), r.get("job") or describe_job(r["variant"])))
+    where = r.get("where") or r.get("fix_in")
+    if where and where not in ("unknown",):
+        meta.append("Fix in: " + e(where))
     if meta:
         out.append(f'<div class="meta">{" · ".join(meta)}</div>')
-    jobs = r.get("jobs") or []
-    others = [v for v in jobs if v != r.get("variant")]
-    if others:
-        # A matrix suggestion's variant is a label, not one of its jobs: then list them all.
-        what = (f'{len(others)} more job{"s" if len(others) != 1 else ""} ({len(jobs)} in total)'
-                if len(others) < len(jobs) else f'{len(jobs)} job{"s" if len(jobs) != 1 else ""}')
-        out.append(f'<details class="jobs"><summary>same failure on {what}</summary>'
-                   f'<ul>{"".join(f"<li>{e(v)}</li>" for v in others)}</ul></details>')
     if r.get("error"):
         out.append(f'<pre class="err">{e(r["error"])}</pre>')
     if r.get("new"):
@@ -109,7 +117,8 @@ def render_suggestion(r):
             diff.append(f'<span class="alt">or {e(r["alternative"])}</span>')
         out.append('<pre class="diff">' + "\n".join(diff) + "</pre>")
     if r.get("candidates"):
-        out.append(f'<div class="meta">candidates (compared with {e(r.get("compared_with") or "?")}):</div>')
+        out.append(f'<div class="meta">Dependencies that may have changed the output '
+                   f'(compared with {e(r.get("compared_with") or "?")}):</div>')
         for c in r["candidates"]:
             if "first_after" in c:
                 what = f'{c.get("failing")} installed; first release after the compared one: {c.get("first_after")}'
@@ -122,20 +131,31 @@ def render_suggestion(r):
                 diff.append(f'<span class="add">+ {e(c["new"])}</span>')
             out.append('<pre class="diff">' + "\n".join(diff) + "</pre>")
     if r.get("also_newer"):
-        out.append(f'<div class="meta">also released after it (not ranked): {e(", ".join(map(str, r["also_newer"])))}</div>')
+        out.append(f'<div class="meta">Also released after it (not ranked): '
+                   f'{e(", ".join(map(str, r["also_newer"])))}</div>')
     if r.get("evidence"):
         ev = []
         for k, v in r["evidence"].items():
             word, cls = ("yes", "yes") if v is True else (("no", "no") if v is False else ("?", "unk"))
             ev.append(f'<li>{e(k)}: <span class="{cls}">{word}</span></li>')
         src = f' (looked up in {e(r["source"])})' if r.get("source") else ""
-        out.append(f'<div class="meta">evidence{src}:</div><ul class="ev">{"".join(ev)}</ul>')
+        out.append(f'<div class="meta">Is it defined in each version?{src}</div><ul class="ev">{"".join(ev)}</ul>')
     elif r.get("source"):
-        out.append(f'<div class="meta">looked up in: {e(r["source"])}</div>')
+        out.append(f'<div class="meta">Looked up in: {e(r["source"])}</div>')
     for t in r.get("tried") or []:
-        out.append(f'<div class="meta">tried: {e(t)}</div>')
+        out.append(f'<div class="meta">Tried: {e(t)}</div>')
     if r.get("note"):
         out.append(f'<div class="note">{e(r["note"])}</div>')
+    if lists_jobs and jobs:
+        out.append(f'<ul class="jobs">{"".join(f"<li>{job_link(sha, v)}</li>" for v in jobs)}</ul>')
+    else:
+        others = [v for v in jobs if v != r.get("variant")]
+        if others:
+            # A matrix suggestion's variant is a label, not one of its jobs: then list them all.
+            what = (f'{len(others)} more job{"s" if len(others) != 1 else ""}' if len(others) < len(jobs)
+                    else f'{len(jobs)} job{"s" if len(jobs) != 1 else ""}')
+            out.append(f'<details class="jobs"><summary>Same failure on {what}</summary>'
+                       f'<ul>{"".join(f"<li>{job_link(sha, v)}</li>" for v in others)}</ul></details>')
     out.append("</div>")
     return "\n".join(out)
 
@@ -144,38 +164,39 @@ def render_pr(pr):
     cats, groups = categorise(pr)
     n = int(pr["number"])
     real, total = failed_count(pr)
-    counts = [f'<span class="cnt c-{k}" title="{e(label)}">{len(groups[k])} {k}</span>'
-              for k, label in CLASSES if groups.get(k)]
+    counts = [f'<span class="cnt c-{k}" title="{e(label)}">{len(groups[k])} {e(word)}'
+              f'{"s" if len(groups[k]) != 1 and k != "elsewhere" else ""}</span>'
+              for k, label, word in CLASSES if groups.get(k)]
     badges = "".join(f'<span class="badge b-{c}">{e(label)}</span>' for c, label in CATEGORIES if c in cats)
     title = pr.get("title") or ""
     search = f"{n} {title} {pr.get('author') or ''}".lower()
     head = (f'<summary><span class="num">{link(f"{REPO_URL}/pull/{n}", f"#{n}")}</span>'
             f'<span class="title">{e(title)}{" <i>(draft)</i>" if pr.get("draft") else ""}</span>'
             f'<span class="row2">{badges}'
-            f'<span class="cnt" title="failed jobs excluding network, cancelled and not-available">'
-            f'{real} failed job{"s" if real != 1 else ""}</span>{"".join(counts)}'
-            f'{link(pr.get("ci_url"), "CI run", "ci")}'
+            f'<span class="cnt" title="Failed build and test jobs (network errors, cancelled and skipped '
+            f'jobs are not counted)">{real} failed job{"s" if real != 1 else ""}</span>{"".join(counts)}'
+            f'{link(pr.get("ci_url"), "CI results", "ci")}'
             f'<span class="date">{e((pr.get("updated") or "")[:10])}</span></span></summary>')
+    failed = sorted(((pr.get("jobs") or {}).get("failed") or {}).items(), key=lambda kv: -kv[1])
     body = ['<div class="body">',
-            f'<div class="meta">by {e(pr.get("author") or "?")} · head {e((pr.get("sha") or "")[:12])}'
-            f' · analysed {e((pr.get("analysed_at") or "never")[:16].replace("T", " "))}'
-            f' · failed jobs by category: '
-            f'{e(", ".join(f"{k} {v}" for k, v in sorted(((pr.get("jobs") or {}).get("failed") or {}).items())) or "?")}'
+            f'<div class="meta">By {e(pr.get("author") or "?")} · commit {e((pr.get("sha") or "")[:12])}'
+            f' · analysed {e((pr.get("analysed_at") or "never")[:16].replace("T", " "))} UTC'
+            f' · jobs not passing: '
+            f'{e(", ".join(f"{v} {JOB_CATEGORIES.get(k, k)}" for k, v in failed) or "?")}'
             "</div>"]
     if pr.get("pending"):
-        body.append('<p class="note">Not analysed yet (time budget reached); the next run continues.</p>')
+        body.append('<p class="note">Not analysed yet: the run ran out of time. The next run continues.</p>')
     elif pr.get("result") is None:
-        body.append(f'<p class="note">The analysis failed ({e(pr.get("attempts"))} attempt(s)): '
+        body.append(f'<p class="note">The analysis failed ({e(pr.get("attempts"))} attempts): '
                     f'<code>{e(pr.get("error"))}</code></p>')
     else:
         if not pr["result"].get("suggestions"):
-            body.append('<p class="note">No failure analysed.</p>')
-        for k, label in CLASSES:
+            body.append('<p class="note">No build or test failure to analyse.</p>')
+        for k, label, _ in CLASSES:
             if groups.get(k):
                 body.append(f'<h4 class="g-{k}">{e(label)} ({len(groups[k])})</h4>')
-                body.extend(render_suggestion(r) for r in groups[k])
-    body.append('<div class="cmd"><span class="meta">Line-level review, by hand (review it before posting):</span>'
-                f'<pre><code>python3 opam_repo_ci_triage.py review --pr {n}</code></pre></div></div>')
+                body.extend(render_suggestion(r, pr.get("sha")) for r in groups[k])
+    body.append("</div>")
     return (f'<details class="pr" data-cats="{" ".join(sorted(cats))}" data-search="{e(search)}">'
             + head + "\n".join(body) + "</details>")
 
@@ -207,7 +228,7 @@ def chronic(prs, min_prs=2):
                 blamed[(r.get("fix_in") or "").replace(" (other package)", "")].add(n)
     rows = sorted(((rd, d) for rd, d in revdeps.items() if len(d) >= min_prs), key=lambda x: (-len(x[1]), x[0]))
     brows = sorted(((p, s) for p, s in blamed.items() if len(s) >= min_prs), key=lambda x: (-len(x[1]), x[0]))
-    out = ['<section id="chronic"><h2>Chronic failures</h2>']
+    out = ['<section id="chronic"><h2>Failures shared by several PRs</h2>']
     out.append(f'<h3>Reverse dependencies failing on {min_prs} or more PRs ({len(rows)})</h3>')
     if rows:
         trs = []
@@ -221,17 +242,17 @@ def chronic(prs, min_prs=2):
         out.append(table(["Reverse dependency (failing versions)", "PRs", "PRs (one failing job each)"], trs))
     else:
         out.append('<p class="note">None among the analysed PRs.</p>')
-    out.append(f'<h3>Other packages blamed in {min_prs} or more PRs ({len(brows)})</h3>')
+    out.append(f'<h3>Other packages where the fix goes, for {min_prs} or more PRs ({len(brows)})</h3>')
     if brows:
-        out.append(table(["Package", "PRs", "Blamed in"], [
+        out.append(table(["Package", "PRs", "PRs"], [
             f'<tr><td><b>{e(p)}</b></td><td>{len(s)}</td><td>'
             + ", ".join(link(f"{REPO_URL}/pull/{n}", f"#{n}") for n in sorted(s)) + "</td></tr>"
             for p, s in brows]))
     else:
         out.append('<p class="note">None among the analysed PRs.</p>')
-    out.append('<p class="meta">Failed build or test jobs of reverse dependencies (from the CI job list, '
-               'excluding network, cancelled, not-available and experimental jobs); '
-               '"blamed" means a suggestion says the fix goes in that package.</p></section>')
+    out.append('<p class="meta">The first table counts the failed build and test jobs of reverse dependencies '
+               '(network errors, cancelled, skipped and experimental jobs are left out). The second lists the '
+               'packages that suggestions for several PRs point to.</p></section>')
     return "\n".join(out)
 
 
@@ -278,6 +299,9 @@ pre.err{max-height:16em;overflow-y:auto}
 .diff span{display:block}.add{color:var(--add);background:var(--addbg)}.del{color:var(--del);background:var(--delbg)}
 .alt,.cm{color:var(--mut)}
 .note{font-size:.88rem;overflow-wrap:anywhere}
+.lead{max-width:70ch}.pkg{overflow-wrap:anywhere}
+ul.jobs{margin:4px 0;padding-left:20px;font-size:.85rem}
+dl.help dt{font-weight:600;margin-top:.6em}dl.help dd{margin:0 0 0 1.2em;font-size:.9rem;max-width:75ch}
 details.jobs{color:var(--mut);font-size:.85rem;overflow-wrap:anywhere}
 details.jobs>summary{cursor:pointer}details.jobs ul{margin:2px 0 4px;padding-left:20px}
 ul.ev{margin:2px 0 6px;padding-left:1.4em;font-size:.85rem}.yes{color:var(--add)}.no{color:var(--del)}.unk{color:var(--mut)}
@@ -322,9 +346,7 @@ def render(data):
     count = collections.Counter(c for s in cats.values() for c in s)
     gen = data.get("generated") or ""
     run = data.get("run") or {}
-    stats = [("PRs analysed", analysed), ("Fix for the PR itself", count["fix"]),
-             ("Blocked by other packages", count["blocked"]), ("CI only", count["ci"]),
-             ("Needs a look", count["other"])]
+    stats = [("PRs analysed", analysed)] + [(label, count[c]) for c, label in CATEGORIES if c != "error"]
     if count["error"]:
         stats.append(("Not analysed", count["error"]))
     limit = f" (limited to {e(data['limit'])})" if data.get("limit") else ""
@@ -334,12 +356,15 @@ def render(data):
         '<meta name="color-scheme" content="light dark">',
         "<title>opam-repository CI triage</title>", f"<style>{CSS}</style></head><body><main>",
         "<h1>opam-repository CI triage</h1>",
-        f'<p class="meta">Open PRs of {link(REPO_URL, "ocaml/opam-repository")} whose opam-ci status is '
-        f'<b>failure</b>: {e(data.get("failing_prs"))} of {e(data.get("open_prs"))} open PRs{limit}. '
-        f'Generated {e(gen[:16].replace("T", " "))} UTC by <code>opam_repo_ci_triage.py suggest</code> '
-        f'(rules only, at most {e(data.get("max_failures_per_pr"))} distinct failures per PR). '
-        f'This run: {e(run.get("analysed", 0))} analysed, {e(run.get("unchanged", 0))} unchanged, '
-        f'{e(run.get("dropped", 0))} dropped. Suggestions are automatic: check them before acting.</p>',
+        f'<p class="lead">The open pull requests of {link(REPO_URL, "ocaml/opam-repository")} whose CI '
+        f'(opam-repo-ci) fails: {e(data.get("failing_prs"))} of {e(data.get("open_prs"))} open PRs{limit}. '
+        f'For each one, the failures are read from the CI logs and matched against known causes, with a '
+        f'suggested change when one can be derived. Nothing is rebuilt, so check a suggestion before '
+        f'applying it.</p>'
+        f'<p class="meta">Updated {e(gen[:16].replace("T", " "))} UTC. Up to '
+        f'{e(data.get("max_failures_per_pr"))} different failures are analysed per PR. In this update: '
+        f'{e(run.get("analysed", 0))} PRs analysed, {e(run.get("unchanged", 0))} unchanged since the last one.'
+        f'</p>',
         '<div class="stats">' + "".join(f'<div class="stat"><b>{e(v)}</b>{e(k)}</div>' for k, v in stats) + "</div>",
         '<nav class="filters" aria-label="Filters"><button data-f="all">All</button>'
         + "".join(f'<button data-f="{c}">{e(label)} ({count[c]})</button>' for c, label in CATEGORIES if count[c])
@@ -352,10 +377,28 @@ def render(data):
         parts.append('<p class="note">No open PR with a failing opam-ci status.</p>')
     parts.append("</section>")
     parts.append(chronic([p for p in prs if not p.get("pending")]))
-    parts.append('<p class="meta">Categories: <i>Fix for the PR itself</i>: a change to the PR\'s opam files '
-                 '(fix or workaround); <i>Blocked by other packages</i>: a suggestion says the fix goes in another '
-                 'package; <i>CI only</i>: nothing points at the PR or another package (network, systemic, CI '
-                 'environment); <i>Needs a look</i>: failures in the PR without a suggested change.</p>')
+    parts.append('''<section id="help"><h2>How to read this page</h2>
+<dl class="help">
+<dt>Has a fix for the PR</dt><dd>A change to the PR's opam files is suggested (a fix, or a restriction of the
+platforms it is built or tested on).</dd>
+<dt>Blocked by other packages</dt><dd>At least one failure comes from another package, which needs the fix.</dd>
+<dt>CI problems only</dt><dd>Nothing points at the PR or at another package: network errors, cancelled jobs,
+or problems of the CI machines.</dd>
+<dt>Needs a look</dt><dd>Failures in the PR's packages without a suggested change.</dd>
+<dt>Reverse dependency</dt><dd>A package that depends on a package of the PR. CI rebuilds them to check that
+the PR does not break them.</dd>
+<dt>day10 builder</dt><dd>opam-repo-ci builds packages with two systems: the classic builder, and the newer
+day10 builder (the jobs named <code>day10,…</code>). When a job fails only on day10 while the classic
+builder passes on the same system, the problem is in the CI setup, not in the package.</dd>
+<dt>Pre-existing</dt><dd>The failure would happen without the PR: it also failed in the CI of the previous
+release, or the PR only adds an upper bound to that package.</dd>
+<dt>Experimental platform</dt><dd>FreeBSD, macOS and some other jobs are experimental: their failures do not
+block a PR.</dd>
+</dl>
+<p class="meta">To post a suggestion as a line comment on a PR, review it first, then run
+<code>python3 opam_repo_ci_triage.py review --pr NUMBER --post</code>
+(from <a href="https://github.com/Sudha247/hackathon-opam-repo-triage" rel="noopener noreferrer">this
+repository</a>).</p></section>''')
     parts.append(f"<script>{JS}</script></main></body></html>")
     return "\n".join(parts) + "\n"
 
