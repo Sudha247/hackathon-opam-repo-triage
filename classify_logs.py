@@ -63,6 +63,8 @@ LOG_RULES = [
     R("ci_infrastructure", r"runc run failed|special device overlay does not exist|No space left on device"
       r"|Cannot allocate memory|Docker daemon|cannot connect to the Docker",
       "CI worker failure (container, mount or disk); retry the job"),
+    R("ci_infrastructure", r"index\.lock': File exists", "CI worker failure (stale git lock in checkout); retry the job"),
+    R("timeout", r"Cancelling: Timeout \(([\d.]+) minutes\)", "Job timed out after {1} minutes"),
     R("system_package_unavailable", r"depends on the unavailable system package '([^']+)'",
       "System package(s) not available: {1}"),
     R("source_download", r"Failed to get sources of \S+: (.*)", "Failed to get sources: {1}"),
@@ -176,14 +178,43 @@ def pkg_name(p):
 # --------------------------------------------------------------------------------------
 
 
+JOB_TYPE_HINTS = {
+    "lower-bounds": "fails with the oldest dependency versions the opam file allows: a lower bound is probably too loose",
+    "revdeps": "a package that depends on the PR's package fails: the PR may break existing users",
+    "tests": "fails when building/running the package's tests (with-test)",
+}
+
+
+def parse_variant(variant):
+    """Split a CI variant into (platform, job_type, pr_package, tested_package).
+
+    day10,debian-13,x86_64,4.14,foo.1.0                    -> build
+    compilers,5.4,foo.1.0,lower-bounds                     -> lower-bounds
+    extras,arm64-ocaml-5.5,foo.1.0,tests                   -> tests
+    compilers,4.14,foo.1.0,revdeps,bar.2.0                 -> revdeps (bar is built against foo)
+    """
+    parts = variant.split(",")
+    if len(parts) < 2:  # (lint), (analysis)
+        return variant, variant.strip("()"), None, None
+    job_type, revdep = "build", None
+    if parts[-1] in ("tests", "lower-bounds"):
+        job_type = parts.pop()
+    elif "revdeps" in parts:
+        i = parts.index("revdeps")
+        job_type, revdep, parts = "revdeps", (parts[i + 1] if i + 1 < len(parts) else None), parts[:i]
+    pr_package = parts[-1]
+    return ",".join(parts[:-1]), job_type, pr_package, revdep or pr_package
+
+
 def classify_job(job, log_text):
     lines = log_text.splitlines()
     variant = job["variant"]
-    parts = variant.split(",")
-    tested = parts[-1] if len(parts) > 1 else None
+    platform, job_type, pr_package, tested = parse_variant(variant)
     res = {
         "variant": variant,
-        "platform": ",".join(parts[:-1]) if len(parts) > 1 else variant,
+        "job_type": job_type,
+        "platform": platform,
+        "pr_package": pr_package,
         "tested_package": tested,
         "failing_package": None,
         "relation": None,
@@ -215,6 +246,10 @@ def classify_job(job, log_text):
             sig = "; ".join(sorted({normalise(m.group(2)) for m in msgs}))
             res["failing_package"] = ", ".join(sorted({m.group(1) for m in msgs}))
             return done("lint", sig, "\n".join(m.group(0) for m in msgs[:20]), "lint")
+        hit = apply_rules(LOG_RULES, lines)  # lint job that died before linting (e.g. CI fault)
+        if hit:
+            (cat, _, tmpl, generic), m, idx = hit
+            return done(cat, tmpl.format(m.group(0), *m.groups()), excerpt(lines, idx), cat, generic)
         return done("lint", "lint failed", "\n".join(lines[-30:]), "lint", generic=True)
 
     blocks = list(error_blocks(lines))
@@ -284,14 +319,17 @@ def classify_run(run_dir):
 def group(results):
     groups = defaultdict(list)
     for r in results:
-        groups[(r["category"], r["signature"])].append(r)
+        groups[(r["job_type"], r["category"], r["signature"])].append(r)
     out = []
-    for (cat, sig), rs in groups.items():
+    for (job_type, cat, sig), rs in groups.items():
         rep = rs[0]
         out.append({
+            "job_type": job_type,
             "category": cat,
             "signature": sig,
+            "hint": JOB_TYPE_HINTS.get(job_type),
             "count": len(rs),
+            "pr_packages": sorted({r["pr_package"] for r in rs if r["pr_package"]}),
             "needs_llm": any(r["needs_llm"] for r in rs),
             "failing_packages": sorted({pkg_name(r["failing_package"]) for r in rs if r["failing_package"]}),
             "tested_packages": sorted({r["tested_package"] for r in rs if r["tested_package"]}),
@@ -302,7 +340,7 @@ def group(results):
             "representative": {"run": rep["run"], "log_file": rep["log_file"], "variant": rep["variant"]},
             "excerpt": rep["excerpt"],
         })
-    out.sort(key=lambda g: (-g["count"], g["category"], g["signature"]))
+    out.sort(key=lambda g: (-g["count"], g["job_type"], g["category"], g["signature"]))
     return out
 
 
@@ -312,15 +350,19 @@ def print_report(title, results, groups, verbose):
         print("  no failed jobs")
         return
     by_cat = Counter(r["category"] for r in results)
+    by_type = Counter(r["job_type"] for r in results)
     rule_hits = sum(1 for r in results if not r["needs_llm"])
     print(f"  {len(results)} failed jobs -> {len(groups)} groups; "
           f"{rule_hits}/{len(results)} jobs classified by a specific rule, "
           f"{sum(1 for g in groups if g['needs_llm'])} group(s) need an LLM")
+    print("  by job type: " + ", ".join(f"{c}={n}" for c, n in by_type.most_common()))
     print("  by category: " + ", ".join(f"{c}={n}" for c, n in by_cat.most_common()))
     for g in groups:
         flag = "  [LLM]" if g["needs_llm"] else ""
         pk = ", ".join(g["failing_packages"][:4]) + (" ..." if len(g["failing_packages"]) > 4 else "")
-        print(f"  [{g['count']:>3}] {g['category']:<27} {g['signature'][:110]}{flag}")
+        print(f"  [{g['count']:>3}] {g['job_type']:<12} {g['category']:<27} {g['signature'][:100]}{flag}")
+        if g["hint"]:
+            print(f"        hint: {g['hint']}")
         if g["also_seen"]:
             print("        also seen: " + "; ".join(f"{s} ({n})" for s, n in g["also_seen"].items())[:150])
         if verbose:
