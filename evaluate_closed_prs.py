@@ -138,6 +138,9 @@ def suggestion_tokens(s):
         toks.add("dep:" + s["dep"])
     for c in s.get("candidates", []):
         toks.add("dep:" + c["dep"])
+    alt = re.match(r'"?([\w+-]+)"?[: ]', s.get("alternative") or "")
+    if alt:
+        toks.add(("field:" if (s.get("alternative") or "").split(" ", 1)[0].endswith(":") else "dep:") + alt.group(1))
     new = s.get("new") or ""
     m = re.match(r'"([\w+-]+)"', new)
     if m:

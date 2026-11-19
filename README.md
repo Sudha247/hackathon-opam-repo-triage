@@ -59,6 +59,8 @@ Common options:
 | Job matrix: fails only on Windows / one arch / some distributions | `"@runtest" {with-test & os != "win32"}`, `available: arch != "s390x"`, `x-ci-accept-failures: [...]`; aimed at the failing dependency when it is the one failing | medium |
 | A PR package installs on no platform | the constraint every solver conflict goes through (e.g. `js_of_ocaml-compiler < 5.0.0`) | high |
 | Lint warning 62 / 41, known false positives | SPDX id detected from the LICENSE text, `%{_:VAR}%`, or "known waiver" | high |
+| Lint warning 68 (missing `license`) | the license of another version of the package in opam-repository, or detected from the upstream LICENSE file | high |
+| Platform or compiler failure on an old release | alternative: `x-maintained: false` when a newer release exists (lets the next archiving round remove it) | medium |
 | Lint warning 47 / 59, weak checksums, `extra-files`, error 46 / 60 | fixed synopsis line, `checksum: ["sha256=…"]` with the command to compute it, `extra-source` template, `conf` flag advice, archive changed upstream | high |
 | Install failure: files not built | the earlier build error that did not stop the build, then the usual rules on it | low–high |
 | `These packages are still missing: …` (system packages) | the distribution lacking them; correct the depext or `x-ci-accept-failures` | medium |
@@ -78,6 +80,25 @@ suggestion (library-api, high):
   or "ortools" {= version}  (same upstream repository and version)
 ```
 
+### LLM fallback (optional)
+
+`--llm` (on `suggest` and `comment`) asks Claude about the failures no rule
+explains: one call per distinct failure, at most `--llm-max` (default 5).
+The prompt holds the error excerpt, the failing package's opam file, the
+dependency versions CI installed and the package's results on the other CI
+jobs; the answer is structured JSON (diagnosis, where the fix goes, the opam
+change if any, confidence, what to verify), shown with `rule: llm`.
+
+```sh
+pip install anthropic          # and ANTHROPIC_API_KEY, or `ant auth login`
+python3 opam_repo_ci_triage.py suggest --pr 29613 --llm
+python3 opam_repo_ci_triage.py suggest --pr 29613 --llm-dry-run   # print the prompts, no API call
+```
+
+Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
+fallbacks enabled. Responses are cached in `.opam-ci-cache/`, so re-runs cost
+nothing. The log and opam file are passed as untrusted data.
+
 ## Evaluation on merged PRs
 
 `evaluate_closed_prs.py` runs `suggest` on the initial version (before the
@@ -89,9 +110,10 @@ merge. Needs a logged-in `gh`.
 python3 evaluate_closed_prs.py --since 2026-08-01 --limit 200
 ```
 
-On 200 PRs merged since 2026-08-01 (16 evaluable): 8 of 15 suggested changes
-matched the author's fix (bound suggestions exactly in 3 of 4 cases), and 8 of
-the 41 changes authors made in failing packages were anticipated.
+On 200 PRs merged since 2026-08-01 (16 evaluable, rules only, no LLM): 13 of
+17 suggested changes matched the author's fix (bound suggestions exactly in 3
+of 4 cases), and 13 of the 41 changes authors made in failing packages were
+anticipated.
 
 ## Data sources, cheapest first
 
