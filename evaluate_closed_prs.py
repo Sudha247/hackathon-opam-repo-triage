@@ -113,6 +113,24 @@ def actual_fix(initial, final):
     return changed
 
 
+def failing_packages(sha):
+    """Packages of the PR that failed in that CI run: non-experimental build,
+    test or solver failures, or lint errors."""
+    out = subprocess.run([sys.executable, TOOL, "summary", sha, "--json"], capture_output=True, text=True)
+    try:
+        jobs = json.loads(out.stdout)["jobs"]
+    except (ValueError, KeyError):
+        return set()
+    failed = {j["target"] for j in jobs if j["kind"] in ("build", "tests", "lower-bounds")
+              and not j["experimental"] and j["category"] in ("build", "build-or-test", "dependency", "solver")}
+    for j in jobs:
+        for m in j.get("messages", []):
+            mm = re.match(r"Error in (\S+?):", m)
+            if mm:
+                failed.add(mm.group(1))
+    return failed
+
+
 def suggestion_tokens(s):
     """What a suggestion would change: dependency or field tokens."""
     toks = set()
@@ -177,15 +195,21 @@ def main():
             hit = bool(toks & fix.get(pkg, set()))
             scored.append({"package": pkg, "rule": s.get("rule"), "new": (s.get("new") or "")[:90],
                            "hit": hit, "tokens": sorted(toks)})
-        covered = {(p, t) for p, ts in fix.items() for t in ts
+        # Recall: only the author's changes in packages that failed in the
+        # initial run (rebases, version bumps and metadata edits elsewhere are
+        # not fixes of a CI failure).
+        failed = failing_packages(init)
+        fix_failed = {p: ts for p, ts in fix.items() if p in failed}
+        covered = {(p, t) for p, ts in fix_failed.items() for t in ts
                    if any(x["package"] == p and t in x["tokens"] for x in scored)}
-        n_fix = sum(len(v) for v in fix.values())
+        n_fix = sum(len(v) for v in fix_failed.values())
         totals["scored"] += len(scored)
         totals["hit"] += sum(x["hit"] for x in scored)
         totals["fix_tokens"] += n_fix
         totals["fix_covered"] += len(covered)
         rows.append({"pr": pr["number"], "title": pr["title"], "initial": init, "final": pr["headRefOid"],
-                     "actual_fix": {k: sorted(v) for k, v in fix.items()}, "suggestions": scored,
+                     "actual_fix": {k: sorted(v) for k, v in fix.items()},
+                     "fix_in_failing_packages": {k: sorted(v) for k, v in fix_failed.items()}, "suggestions": scored,
                      "explanations": sum(1 for s in sugg if not (s.get("new") or s.get("candidates")))})
 
     for r in rows:
@@ -203,7 +227,8 @@ def main():
     print(f"\nPRs evaluated: {len([r for r in rows if 'error' not in r])}")
     print(f"suggested changes to the PR's own files: {t['scored']}, matching the author's fix: {t['hit']}"
           + (f" ({100 * t['hit'] // t['scored']}%)" if t["scored"] else ""))
-    print(f"author's changes (dependency/field per package): {t['fix_tokens']}, anticipated: {t['fix_covered']}"
+    print(f"author's changes in packages that failed (dependency/field per package): {t['fix_tokens']}, "
+          f"anticipated: {t['fix_covered']}"
           + (f" ({100 * t['fix_covered'] // t['fix_tokens']}%)" if t["fix_tokens"] else ""))
     if args.json:
         with open(args.json, "w") as f:

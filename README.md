@@ -22,7 +22,8 @@ PR's current head).
 | `summary` | One record per CI job: status, category (build, build-or-test, dependency, network, cancelled, solver, ignored, not-available, lint), job kind, platform; reverse-dependency failures grouped by package. |
 | `logs` | For failed jobs: the first `#=== ERROR while …` block, solver output, the final error, the builder (classic or day10) and the master commit the PR was merged onto. |
 | `compare` | Classifies failing reverse dependencies against the CI run of the PR that published the previous version of the package: NEW, pre-existing, builder-specific, no-baseline. |
-| `suggest` | Proposes fixes, with the evidence they are based on (see below). |
+| `suggest` | Proposes fixes, with the evidence they are based on (see below). Fixes to the PR come first, then workarounds (platform restrictions), problems in other packages or CI, and explanations without a change. |
+| `comment` | A draft PR comment in Markdown from the `suggest` results: diffs for the PR's opam files with their evidence, the rest folded in `<details>`. Printed by default; `--post` posts it with `gh pr comment` (review it first). |
 
 ```sh
 python3 opam_repo_ci_triage.py summary --pr 31275
@@ -76,6 +77,21 @@ suggestion (library-api, high):
   + "ortools" {>= "9.15.0-2"}
   or "ortools" {= version}  (same upstream repository and version)
 ```
+
+## Evaluation on merged PRs
+
+`evaluate_closed_prs.py` runs `suggest` on the initial version (before the
+first force-push, or the first commit) of recently merged PRs whose opam-ci
+failed, and compares the suggestions with what the author changed before the
+merge. Needs a logged-in `gh`.
+
+```sh
+python3 evaluate_closed_prs.py --since 2026-08-01 --limit 200
+```
+
+On 200 PRs merged since 2026-08-01 (16 evaluable): 8 of 15 suggested changes
+matched the author's fix (bound suggestions exactly in 3 of 4 cases), and 8 of
+the 41 changes authors made in failing packages were anticipated.
 
 ## Data sources, cheapest first
 
