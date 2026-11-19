@@ -58,6 +58,10 @@ Common options:
 | Missing C header | which platform lacks it; add a depext or `x-ci-accept-failures` | low |
 | Job matrix: fails on every older (or newer) OCaml version, passes on the others | `"ocaml" {>= "X"}` / `{< "X"}`, `{with-test & …}` if only tests fail | medium |
 | Job matrix: fails only on Windows / one arch / some distributions | `"@runtest" {with-test & os != "win32"}`, `available: arch != "s390x"`, `x-ci-accept-failures: [...]`; aimed at the failing dependency when it is the one failing | medium |
+| Fails only on the day10 builder while the classic builder passes on the same distribution and OCaml version | reported as a CI-environment problem, with the evidence (e.g. a conf package that declares the depext the image didn't install) | high |
+| The PR removes or relaxes the `available` filter of an existing version, and its packages now fail on platforms the old filter excluded | restore the old filter, or narrow it to the platforms that build (read from the PR's diff: one GitHub call) | high/medium |
+| A conf package fails on a platform listed in its `x-ci-accept-failures` | CI should have ignored it: CI-environment problem | high |
+| Lint error already reported in the previous release's CI | noted, with the PR number | high |
 | A PR package installs on no platform | the constraint every solver conflict goes through (e.g. `js_of_ocaml-compiler < 5.0.0`) | high |
 | Lint warning 62 / 41, known false positives | SPDX id detected from the LICENSE text, `%{_:VAR}%`, or "known waiver" | high |
 | Lint warning 68 (missing `license`) | the license of another version of the package in opam-repository, or detected from the upstream LICENSE file | high |
@@ -137,12 +141,12 @@ To enable it:
 
 ## Tests
 
-`tests/test_triage.py` runs `suggest` on 14 recorded CI runs (ortools,
+`tests/test_triage.py` runs `suggest` on 15 recorded CI runs (ortools,
 colibri2, why3find, hol_light, binaryen, oonnxx, chatoyant, lwt revdeps,
-graphql-async, ocaml-r, git-paf, websocket, lambdapi, dns-certify) and checks
+graphql-async, ocaml-r, git-paf, websocket, lambdapi, dns-certify, unikraft) and checks
 the fixes verified by hand or made by the PR authors. They run offline
 (`OPAM_CI_OFFLINE=1`): pages, logs, opam files, doc lookups and git objects come
-from `tests/fixtures/<case>/` (1.6 MB), and any cache miss fails the test.
+from `tests/fixtures/<case>/` (2.2 MB), and any cache miss fails the test.
 
 ```sh
 python3 tests/test_triage.py              # ~4 s, no network

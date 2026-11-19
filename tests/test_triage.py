@@ -73,6 +73,12 @@ CASES = {
     "lambdapi-bound": (
         "5fe799b6cebb0d22cd7b963e1103bd17aa545bae", ["--max", "6"],
         [{"failing": "lambdapi.4.0.0", "new": '"sedlex" {>= "3.3"}'}]),
+    "unikraft-pr-context": (
+        "a2a330c034bbf7e443ef9eadad19fd68ceeb991d", ["--max", "8"],
+        [{"failing": "unikraft.0.20.0", "rule": "pr-relaxed-available", "new": 'os = "linux"'},
+         {"rule": "builder-specific", "note": "conf-bison declares a depext for centos"},
+         {"rule": "platform-matrix", "note": "relaxed `available` of unikraft.0.20.0"},
+         {"failing": "ocaml-unikraft.1.2.1", "rule": "lint", "note": "#30209"}]),
     "dns-certify-bound": (
         "d1951c34e014d331928d961b53113a61c93b17fe", ["--max", "6"],
         [{"failing": "dns-certify.10.2.7", "new": '"ca-certs-nss" {>= "3.113.1"}'}]),

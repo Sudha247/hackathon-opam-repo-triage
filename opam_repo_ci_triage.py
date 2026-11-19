@@ -500,26 +500,27 @@ def split_pkg(full):
     return name, version
 
 
-def find_baseline_commit(target):
+def find_baseline_commit(target, cache_dir=".opam-ci-cache"):
     """For target 'lwt.5.10.2', return info about the PR that added the
     previous version on master, or None."""
     name, version = split_pkg(target)
-    versions = Sources(".opam-ci-cache").versions(name)      # git, no API call
+    versions = Sources(cache_dir).versions(name)
     older = [v for v in versions if opam_vcmp(v, version) < 0]
     if not older:
         return None
     prev = max(older, key=functools.cmp_to_key(opam_vcmp))
-    return {"prev": f"{name}.{prev}", **(find_publication(name, prev) or {})}
+    return {"prev": f"{name}.{prev}", **(find_publication(name, prev, cache_dir) or {})}
 
 
-def find_publication(name, version):
+def find_publication(name, version, cache_dir=".opam-ci-cache"):
     """The PR that published name.version: {'pr': N, 'sha': head sha}, or None.
     Uses 2 GitHub REST calls (token optional)."""
-    commits = gh_api(f"repos/{REPO}/commits?path=packages/{name}/{name}.{version}/opam&per_page=100") or []
+    commits = gh_api(f"repos/{REPO}/commits?path=packages/{name}/{name}.{version}/opam&per_page=100",
+                     cache_dir) or []
     if not commits:
         return None
     first = commits[-1]["sha"]          # oldest commit touching the file = the one adding it
-    pulls = gh_api(f"repos/{REPO}/commits/{first}/pulls") or []
+    pulls = gh_api(f"repos/{REPO}/commits/{first}/pulls", cache_dir) or []
     pr = pulls[0] if pulls else None
     return {"pr": pr["number"] if pr else None, "sha": pr["head"]["sha"] if pr else first}
 
@@ -1374,13 +1375,15 @@ def failure_key(j):
 
 def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     pr_packages = sorted({j["target"] for j in data["jobs"] if j["target"]})
-    cats = {"build", "build-or-test", "solver"}
+    cats = {"build", "build-or-test", "solver", "dependency"}
     sel = [j for j in data["jobs"] if j["status"] == "failed" and j["category"] in cats
            and (not match or re.search(match, j["variant"]))]
     # One job per (package, revdep, kind, reason): the same error on many platforms is one problem.
     seen, uniq = set(), []
-    for j in sel:
-        key = failure_key(j)
+    for j in sorted(sel, key=lambda j: j["experimental"]):
+        # A dependency failure is the dependency's: one log per (cause, platform).
+        key = (("dependency", j["reason"], job_dims(j)["distro"]) if j["category"] == "dependency"
+               else failure_key(j))
         if key not in seen:
             seen.add(key)
             uniq.append(j)
@@ -1435,10 +1438,79 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
             seen[k] = r
         unique.append(r)
     results = unique
+    base = next((log_info(log_text(fetch(j["url"], cache_dir))).get("base")
+                 for j in uniq[:1]), None) if uniq else None
+    relaxed = relaxed_available_rules(data, sha, base, cache_dir, pr_packages)
+    if relaxed:
+        cause = ", ".join(r["failing"] for r in relaxed)
+        for r in results:
+            if r.get("rule", "").startswith("platform-matrix") and re.search(
+                    r"Windows|freebsd|macos", r.get("error", "")):
+                r["note"] = (f"these platforms are tried because this PR relaxed `available` of {cause} "
+                             f"(see that suggestion); " + (r.get("note") or ""))
+    results += relaxed
     if not match or re.search(match, "(lint)"):
-        results += lint_rules(data, src, sha)
+        results += lint_rules(data, src, sha, cache_dir)
     results += skipped_rules(data, src, cache_dir, pr_packages)
     return results
+
+
+def pr_opam_changes(base, sha, cache_dir):
+    """{"name.version": {"available": (old, new)}} for the opam files the commit
+    `sha` modifies relative to master commit `base` (one GitHub API call)."""
+    d = gh_api(f"repos/{REPO}/compare/{base}...{sha}", cache_dir) if base else None
+    out = {}
+    for f in (d or {}).get("files", []):
+        m = re.match(r"packages/[^/]+/([^/]+)/opam$", f.get("filename", ""))
+        if not m or f.get("status") != "modified":
+            continue
+        lines = (f.get("patch") or "").splitlines()
+
+        def block(sign):
+            got, inside = [], False
+            for l in lines:
+                if l[:1] == sign and l[1:].startswith("available:"):
+                    inside = True
+                    got.append(l[1:].strip())
+                elif inside and l[:1] == sign and l[1:2] in (" ", "\t"):
+                    got.append(l[1:].strip())
+                else:
+                    inside = False
+            return " ".join(got).removeprefix("available:").strip()
+        old, new = block("-"), block("+")
+        if old != new:
+            out[m.group(1)] = {"available": (old, new)}
+    return out
+
+
+def relaxed_available_rules(data, sha, base, cache_dir, pr_packages):
+    """A PR that removes or relaxes the `available` filter of an existing
+    version makes CI try it on platforms where it never ran: failures there
+    are most likely caused by that change."""
+    changes = pr_opam_changes(base, sha, cache_dir)
+    out = []
+    for pkg, ch in sorted(changes.items()):
+        old, new = ch["available"]
+        if not old:
+            continue                     # a filter was added: not a relaxation
+        others = {j["target"] for j in data["jobs"] if j["target"]}
+        failing = [j for j in data["jobs"] if j["target"] in others and j["category"] in FAILING_CATS
+                   and j["kind"] in ("build", "tests") and job_dims(j)["os"] != "linux"]
+        if not failing:
+            continue
+        plats = sorted({(job_dims(j)["distro"] or job_dims(j)["os"]) + (" (exp)" if j["experimental"] else "")
+                        for j in failing})
+        linux_only = 'os = "linux"' in old
+        out.append({"variant": f"{pkg} [available changed by this PR]", "failing": pkg, "fix_in": "this PR",
+                    "rule": "pr-relaxed-available",
+                    "error": f"this PR changes `available` of {pkg} from `{old}` to "
+                             f"`{new or '(removed)'}`; PR packages now fail on {', '.join(plats)}",
+                    "old": f"available: {new}" if new else None,
+                    "new": f"available: {old}   (restore it, or narrow it to the platforms that build)",
+                    "confidence": "high" if linux_only else "medium",
+                    "note": "the failing platforms were excluded by the previous filter"
+                            if linux_only else "check which of these platforms the previous filter excluded"})
+    return out
 
 
 def complete_test_output(src, r, job, text, data, cache_dir):
@@ -1607,6 +1679,38 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
         tests_only = kind == "tests" or all(j["category"] == "build-or-test" for j in fails)
         where = "this PR" if owner in pr_packages else f"{owner} (other package)"
         label = f"{pkg} [{kind}{', revdep of ' + target if revdep else ''}]"
+        # A day10 failure whose distribution and OCaml version pass on the
+        # classic builder is a problem of the day10 environment, not of the
+        # package: report it as such, and leave it out of the analyses below.
+        passes = [j for j in js if not j["experimental"] and j["category"] == "passed"]
+
+        def classic_twin(j):
+            d = job_dims(j)
+            return next((p for p in passes if p["platform"][:1] != ["day10"]
+                         and job_dims(p)["distro"] == d["distro"] and d["distro"]
+                         and job_dims(p)["ocaml"] == d["ocaml"]), None)
+        twins = [(j, classic_twin(j)) for j in fails if j["platform"][:1] == ["day10"]]
+        twins = [(j, t) for j, t in twins if t]
+        if twins:
+            dists = sorted({job_dims(j)["distro"] for j, _ in twins})
+            evidence = next((r.get("note") for r in earlier
+                             if r.get("failing") == culprit and r.get("rule") == "missing-tool"), None)
+            out.append({"variant": label, "failing": culprit or pkg,
+                        "fix_in": "the CI environment (day10 builder)", "rule": "builder-specific",
+                        "error": f"fails only on the day10 builder on {', '.join(dists)}: the classic "
+                                 f"builder passes on the same distributions and OCaml versions",
+                        "confidence": "high",
+                        "note": f"e.g. {'/'.join(twins[0][0]['platform'])} fails "
+                                f"({(twins[0][0]['reason'] or '')[:80]}) while "
+                                f"{'/'.join(twins[0][1]['platform'])} passes"
+                                + (f"; {evidence}" if evidence else "")
+                                + "; nothing to change in the package metadata",
+                        "_keys": [failure_key(j) for j, _ in twins]})
+            gone = {id(j) for j, _ in twins}
+            js = [j for j in js if id(j) not in gone]
+            fails = [j for j in fails if id(j) not in gone]
+            if not fails:
+                continue
         cm = compiler_matrix(js)
         if cm and (owner, "ocaml") not in done:
             op, v, fv, pv = cm
@@ -1681,11 +1785,13 @@ def collapse_systemic(out, threshold=5):
         culprits = collections.Counter(r["failing"] for r in rs if r["failing"] not in names)
         merged.append({
             "variant": f"{len(rs)} packages [{rule}]", "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else ""),
-            "fix_in": "systemic: the PR itself, a shared dependency, or the CI environment",
+            "fix_in": (rs[0]["fix_in"] if rule == "builder-specific"
+                       else "systemic: the PR itself, a shared dependency, or the CI environment"),
             "rule": rule + "-systemic", "error": f"{len(rs)} packages: {pattern}",
             "confidence": "medium",
-            "note": (f"shared failing dependencies: {dict(culprits.most_common(3))}; " if culprits else "")
-                    + f"per-package fix if needed: {rs[0].get('new', '')}",
+            "note": (rs[0].get("note") if rule == "builder-specific" else
+                     (f"shared failing dependencies: {dict(culprits.most_common(3))}; " if culprits else "")
+                     + f"per-package fix if needed: {rs[0].get('new', '')}"),
             "_keys": [k for r in rs for k in r.get("_keys", [])]})
     return merged
 
@@ -1709,7 +1815,27 @@ def log_rules(src, err, fname, opam_text, info, job):
         tool = m.group(1)
         conf = f"conf-{tool}"
         r = {"rule": "missing-tool", "error": m.group(0)}
-        if fname.startswith("conf-"):
+        family = re.split(r"[-\d]", dims["distro"] or "")[0]
+        def field_text(name):
+            if name + ":" not in (opam_text or ""):
+                return ""
+            rest = (opam_text or "").split(name + ":", 1)[1]
+            return re.split(r"(?m)^[a-z][\w-]*:", rest, maxsplit=1)[0]
+        depexts_text = field_text("depexts")
+        accepted = re.findall(r'"([^"]+)"', field_text("x-ci-accept-failures"))
+        declared = [pk.strip() for pk, flt in re.findall(r"\[([^\]]*)\]\s*\{([^}]*)\}", depexts_text)
+                    if family and family in flt]
+        if fname.startswith("conf-") and dims["distro"] and dims["distro"] in accepted:
+            r.update(fix_in="the CI environment",
+                     note=f"{fname} lists {dims['distro']} in x-ci-accept-failures, so CI should have "
+                          f"ignored this failure (and the failures of the packages depending on it)",
+                     confidence="high")
+        elif fname.startswith("conf-") and declared:
+            r.update(fix_in="the CI environment",
+                     note=f"{fname} declares a depext for {family} ({', '.join(declared)}), yet `{tool}` "
+                          f"is missing on {platform}: the CI did not install it; nothing to change in "
+                          f"{fname}", confidence="high")
+        elif fname.startswith("conf-"):
             r.update(note=f"{fname} does not provide `{tool}` on {platform}: its depexts lack an entry for that "
                           f"platform (add one), or the CI image is missing it", confidence="medium")
         elif conf in deps:
@@ -1792,8 +1918,32 @@ def url_src(text):
     return m.group(1) if m else None
 
 
-def lint_rules(data, src, sha=None):
+def lint_baseline(data, cache_dir):
+    """(PR number, {(package name, message)}) of the lint errors in the CI run
+    of the PR that published the previous version of a package of this PR."""
+    for target in sorted({j["target"] for j in data["jobs"] if j["target"]}):
+        info = find_baseline_commit(target, cache_dir)
+        if not info or "sha" not in info:
+            continue
+        try:
+            base = parse_commit_page(fetch(BASE + info["sha"], cache_dir))
+        except (urllib.error.HTTPError, RuntimeError):
+            return None
+        msgs = set()
+        for j in base["jobs"]:
+            for m in j.get("messages", []):
+                mm = re.match(r"Error in ([\w+-]+)\.\S+?: (.*)$", m)
+                if mm:
+                    msgs.add(mm.groups())
+        return info.get("pr"), msgs
+    return None
+
+
+def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
     out = []
+    baseline = None
+    if any(j["kind"] == "lint" and j["status"] == "failed" for j in data["jobs"]):
+        baseline = lint_baseline(data, cache_dir)
     for j in data["jobs"]:
         if j["kind"] != "lint" or j["status"] != "failed":
             continue
@@ -1896,6 +2046,10 @@ def lint_rules(data, src, sha=None):
                               "maintainers to waive it (often accepted)", confidence="medium")
             else:
                 r["note"] = "no rule for this lint message"
+            if baseline and (name, text) in baseline[1]:
+                prev = (r.get("note") or "").rstrip(".")
+                r["note"] = ((prev + ". " if prev else "") + f"Already reported in the CI of #{baseline[0]} "
+                             "(the previous release), which was merged.")
             # one entry per (package, fix): several lint messages often share a fix
             if r.get("new") and any(o["failing"] == r["failing"] and o.get("new") == r["new"] for o in out):
                 prev = next(o for o in out if o["failing"] == r["failing"] and o.get("new") == r["new"])
@@ -2304,7 +2458,7 @@ def main():
             if args.baseline:
                 info = {"prev": "(given)", "sha": resolve_sha(args.baseline, None), "pr": None}
             else:
-                info = find_baseline_commit(t)
+                info = find_baseline_commit(t, args.cache_dir)
             if not info or "sha" not in info:
                 print(f"== {t}: no previous version / baseline PR found", file=sys.stderr)
                 continue
