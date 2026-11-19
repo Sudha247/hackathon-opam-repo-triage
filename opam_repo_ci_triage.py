@@ -1373,20 +1373,35 @@ def failure_key(j):
     return (j["target"], j["revdep"], j["kind"], re.sub(r"[`\"']|-j \d+", "", j["reason"] or ""))
 
 
+def merge_jobs(a, b):
+    """Union of two lists of job variants, in order."""
+    return list(dict.fromkeys((a or []) + (b or [])))
+
+
+def jobs_note(r):
+    """' (N failed jobs)' when a suggestion stands for several jobs, else ''."""
+    n = len(r.get("jobs") or [])
+    return f" ({n} failed jobs)" if n > 1 else ""
+
+
 def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     pr_packages = sorted({j["target"] for j in data["jobs"] if j["target"]})
     cats = {"build", "build-or-test", "solver", "dependency"}
     sel = [j for j in data["jobs"] if j["status"] == "failed" and j["category"] in cats
            and (not match or re.search(match, j["variant"]))]
     # One job per (package, revdep, kind, reason): the same error on many platforms is one problem.
-    seen, uniq = set(), []
-    for j in sorted(sel, key=lambda j: j["experimental"]):
+    def group_key(j):
         # A dependency failure is the dependency's: one log per (cause, platform).
-        key = (("dependency", j["reason"], job_dims(j)["distro"]) if j["category"] == "dependency"
-               else failure_key(j))
-        if key not in seen:
-            seen.add(key)
+        return (("dependency", j["reason"], job_dims(j)["distro"]) if j["category"] == "dependency"
+                else failure_key(j))
+    # `merged` keeps every job behind each analysed one, so the report can say how many it stands for.
+    merged, uniq = {}, []
+    for j in sorted(sel, key=lambda j: j["experimental"]):
+        key = group_key(j)
+        if key not in merged:
+            merged[key] = []
             uniq.append(j)
+        merged[key].append(j["variant"])
     if len(uniq) > max_logs:
         print(f"note: {len(uniq)} distinct failures, analysing the first {max_logs} (use --max)", file=sys.stderr)
         uniq = uniq[:max_logs]
@@ -1395,12 +1410,14 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         try:
             text = log_text(fetch(j["url"], cache_dir))
         except Exception as e:
-            results.append({"variant": j["variant"], "note": f"log unavailable: {e}"})
+            results.append({"variant": j["variant"], "note": f"log unavailable: {e}",
+                            "jobs": merged[group_key(j)]})
             continue
         r = suggest_for_job(src, j, text, pr_packages, sha)
         if r.get("rule") == "test-output":
             complete_test_output(src, r, j, text, data, cache_dir)
         r["_key"] = failure_key(j)
+        r["jobs"] = merged[group_key(j)]
         results.append(r)
     failing_in_log = {r["_key"]: r["failing"] for r in results if r.get("failing")}
     matrix = collapse_systemic(matrix_rules(data["jobs"], results, match, set(pr_packages), failing_in_log))
@@ -1433,6 +1450,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         k = (r.get("failing"), (r.get("new") or "").split("   ")[0]) if r.get("new") else None
         if k and k in seen:
             seen[k].setdefault("also_seen_on", []).append(r["variant"])
+            seen[k]["jobs"] = merge_jobs(seen[k].get("jobs") or [seen[k]["variant"]],
+                                         r.get("jobs") or [r["variant"]])
             continue
         if k:
             seen[k] = r
@@ -1705,7 +1724,8 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
                                 f"{'/'.join(twins[0][1]['platform'])} passes"
                                 + (f"; {evidence}" if evidence else "")
                                 + "; nothing to change in the package metadata",
-                        "_keys": [failure_key(j) for j, _ in twins]})
+                        "_keys": [failure_key(j) for j, _ in twins],
+                        "jobs": [j["variant"] for j, _ in twins]})
             gone = {id(j) for j, _ in twins}
             js = [j for j in js if id(j) not in gone]
             fails = [j for j in fails if id(j) not in gone]
@@ -1725,7 +1745,7 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
                         "dep": "ocaml", "old": None,
                         "new": f'"ocaml" {{{filt}}}' + ("   (new line in depends)" if tests_only else ""),
                         "confidence": "medium", "note": ("job matrix only" + gap),
-                        "_keys": [failure_key(j) for j in fails]})
+                        "_keys": [failure_key(j) for j in fails], "jobs": [j["variant"] for j in fails]})
             continue
         pm = platform_matrix(js)
         if not pm:
@@ -1762,7 +1782,7 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
                     "old": None, "new": new, "confidence": "medium",
                     "note": ("nothing to change in " + pkg if culprit else
                              "restricting the platform hides the problem; an upstream fix (or a depext) is better"),
-                    "_keys": [failure_key(j) for j in fails]})
+                    "_keys": [failure_key(j) for j in fails], "jobs": [j["variant"] for j in fails]})
     return out
 
 
@@ -1792,7 +1812,8 @@ def collapse_systemic(out, threshold=5):
             "note": (rs[0].get("note") if rule == "builder-specific" else
                      (f"shared failing dependencies: {dict(culprits.most_common(3))}; " if culprits else "")
                      + f"per-package fix if needed: {rs[0].get('new', '')}"),
-            "_keys": [k for r in rs for k in r.get("_keys", [])]})
+            "_keys": [k for r in rs for k in r.get("_keys", [])],
+            "jobs": merge_jobs([], [v for r in rs for v in r.get("jobs", [])])})
     return merged
 
 
@@ -2188,7 +2209,8 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
         out += [f"#### {'Other suggested' if placed else 'Suggested'} changes ({len(fixes)})", ""]
         for r in fixes:
             path = opam_path(r.get("failing"))
-            out.append(f"**`{path or r.get('failing')}`** ({r.get('rule')}, {r.get('confidence')} confidence)")
+            out.append(f"**`{path or r.get('failing')}`** ({r.get('rule')}, {r.get('confidence')} confidence)"
+                       + jobs_note(r))
             if r.get("error"):
                 out.append(f"> {r['error'][:300]}")
             if r.get("candidates"):
@@ -2214,14 +2236,15 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
         return body + ["</details>", ""]
 
     out += details("Platform-specific failures: possible workarounds", by["workaround"], lambda r: [
-        f"- **{r.get('failing')}**{' (experimental platform)' if r.get('experimental') else ''}: {r.get('error', '')[:220]}",
+        f"- **{r.get('failing')}**{' (experimental platform)' if r.get('experimental') else ''}{jobs_note(r)}: "
+        f"{(r.get('error') or '')[:220]}",
         "  " + diff_block(r).replace("\n", "\n  ")])
     out += details("Failures in other packages or in CI (nothing to change here)", by["elsewhere"], lambda r: [
-        f"- **{r.get('failing')}** ({r.get('fix_in')}): {(r.get('error') or '')[:200]}"
+        f"- **{r.get('failing')}** ({r.get('fix_in')}){jobs_note(r)}: {(r.get('error') or '')[:200]}"
         + (f"<br>suggestion: `{(r.get('new') or '').split('   ')[0]}`" if r.get("new") else "")
         + (f"<br>{r['note'][:200]}" if r.get("note") else "")])
     out += details("Explained but no change suggested", by["explanation"], lambda r: [
-        f"- **{r.get('failing') or r.get('variant')}**: {(r.get('error') or '')[:150]}"
+        f"- **{r.get('failing') or r.get('variant')}**{jobs_note(r)}: {(r.get('error') or '')[:150]}"
         + (f" — {r['note'][:200]}" if r.get("note") else "")
         + (f" ([log]({r['url']}))" if r.get("url") else "")])
     out.append("<sub>Generated by opam_repo_ci_triage.py</sub>")
@@ -2343,6 +2366,10 @@ def render_suggestions(results):
     for r in results:
         print("=" * 100)
         print(f"{r['variant']}")
+        if len(r.get("jobs") or []) > 1:
+            others = [v for v in r["jobs"] if v != r["variant"]]
+            print(f"  same failure on : {len(r['jobs'])} failed jobs; also " + ", ".join(others[:5])
+                  + (f", ... ({len(others) - 5} more)" if len(others) > 5 else ""))
         if r.get("failing"):
             print(f"  failing package : {r['failing']}   fix goes in: {r.get('fix_in')}"
                   + ("   (experimental platform: does not block)" if r.get("experimental") else ""))

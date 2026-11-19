@@ -90,6 +90,14 @@ def render_suggestion(r):
         meta.append("fix goes in: " + e(r["fix_in"]))
     if meta:
         out.append(f'<div class="meta">{" · ".join(meta)}</div>')
+    jobs = r.get("jobs") or []
+    others = [v for v in jobs if v != r.get("variant")]
+    if others:
+        # A matrix suggestion's variant is a label, not one of its jobs: then list them all.
+        what = (f'{len(others)} more job{"s" if len(others) != 1 else ""} ({len(jobs)} in total)'
+                if len(others) < len(jobs) else f'{len(jobs)} job{"s" if len(jobs) != 1 else ""}')
+        out.append(f'<details class="jobs"><summary>same failure on {what}</summary>'
+                   f'<ul>{"".join(f"<li>{e(v)}</li>" for v in others)}</ul></details>')
     if r.get("error"):
         out.append(f'<pre class="err">{e(r["error"])}</pre>')
     if r.get("new"):
@@ -270,6 +278,8 @@ pre.err{max-height:16em;overflow-y:auto}
 .diff span{display:block}.add{color:var(--add);background:var(--addbg)}.del{color:var(--del);background:var(--delbg)}
 .alt,.cm{color:var(--mut)}
 .note{font-size:.88rem;overflow-wrap:anywhere}
+details.jobs{color:var(--mut);font-size:.85rem;overflow-wrap:anywhere}
+details.jobs>summary{cursor:pointer}details.jobs ul{margin:2px 0 4px;padding-left:20px}
 ul.ev{margin:2px 0 6px;padding-left:1.4em;font-size:.85rem}.yes{color:var(--add)}.no{color:var(--del)}.unk{color:var(--mut)}
 .cmd pre{margin-top:2px;white-space:pre}
 .tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.88rem}
