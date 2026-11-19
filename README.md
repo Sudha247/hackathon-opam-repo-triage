@@ -1,0 +1,81 @@
+# opam-repository CI triage
+
+Tools to triage the failures reported by opam-repo-ci
+(<https://opam.ci.ocaml.org>) on ocaml/opam-repository pull requests, and to
+suggest fixes such as dependency bounds.
+
+- `fetch_ci_logs.py`: download the failed job logs of a CI run into `ci-logs/<sha>/`.
+- `classify_logs.py`: classify and group those logs with rules, marking the groups that need an LLM.
+- `opam_repo_ci_triage.py`: parse a CI run, compare it with a baseline, and suggest fixes (see below).
+
+## opam_repo_ci_triage.py
+
+Works only from results CI already computed: nothing is built, no Docker, and
+no GitHub token is needed. Python 3 standard library only; `git` is used only
+as a fallback (see "Data sources").
+
+Each command takes a commit sha, an opam.ci.ocaml.org URL, or `--pr N` (the
+PR's current head).
+
+| Command | What it does |
+|---|---|
+| `summary` | One record per CI job: status, category (build, build-or-test, dependency, network, cancelled, solver, ignored, not-available, lint), job kind, platform; reverse-dependency failures grouped by package. |
+| `logs` | For failed jobs: the first `#=== ERROR while …` block, solver output, the final error, the builder (classic or day10) and the master commit the PR was merged onto. |
+| `compare` | Classifies failing reverse dependencies against the CI run of the PR that published the previous version of the package: NEW, pre-existing, builder-specific, no-baseline. |
+| `suggest` | Proposes fixes, with the evidence they are based on (see below). |
+
+```sh
+python3 opam_repo_ci_triage.py summary --pr 31275
+python3 opam_repo_ci_triage.py logs 1e2d45eb8b297fea701407d41e2d2af656bd5d9a --match 'revdeps,osc'
+python3 opam_repo_ci_triage.py compare --pr 31275
+python3 opam_repo_ci_triage.py suggest 55ad97d637d37d80b5d186bd7b3850ad263d05f1
+```
+
+Common options:
+
+- `--json`: machine-readable output.
+- `--match REGEX`: only jobs whose variant matches, e.g. `'revdeps,passage'`,
+  `'lower-bounds'`, `'^compilers,'` (classic builder only), `',5\.5,'` (OCaml 5.5).
+  A variant is the last part of a job URL, e.g.
+  `compilers,4.14,lwt.5.10.2,revdeps,osc.0.1.4` or
+  `day10,debian-13,x86_64,5.5,lwt.5.10.2,tests`.
+- `--max N`: analyse at most N distinct failures (default 30).
+- `--cache-dir DIR`: cache location (default `.opam-ci-cache/`).
+
+### suggest
+
+| Failure | Suggestion | Confidence |
+|---|---|---|
+| Unbound value / module / constructor / record field / type from a library | `>=` the version that introduced it, or `<` the version that removed it, found from per-version API docs; `{= version}` when both packages come from the same repository | high |
+| Same, from the OCaml stdlib | `"ocaml" {>= "X"}` / `{< "X"}` from the stdlib `.mli` of each release | high |
+| `string` used where `bytes` is expected | `"ocaml" {< "4.06"}` (safe-string) | high |
+| Test output diff (cram/mdx) | `"dep" {with-test & < "X"}` for dependencies whose version differs from a passing job, or that were released after the failing package | low (candidates) |
+
+Example (the earlier, failing commit of PR 30908):
+
+```
+error           : Unbound value Ortools.Sat.proto_solve
+looked up in    : ocaml.org docs
+evidence        : ortools 9.15.0-1=no, ortools 9.15.0-2=yes, ortools 9.15.0 (installed in failing job)=no
+suggestion (library-api, high):
+  - "ortools"	{>= "9.15"}
+  + "ortools" {>= "9.15.0-2"}
+  or "ortools" {= version}  (same upstream repository and version)
+```
+
+## Data sources, cheapest first
+
+1. The CI commit page and job logs (opam.ci.ocaml.org).
+2. The ocaml.org MCP endpoint (`https://ocaml.org/mcp`, JSON-RPC, no session, no token): module lists and plain-text signatures for every documented package version.
+3. opam.ocaml.org pages: the versions of a package, and the release date of a version.
+4. Raw files: opam files of opam-repository, `stdlib/*.mli` of each OCaml release.
+5. A shallow, blob-less `git fetch` of one upstream tag, only when ocaml.org has no docs for a version.
+6. The GitHub REST API, only for `--pr` and for `compare`'s baseline lookup (2–3 calls). It works without a token (60 requests per hour); `GITHUB_TOKEN`, `GH_TOKEN` or a logged-in `gh` are used if present.
+
+Results are cached in `.opam-ci-cache/`. `suggest` prints the number of
+network requests it actually sent.
+
+Limitations:
+
+- opam-repo-ci deletes old runs: the CI page of a PR from many months ago returns 404, so `compare` has no baseline for it.
+- The version lookups assume upstream tags named after the opam version (`1.2.3`, `v1.2.3`, `name-1.2.3`, …).
