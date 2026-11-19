@@ -175,6 +175,21 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
 LLM_UNSAFE_CHANGE = re.compile(r'(?:[<>]=?|!?=)\s*"v?\d|depexts?\s*:|\{[^}]*\bos-(distribution|family)')
 
 
+def key_error_line(text):
+    """The line of a job log that best names the error, for grouping the
+    failures the LLM answered (scripts/llm_digest.py)."""
+    lines = [l.strip() for l in log_info(text)["error_lines"] if l.strip()]
+    lines = [l for l in lines if not re.match(r"(=== ERROR while|context |path |command |exit-code |env-file |"
+                                              r"output-file |## output|\[\.\.\.)", l)]
+    lines = [l for l in lines if not re.match(r"make(\[\d+\])?: \*\*\*", l)]    # make's own summary
+    for rx in (r"\b(?:Error|error|Fatal error|fatal error):", r"\bError\b|\b[Ee]xception\b",
+               r"\bfailed\b|not found|No such file|Read-only|cannot"):
+        hit = next((l for l in lines if re.search(rx, l)), None)
+        if hit:
+            return hit[:300]
+    return lines[-1][:300] if lines else None
+
+
 def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run):
     jobs = {j["variant"]: j for j in data["jobs"]}
     def unexplained(r):
@@ -198,6 +213,7 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
             # Without the error itself the model can only guess (it guessed
             # "transient" for a missing library): leave it unrecognised.
             continue
+        log_err = key_error_line(text)
         res = llm_suggest(src, r, jobs[r["variant"]], text, data, pr_packages, cache_dir, model, dry_run)
         if "llm_prompt" in res:
             r["llm_prompt"] = res["llm_prompt"]
@@ -212,12 +228,12 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         fix_in = {"this-pr": "this PR" if pkg in pr_packages else f"{pkg} (other package)",
                   "other-package": f"{pkg} (other package)", "upstream": "upstream (the package's source)",
                   "ci": "the CI environment", "unknown": r.get("fix_in") or "unknown"}[res["fix_in"]]
-        answers[sig] = (res, pkg, fix_in)
+        answers[sig] = (res, pkg, fix_in, log_err)
     # Failures with the same signature (the same error on other platforms) share the answer.
     for r in todo:
         if sig_of(r) not in answers:
             continue
-        res, pkg, fix_in = answers[sig_of(r)]
+        res, pkg, fix_in, log_err = answers[sig_of(r)]
         pre = f"Pre-existing: {r['preexisting']}. " if r.get("preexisting") else ""
         # The model blames the CI too easily (it said "rerun" for a missing
         # library): only say so when the job list shows a passing rerun.
@@ -226,7 +242,7 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         verify = re.sub(r"^(Check|Verify)( that)?:?\s*", "", res["verify"].strip())
         verify = verify[:1].upper() + verify[1:]
         r.update(rule="llm", failing=pkg, fix_in=fix_in, confidence=res["confidence"],
-                 diagnosis=res["diagnosis"], llm_usage=res.get("llm_usage"),
+                 diagnosis=res["diagnosis"], llm_usage=res.get("llm_usage"), log_error=log_err,
                  note=pre + (f"{res['diagnosis']} " if r.get("error") else "") + f"To check: {verify}")
         if not r.get("error"):
             r["error"] = res["diagnosis"]

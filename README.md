@@ -137,6 +137,15 @@ Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
 fallbacks enabled. Responses are cached in `.opam-ci-cache/`, so re-runs cost
 nothing. The log and opam file are passed as untrusted data.
 
+Every Monday, `.github/workflows/llm-digest.yml` groups the LLM answers shown
+on the triage page by the error line of their log (`scripts/llm_digest.py`;
+paths, numbers and identifiers masked) and keeps one issue, "LLM diagnoses to
+turn into rules", up to date with the errors answered in two or more PRs: the
+diagnoses, suggested changes and logs of each. Turning one into a rule (most
+go in `known_errors` in `triage/rules.py`, with a case in
+`tests/test_triage.py`) takes it out of the LLM's hands: free, deterministic
+and tested. It does nothing while the page has no LLM answers.
+
 To evaluate it on the PRs of the triage page that have failures no rule recognises, run
 `.venv/bin/python scripts/llm_eval.py --first 5` (then without `--first`): it saves each PR's
 result in `llm-eval/` and prints the tokens used; `--dry-run` lists the PRs and prompts without

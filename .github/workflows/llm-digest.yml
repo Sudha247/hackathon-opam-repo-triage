@@ -1,0 +1,34 @@
+# Weekly: group the LLM diagnoses shown on the triage page by error, and keep
+# one issue ("LLM diagnoses to turn into rules") up to date with the errors
+# answered in several PRs: the candidates for new rules. Does nothing while
+# the page has no LLM answers (no ANTHROPIC_API_KEY secret).
+name: LLM digest
+
+on:
+  schedule:
+    - cron: "47 5 * * 1"      # Mondays, 05:47 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pages: read
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Update the digest issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          site=$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .html_url)
+          python3 scripts/llm_digest.py "${site%/}/data.json" --issue "$GITHUB_REPOSITORY" > digest.md
+          cat digest.md >> "$GITHUB_STEP_SUMMARY"
