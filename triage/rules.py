@@ -1,0 +1,701 @@
+"""Rules on one failed job's log."""
+
+import argparse
+import collections
+import concurrent.futures
+import functools
+import gzip
+import hashlib
+import html
+import html.parser
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from .net import (  # noqa: F401
+    fetch,
+)
+from .ci import (  # noqa: F401
+    excerpt,
+    job_dims,
+    log_text,
+    opam_vcmp,
+    split_pkg,
+)
+from .sources import (  # noqa: F401
+    bisect_presence,
+    constraint_edit,
+    defines,
+    existing_bounds,
+    module_files,
+    norm,
+    ocaml_releases,
+    present,
+    satisfies,
+)
+
+
+def log_info(text):
+    """Facts from a job log: failing package, installed versions, error lines."""
+    info = {"installed": {}}
+    for line in text.splitlines():
+        m = re.search(r"-> installed ([\w+-]+)\.(\S+)", line)
+        if m:
+            info["installed"][m.group(1)] = m.group(2)
+    for m in re.finditer(r'"([\w+-]+)\.([^"\s]+)"', "\n".join(l for l in text.splitlines() if "->" in l and '"' in l)):
+        info["installed"].setdefault(m.group(1), m.group(2))   # day10 dependency graph
+    m = re.search(r"#=== ERROR while (compiling|installing|removing) ([\w+-]+)\.(\S+?) =", text)
+    if m:
+        info["action"] = m.group(1)
+        info["failing"] = (m.group(2), m.group(3))
+    m = re.search(r"ocaml(?:-base)?-compiler\.(\d+\.\d+\.\d+)", text)
+    if m:
+        info["ocaml"] = m.group(1)
+    blk = excerpt(text, max_output_lines=200).get("error_block", "")
+    info["error_lines"] = [re.sub(r"^# ?", "", l) for l in blk.splitlines()]
+    info["test_diff"] = ".corrected" in blk or "git --no-pager diff" in blk
+    info["base"] = excerpt(text).get("base")
+    return info
+
+
+UNBOUND_RES = [
+    (re.compile(r"Unbound value [`\"']?([\w.']+)"), "value"),
+    (re.compile(r"Unbound constructor [`\"']?([\w.']+)"), "constructor"),
+    (re.compile(r"Unbound record field [`\"']?([\w.']+)"), "field"),
+    (re.compile(r"Unbound type constructor [`\"']?([\w.']+)"), "type"),
+    (re.compile(r"Unbound module [`\"']?([\w.']+)"), "module"),
+]
+
+
+def find_unbound(lines):
+    text = "\n".join(lines)
+    for rx, kind in UNBOUND_RES:
+        m = rx.search(text)
+        if m:
+            parts = m.group(1).strip("`\"'.").split(".")
+            return kind, parts[:-1], parts[-1]
+    m = re.search(r"There is no field (\w+) within type [`\"']?([\w.]+)", text)
+    if m:
+        mods = m.group(2).split(".")[:-1]
+        return "field", mods, m.group(1)
+    return None
+
+
+TOPLEVEL_LINE = re.compile(r"^[-+]\s*(val [\w'.]+ :|- : |type |module |exception |Line \d+, characters "
+                           r"|Characters \d+-\d+|Error: |Warning \d+)")
+
+
+def toplevel_diff(err):
+    """Changed lines of a test diff, if most of them are OCaml toplevel output
+    (mdx `# expr;;` answers, types, error locations)."""
+    lines = [l for l in err if re.match(r"^[-+](?![-+]{2})", l)]
+    hits = [l for l in lines if TOPLEVEL_LINE.match(l)]
+    return hits if lines and len(hits) * 2 >= len(lines) else None
+
+
+def suggest_for_job(src, job, text, pr_packages, pr_sha):
+    info = log_info(text)
+    dd = job_dims(job)
+    out = {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"]}
+    if job["platform"][:1] == ["day10"]:
+        out["_distros"] = [dd["distro"] or dd["os"]]   # see accepted_but_failing
+    m = re.search(r"These packages are still missing: (.+)", text)
+    if "failing" not in info and m:
+        names = m.group(1).split()
+        dims = job_dims(job)
+        plat = dims["distro"] or ("debian-13" if dims["os"] == "linux" else dims["os"])
+        owner = job["revdep"] or job["target"]
+        is_conf = split_pkg(owner)[0].startswith("conf-")
+        out.update(rule="missing-system-package", failing=owner,
+                   fix_in=("this PR" if owner in pr_packages else f"{owner} (other package)") if is_conf
+                          else "the dependency declaring these depexts",
+                   error=f"system packages not available on {plat}: {', '.join(names)}",
+                   new=f'x-ci-accept-failures: ["{plat}"]   (or correct the depext names for {plat})',
+                   confidence="medium",
+                   note="Either the depext name is wrong for this distribution, the package needs an extra "
+                        "repository (EPEL, CRB, ports), or it does not exist there.")
+        return out
+    m = re.search(r"(Segmentation fault|Bus error|Illegal instruction)\s+(day10[\w-]*|obuilder[\w-]*)", text)
+    if m:
+        out.update(rule="transient", error=f"{m.group(1)} of the CI tool {m.group(2)}",
+                   note="The CI tool crashed, not the package. Rerun the job.")
+        return out
+    m = re.search(r"runc run failed: [^\n]{0,120}", text)
+    if m:
+        out.update(rule="transient", error="the CI could not start the build container",
+                   note="A CI infrastructure failure (the container did not start). Rerun the job.")
+        return out
+    m = re.search(r"HTTP error code (5\d\d|429)|Could not resolve host|Connection (?:reset|timed out)", text)
+    if "failing" not in info and m:
+        out.update(rule="transient", error=m.group(0), note="Network error. Rerun the job.")
+        return out
+    if "failing" not in info:
+        out["note"] = "The log has no opam error block (a dependency, network or solver failure)."
+        return out
+    fname, fver = info["failing"]
+    out["failing"] = f"{fname}.{fver}"
+    in_pr = f"{fname}.{fver}" in pr_packages
+    out["fix_in"] = "this PR" if in_pr else f"{fname}.{fver} (other package)"
+    ref = pr_sha if in_pr else (info.get("base") or "master")
+    opam_text = src.opam_file(fname, fver, ref) or src.opam_file(fname, fver)
+    err = info["error_lines"]
+
+    # opam reinstalls a package at the same version (a "recompile" in the
+    # plan, e.g. after downgrading its dependencies) and removes it first; for
+    # a package with a `remove:` field, the rebuild then runs in an empty
+    # source directory ("No rule to make target", dune building nothing).
+    # Seen with opam 2.6 on lower-bounds jobs; frama-c's own PR passed because
+    # frama-c was pinned there.
+    plan = re.search(rf"(?m)^\s*- recompile\s+{re.escape(fname)}\s+{re.escape(fver)}\s+(?!.*pinned).*$", text)
+    removed = plan and re.search(rf"(?m)^-> removed\s+{re.escape(fname)}\.{re.escape(fver)}\s*$", text[plan.end():])
+    if removed and re.search(r"(?m)^remove:", opam_text or ""):
+        out.update(rule="opam-same-version-reinstall", confidence="high", fix_in="opam (the CI's opam version)",
+                   error=f"{fname}.{fver} is recompiled at the same version, removed, then fails to "
+                         f"{'install' if info.get('action') == 'installing' else 'build'}",
+                   note=f"opam rebuilds {fname}.{fver} at the same version and also removes it, which needs "
+                        f"its sources (it has a `remove:` field). Since opam 2.6 (ocaml/opam#6440) both steps "
+                        f"move the same source directory, so the one that runs second gets an empty directory. "
+                        f"An opam bug, not a problem of the packages or their bounds: the job can be ignored. "
+                        f"A pinned {fname} (as in its own PR) does not hit it.")
+        return out
+
+    # Install failures: the install command failed (its output is in the block),
+    # or files listed for installation were never built because an earlier
+    # build command failed without stopping the build.
+    if info.get("action") == "installing" and any("couldn't be installed" in l for l in err):
+        missing = [f for l in err for f in re.findall(r"/([^/\s]+) to /", l)]
+        exts = collections.Counter(os.path.splitext(f)[1] or f for f in missing)
+        cut = text.find("#=== ERROR while installing")
+        earlier = [re.sub(r"^[-#] ?", "", l).strip() for l in text[:cut].splitlines()
+                   if re.search(r"\bError\b|error:|Parse error|fatal error", l)
+                   and not re.search(r"Error report|\[ERROR\] The (compilation|installation)", l)]
+        out["install"] = ("files listed for installation were not built: "
+                          + ", ".join(f"{n} {x}" for x, n in exts.most_common()))
+        if earlier:
+            err = earlier[-15:]
+            out["install"] += f"; earlier build error: {err[-1][:150]}"
+        else:
+            out.update(rule="install-missing-files", error=out.pop("install"), confidence="low",
+                       note="The build does not produce these files on this platform (.cmxs files need native "
+                            "dynlink, for example). Make them optional in the .install file or the build, or "
+                            "restrict `available`.")
+            return out
+
+    # Rule: safe-string
+    if re.search(r"has type\s+string\s+but an expression was expected of type\s*$", "\n".join(err), re.M) and \
+       re.search(r"=?\s*bytes", "\n".join(err)):
+        old, new = constraint_edit(opam_text, "ocaml", "<", "4.06")
+        out.update(rule="safe-string", error="string used where bytes is expected (safe-string, default since OCaml 4.06)",
+                   dep="ocaml", old=old, new=new, confidence="high")
+        return out
+
+    info["pr_packages"] = pr_packages
+    info["_text"] = text
+    lr = log_rules(src, err, fname, opam_text, info, job)
+    if lr:
+        out.update(lr)
+        return out
+
+    # In a test diff (cram/mdx), errors are part of the expected or actual
+    # output: only the lines before the diff are compiler errors.
+    pre_diff = err
+    if info["test_diff"]:
+        cut = next((i for i, l in enumerate(err) if re.match(r"(diff --git|--- |\S*git --no-pager diff)", l)), len(err))
+        pre_diff = err[:cut]
+    unb = find_unbound(pre_diff)
+    if unb:
+        kind, mods, ident = unb
+        out["error"] = f"Unbound {kind} {'.'.join(mods + [ident])}"
+        top = mods[0] if mods else (ident if kind == "module" else None)
+        if top is None:
+            out["note"] = "The identifier has no module path, so the tool cannot tell which package it comes from."
+            return out
+        # Stdlib?
+        rel = ocaml_releases(src)
+        latest, t414 = rel[-1], "4.14.0"
+        top_m = mods[1] if top == "Stdlib" and len(mods) > 1 else top
+        def stdlib_mli(r, m):
+            return src.raw(f"https://raw.githubusercontent.com/ocaml/ocaml/{r}/stdlib/{m.lower()}.mli")
+        if stdlib_mli(latest, top_m) or stdlib_mli(t414, top_m):
+            inner = mods[2:] if top == "Stdlib" else mods[1:]
+
+            def check(r):
+                text = stdlib_mli(r, top_m)
+                if kind == "module" and not mods:
+                    return text is not None
+                if text is None:
+                    return False
+                if inner and not defines(text, "module", inner[0]):
+                    return False
+                return defines(text, kind, ident)
+            bad = info.get("ocaml", "0")
+            bad_rel = max([r for r in rel if opam_vcmp(r, bad) <= 0] or [rel[0]], key=lambda r: [int(x) for x in r.split(".")])
+            res, ev = bisect_presence(check, rel, bad_rel)
+            out["evidence"] = {f"ocaml {v}": r for v, r in sorted(ev.items(), key=lambda kv: [int(x) for x in kv[0].split(".")])}
+            if res:
+                op, v = res
+                v = ".".join(v.split(".")[:2])
+                old, new = constraint_edit(opam_text, "ocaml", op, v)
+                out.update(rule="stdlib", dep="ocaml", old=old, new=new, confidence="high")
+            else:
+                out["note"] = "Standard library identifier, but no OCaml release adds or removes it."
+            return out
+        # Library: candidate packages whose name matches the top module.
+        cands = [p for p in info["installed"] if norm(top).startswith(norm(p)) and len(norm(p)) >= 2]
+        cands.sort(key=lambda p: -len(p))
+        by_name = bool(cands)
+        if not cands and opam_text:
+            # The module may be reached through an `open` (e.g. Term from Why3).
+            # Rank the direct dependencies by the module names in the error text.
+            deps = re.findall(r'^\s*"([\w+-]+)"', opam_text.split("depends:", 1)[-1].split("]", 1)[0], re.M)
+            deps = [d for d in deps if d in info["installed"] and d not in ("ocaml", "dune", "ocamlfind")]
+            mentioned = {norm(w) for w in re.findall(r"\b([A-Z]\w+)\.", "\n".join(err))}
+            cands = sorted(deps, key=lambda d: not any(m.startswith(norm(d)) for m in mentioned))
+        for pkg in cands[:5]:
+            bad = info["installed"].get(pkg)
+            if not bad:
+                continue
+            doc_mods = mods if mods else []          # full path, e.g. ['Ortools', 'Sat']
+            git_path = mods[1:] if mods and norm(mods[0]).startswith(norm(pkg)) and len(mods) > 1 else mods
+            used = set()
+
+            def check(v, pkg=pkg, doc_mods=doc_mods, git_path=git_path, used=used):
+                # 1. ocaml.org docs for pkg.v (no git, no token, any upstream host)
+                r = src.doc_present(pkg, v, doc_mods, kind, ident)
+                if r is not None:
+                    used.add("ocaml.org docs")
+                    return r
+                # 2. fallback: shallow blob-less git fetch of the matching tag
+                repo = src.upstream(pkg, v) or src.upstream(pkg, bad)
+                t = repo and src.tag_for(repo, pkg, v)
+                if not t:
+                    return None
+                used.add(f"git {repo}")
+                if kind == "module" and not mods:
+                    return bool(module_files(src.tree(repo, t), ident))
+                return present(src, repo, t, git_path or [top], kind, ident)
+
+            if not by_name:
+                # Accept a dependency only if it actually provides that module.
+                has_mod = src.doc_present(pkg, bad, [], "module", top)
+                if has_mod is None:
+                    repo = src.upstream(pkg, bad)
+                    t = repo and src.tag_for(repo, pkg, bad)
+                    has_mod = bool(t and module_files(src.tree(repo, t), top))
+                if not has_mod:
+                    continue
+            at_bad = check(bad)
+            if at_bad is None:
+                out.setdefault("tried", []).append(f"{pkg}.{bad}: no ocaml.org docs and no matching git tag")
+                continue
+            if at_bad:
+                out.setdefault("tried", []).append(f"{pkg}.{bad} defines it ({', '.join(sorted(used))}): "
+                                                   f"not a version problem of {pkg}")
+                continue
+            bounds = existing_bounds(opam_text, pkg)
+            res, ev = bisect_presence(check, src.versions(pkg), bad,
+                                      allowed=lambda v, b=bounds: satisfies(v, [x for x in b if x[0] != "="]))
+            out["evidence"] = {f"{pkg} {v}": r for v, r in sorted(ev.items(), key=lambda kv: functools.cmp_to_key(opam_vcmp)(kv[0]))}
+            out["evidence"][f"{pkg} {bad} (installed in failing job)"] = False
+            out["source"] = ", ".join(sorted(used))
+            if res:
+                op, v = res
+                old, new = constraint_edit(opam_text, pkg, op, v)
+                out.update(rule="library-api", dep=pkg, old=old, new=new, confidence="high")
+                if f"{pkg}.{fver}" in pr_packages and src.upstream(fname, fver, ref) == src.upstream(pkg, fver, ref):
+                    out["alternative"] = f'"{pkg}" {{= version}}  (same upstream repository and version)'
+                return out
+        out.setdefault("note", "The identifier was not found in the history of any candidate package.")
+        return out
+
+    if info["test_diff"]:
+        top = toplevel_diff(err)
+        if top and info.get("ocaml"):
+            # Expected toplevel output (types, values, error locations) printed
+            # by an older compiler: the test depends on the OCaml version.
+            mm = ".".join(info["ocaml"].split(".")[:2])
+            m = re.search(r'^[ \t]*"ocaml"[ \t]*(?:\{([^}]*)\})?[^\n]*$', opam_text or "", re.M)
+            term = f'< "{mm}" | !with-test'
+            if m and m.group(1) and m.group(1).strip():
+                new = f'"ocaml" {{{m.group(1).strip()} & ({term})}}'
+            else:
+                new = f'"ocaml" {{{term}}}'
+            out.update(rule="test-output-ocaml", dep="ocaml", confidence="medium",
+                       error=f"Toplevel output in the tests differs on OCaml {info['ocaml']}: {top[0][:100]}",
+                       old=m.group(0).strip() if m else None,
+                       new=new + f"   (keeps the package installable, disables its tests on OCaml >= {mm})",
+                       alternative=f'"@runtest" {{with-test & ocaml:version < "{mm}"}}   (on the test command)',
+                       note=f"{mm} is the oldest OCaml version that fails in this run; the output may have changed in "
+                            f"an earlier release (5.4 prints shorter type paths, for example). Updating the "
+                            f"expected output upstream fixes it for good.")
+            return out
+        out["rule"] = "test-output"
+        out["error"] = "test output differs (cram/mdx)"
+        return out   # completed by the caller with a passing job's versions
+    if out.get("install"):
+        out.update(error=out.pop("install"), note="No rule recognises the earlier build error.")
+        return out
+    out["note"] = "no rule matched"
+    return out
+
+
+def complete_test_output(src, r, job, text, data, cache_dir):
+    """For a test-output diff: compare the failing job's installed versions with a
+    passing job of the same package and suggest a with-test upper bound."""
+    bad = log_info(text)
+    fname, fver = bad["failing"]
+    same = [k for k in data["jobs"] if k["target"] == job["target"] and k["revdep"] == job["revdep"]
+            and k["kind"] == job["kind"] and k["category"] == "passed"]
+    where = "this run"
+    if not same:
+        dated_candidates(src, r, bad, fname, fver)
+        return
+    ok = log_info(log_text(fetch(same[0]["url"], cache_dir)))
+    opam_text = src.opam_file(fname, fver, bad.get("base") or "master") or ""
+    deps = set(re.findall(r'^\s*"([\w+-]+)"', opam_text, re.M))
+    diffs = []
+    for p, v in bad["installed"].items():
+        w = ok["installed"].get(p)
+        if w and w != v and p in deps and p not in ("ocaml", "dune", "ocaml-base-compiler", "ocaml-compiler"):
+            diffs.append((p, w, v))
+    blob = "\n".join(bad["error_lines"]).lower()
+    diffs.sort(key=lambda d: (d[0].lower() not in blob, d[0]))
+    r["compared_with"] = "/".join(same[0]["platform"]) + f" in {where}"
+    r["candidates"] = []
+    for p, good_v, bad_v in diffs[:4]:
+        if opam_vcmp(bad_v, good_v) > 0:
+            vs = [v for v in src.versions(p) if opam_vcmp(v, good_v) > 0]
+            first = vs[0] if vs else bad_v
+            # Test-only: keep the main constraint, add a separate with-test line.
+            r["candidates"].append({"dep": p, "passing": good_v, "failing": bad_v, "old": None,
+                                    "new": f'"{p}" {{with-test & < "{first}"}}   (new line in depends)'})
+    r["confidence"] = "low (candidates differ between a passing and the failing job)"
+
+
+# C/C++ errors that newer compilers introduced: code that built with an older
+# GCC fails on recent distributions (debian-13, fedora, archlinux, ...).
+NEWER_CC = [
+    (re.compile(r"error: .*\[-W(implicit-int|implicit-function-declaration|incompatible-pointer-types|"
+                r"int-conversion|return-mismatch|declaration-missing-parameter-type)\]"),
+     "GCC 14 turned -W{0} into an error by default: the C code relies on pre-C99 rules",
+     "Fix the C code upstream. For an old release, add a patch or `x-maintained: false`; "
+     "adding -fpermissive or -Wno-error={0} to the C flags also works."),
+    (re.compile(r"'u?int(?:8|16|32|64)_t' (?:does not name a type|was not declared in this scope|has not been declared)"
+                r"|is defined in header '<cstdint>'"),
+     "Since GCC 13, libstdc++ headers no longer include <cstdint> for you",
+     "Add `#include <cstdint>` upstream, or a patch in the opam file for an old release."),
+    (re.compile(r"(?:cannot use keyword|expected identifier or '\(' before) '(?:bool|true|false)'"
+                r"|'bool' cannot be defined via 'typedef'"),
+     "GCC 15 compiles C as C23 by default, where bool, true and false are keywords",
+     "Fix the C code upstream, or build it with -std=gnu17."),
+    (re.compile(r"error: .*\[-Werror=([\w-]+?)=?\]"),
+     "The package builds with -Werror, and a newer compiler emits a new warning (-W{0})",
+     "Drop -Werror from release builds upstream. For an old release, add a patch or `x-maintained: false`."),
+]
+
+
+def system_package_version(text, lib):
+    """Version of the system package providing `lib`, from the depext
+    installation lines of a log (apt, dnf/yum, apk, pacman, zypper)."""
+    pats = [r"Setting up (?:lib)?{0}[\w.+-]*?(?:-dev)?:\w+ \(([^)]+)\)",          # apt
+            r"(?m)^[-\s]*(?:lib)?{0}[\w+-]*?-devel\s+\w+\s+(\d\S*)\s",       # dnf table
+            r"Installing\s*:\s*(?:lib)?{0}[\w+-]*?-devel-(\d[^\s]*)",
+            r"Installing (?:lib)?{0}[\w+-]*? \(([^)]+)\)",                     # apk
+            r"installing (?:lib)?{0} \(([^)]+)\)"]                              # pacman
+    for name in dict.fromkeys([lib, re.sub(r"\d+$", "", lib)]):
+        for pat in pats:
+            m = re.search(pat.format(re.escape(name)), text, re.I)
+            if m:
+                return m.group(1)
+    return None
+
+
+def known_errors(text, full, fname, opam_text, info, dims, platform, deps):
+    """Failures with a recognisable message and a known cause."""
+    installed = info.get("installed") or {}
+    m = re.search(r"no such function: unixepoch", text)
+    if m:
+        have = system_package_version(full, "sqlite3")
+        return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
+                "error": f"sqlite3 >= 3.38 required (unixepoch); {platform} has {have or 'an older version'}",
+                "note": f"The SQL uses `unixepoch()`, added in SQLite 3.38, and the system SQLite is older on "
+                        f"{platform}. Exclude these distributions (`x-ci-accept-failures`, or `available` on "
+                        f"os-distribution and os-version), or avoid `unixepoch()` upstream."}
+    m = re.search(r"Could NOT find Python3?\b[^\n]*", text)
+    if m:
+        r = {"rule": "missing-tool", "error": m.group(0).strip()[:200], "confidence": "high"}
+        if "conf-python-3" in deps:
+            r["note"] = f"conf-python-3 is a dependency, but CMake cannot find Python on {platform}."
+        else:
+            r.update(dep="conf-python-3", old=None, new='"conf-python-3" {build}   (new line in depends)',
+                     note="The CMake build needs a Python 3 interpreter.")
+        return r
+    if (re.search(r"fatal: not a git repository", text) and re.search(r"git (describe|rev-parse|log)", text)
+            and not re.search(r"Error: (Program|Library) ", text)):     # another cause, with git noise
+        return {"rule": "needs-git-checkout", "confidence": "high",
+                "error": "the build runs git, but the release archive is not a git checkout",
+                "note": "The build calls git (`git describe` or similar) to find the version. Release archives "
+                        "have no .git directory, so this fails everywhere. Fix upstream: take the version from "
+                        "the opam file (`%{version}%`) or from dune's `%%VERSION%%` substitution."}
+    m = re.search(r"cannot create (?:regular file|directory) '?(/usr/[^':\s]*)'?: Read-only file system", text)
+    if m:
+        return {"rule": "install-outside-prefix", "confidence": "high",
+                "error": f"the install step writes to {m.group(1)}, outside the opam switch",
+                "note": "The install command ignores the switch's prefix. Pass the switch's directories to it "
+                        "in the opam file, for example `PREFIX=%{prefix}%`, `BINDIR=%{bin}%` or "
+                        "`LIBDIR=%{lib}%`, whichever variables the Makefile uses."}
+    if re.search(r"No known cycle-counting instruction", text):
+        arch = dims["arch"]
+        fname = ".".join(info.get("failing") or (fname,))
+        return {"rule": "unsupported-arch", "confidence": "high",
+                "error": f"{fname} has no cycle counter for {arch}",
+                "new": f'available: arch != "{arch}"   (in {fname}, combined with its existing `available`)',
+                "old": None, "note": f"This version of {fname} does not support {arch}; newer versions do."}
+    if re.search(r"Core_kernel shadows Unix|Core_kernel\.Unix", text) and re.search(r"Unbound (constructor|value)", text):
+        return {"rule": "library-api", "confidence": "medium", "keep": True,
+                "error": "Core_kernel shadows the Unix module: Unix constructors and values are not found",
+                "note": f"{fname} opens Core_kernel, whose Unix module hides the standard one, then uses "
+                        f"Unix. Fix upstream (use `Caml_unix` or `Stdlib.Unix`); if only an optional part "
+                        f"(a depopt such as lwt) is affected, a `conflicts` entry for it avoids the build."}
+    m = re.search(r"Unbound value Conv\.(\w+)", text)
+    if m and "cmdliner" in installed and opam_vcmp(installed["cmdliner"], "2.0.0") >= 0:
+        old, new = constraint_edit(opam_text, "cmdliner", "<", "2.0.0")
+        return {"rule": "library-api", "dep": "cmdliner", "old": old, "new": new, "confidence": "high",
+                "error": m.group(0),
+                "note": f"`Arg.Conv.{m.group(1)}` does not exist in cmdliner {installed['cmdliner']}: the "
+                        f"conversion API changed in cmdliner 2.0."}
+    if re.search(r"checking for ar\.\.\. no", text) and dims["os"] == "win32":
+        return {"rule": "platform-unsupported", "confidence": "medium",
+                "error": f"the configure script of {fname} finds no `ar` on {platform}",
+                "new": 'available: os != "win32"   (combined with any existing `available`)', "old": None,
+                "note": f"{fname}'s configure script is not ported to Windows."}
+    m = re.search(r"'NotForRedeclaration' is not a member of 'clang::Sema'|has no member named 'getOriginalNamespace'",
+                  text)
+    if m:
+        clang = (re.search(r"libclang-(\d+)-dev", full) or [None, None])[1]
+        return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
+                "error": m.group(0) + (f" (Clang {clang} installed)" if clang else ""),
+                "note": f"{fname} uses Clang APIs that Clang 19 removed. A bound on conf-libclang does not "
+                        f"choose the installed Clang (conf-libclang.N accepts any Clang up to N): it needs a "
+                        f"conf-libclang version whose depexts install Clang 18 or older on {platform}, or an "
+                        f"update to the newer Clang API."}
+    if re.search(r"the expected type is\s+(?:# )?string option \* Parsetree\.(expression|pattern|core_type)", text):
+        old, new = constraint_edit(opam_text, "ocaml", "<", "5.4")
+        return {"rule": "stdlib", "dep": "ocaml", "old": old, "new": new, "confidence": "high",
+                "error": "pattern on Parsetree tuples: OCaml 5.4's labelled tuples changed their type",
+                "note": "OCaml 5.4 added labelled tuples: the Parsetree's tuple nodes now hold "
+                        "(label option * node) pairs. Code matching them directly needs OCaml < 5.4, or an "
+                        "update (ppxlib's Ast versions abstract this)."}
+    return None
+
+
+def c_compiler_rule(text, platform):
+    for rx, cause, fix in NEWER_CC:
+        m = rx.search(text)
+        if m:
+            arg = m.group(1) if m.groups() else ""
+            line = next((l for l in text.splitlines() if rx.search(l)), m.group(0))
+            return {"rule": "newer-c-compiler", "error": line.strip()[:200], "confidence": "high",
+                    "keep": True, "_plat": platform, "note": f"{cause.format(arg)} (seen on {platform}). {fix.format(arg)}"}
+    return None
+
+
+def log_rules(src, err, fname, opam_text, info, job):
+    """Missing dune language version, tool, library or C header."""
+    text = "\n".join(err)
+    deps = set(re.findall(r'^\s*"([\w+-]+)"', (opam_text or "").split("depends:", 1)[-1].split("\n]", 1)[0], re.M))
+    dims = job_dims(job)
+    platform = dims["distro"] or ("debian (classic builder)" if dims["os"] == "linux" else dims["os"])
+    cc = c_compiler_rule(text, platform)
+    if cc:
+        return cc
+    known = known_errors(text, info.get("_text") or text, fname, opam_text, info, dims, platform, deps)
+    if known:
+        return known
+    m = re.search(r"maximum_version=(\d+)[\s\S]*?llvm_version=(\d[\w.]*)", text)
+    if m and int(m.group(2).split(".")[0]) > int(m.group(1)):
+        want, have = m.group(1), m.group(2)
+        return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
+                "error": f"LLVM <= {want} required; {platform} has LLVM {have}",
+                "note": f"{fname} needs LLVM {want} or older, but its depexts install the distribution's default "
+                        f"LLVM, which is now {have.split('.')[0]} on {platform}. It needs versioned depexts there "
+                        f"(llvm{want} and clang{want} compatibility packages, for example), or a new "
+                        f"conf-libclang version for LLVM {have.split('.')[0]}."}
+    m = re.search(r"No usable version of LLVM <= ([\d.x]+) found", text)
+    if m:
+        return {"rule": "system-library-version", "keep": True, "confidence": "medium", "error": m.group(0),
+                "note": f"No LLVM found on {platform}: {fname} has no depext for it. Add one, or "
+                        f"x-ci-accept-failures if LLVM is not packaged there."}
+    m = (re.search(r"pkg-config (?:--atleast-version[= ](\S+)|--exact-version[= ](\S+)|--max-version[= ](\S+)) "
+                   r"([\w.+-]+)\)?\s*\n(?:.*\n){0,2}?.*(?:exited with code|exit status) 1", text)
+         or re.search(r"Requested '([\w.+-]+) (>=|<=|=) ([\w.~+-]+)' but version of .* is ([\w.~+-]+)", text))
+    if m:
+        if m.re.pattern.startswith("Requested"):
+            lib, op, want, have = m.group(1), m.group(2), m.group(3), m.group(4)
+        else:
+            want = m.group(1) or m.group(2) or m.group(3)
+            op = ">=" if m.group(1) else "=" if m.group(2) else "<="
+            lib, have = m.group(4), system_package_version(info.get("_text", ""), m.group(4))
+        too = "too old" if op == ">=" else "too new" if op == "<=" else "not the expected version"
+        return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
+                "error": f"{lib} {op} {want} required; {platform} has {have or 'an older version'}",
+                "note": f"The system {lib} is {too} on {platform}, and no depext can change that. Exclude "
+                        f"these distributions (`x-ci-accept-failures`, or `available` on os-distribution and "
+                        f"os-version), or relax the requirement upstream."}
+    m = re.search(r"Version (\d+\.\d+) of the dune language is not supported", text)
+    if m:
+        old, new = constraint_edit(opam_text, "dune", ">=", m.group(1))
+        return {"rule": "dune-lang", "error": m.group(0), "dep": "dune", "old": old, "new": new, "confidence": "high"}
+    m = (re.search(r'Program "?([\w.+-]+)"? not found in the tree or in PATH', text)
+         or re.search(r'"([\w.+-]+)": command not found', text)
+         or re.search(r"([\w.+-]+): command not found", text)
+         or re.search(r"Command not found: ([\w.+-]+)", text)
+         or re.search(r"(?m)^\S*?([\w.+-]+): (?:command )?not found$", text))
+    if m and (m.group(1).startswith("-") or (m.group(1) == "brew" and dims["os"] != "macos")
+              or m.group(1).startswith("llvm-config")):     # configure scripts probing for llvm-config-N
+        m = None   # an empty variable expanded as a command, or a probe for another platform's tool
+    if m:
+        tool = m.group(1)
+        conf = f"conf-{tool}"
+        r = {"rule": "missing-tool", "error": m.group(0)}
+        family = re.split(r"[-\d]", dims["distro"] or "")[0]
+        def field_text(name):
+            if name + ":" not in (opam_text or ""):
+                return ""
+            rest = (opam_text or "").split(name + ":", 1)[1]
+            return re.split(r"(?m)^[a-z][\w-]*:", rest, maxsplit=1)[0]
+        depexts_text = field_text("depexts")
+        accepted = re.findall(r'"([^"]+)"', field_text("x-ci-accept-failures"))
+        declared = [pk.strip() for pk, flt in re.findall(r"\[([^\]]*)\]\s*\{([^}]*)\}", depexts_text)
+                    if family and family in flt]
+        if fname.startswith("conf-") and dims["distro"] and dims["distro"] in accepted:
+            r.update(fix_in="the CI environment",
+                     note=f"{fname} lists {dims['distro']} in x-ci-accept-failures, so CI should have "
+                          f"ignored this failure and the failures of the packages that depend on it.",
+                     confidence="high")
+        elif fname.startswith("conf-") and declared:
+            r.update(fix_in="the CI environment",
+                     note=f"{fname} declares a depext for {family} ({', '.join(declared)}), but `{tool}` "
+                          f"is missing on {platform}: the CI did not install it. Nothing to change in "
+                          f"{fname}.", confidence="high")
+        elif fname.startswith("conf-"):
+            r.update(note=f"{fname} does not provide `{tool}` on {platform}: its depexts have no entry for that "
+                          f"platform. Add one, unless the CI image should already have it.", confidence="medium")
+        elif conf in deps:
+            r.update(note=f"{conf} is a dependency, but `{tool}` is missing on {platform}: {conf} lacks a depext for it.",
+                     confidence="medium")
+        elif src.versions(conf):
+            r.update(dep=conf, old=None, new=f'"{conf}" {{build}}   (new line in depends)', confidence="medium")
+        else:
+            r.update(note=f"There is no {conf} package: add a depext providing `{tool}` on {platform}.", confidence="low")
+        return r
+    m = (re.search(r"Package (\S+) was not found in the pkg-config search path", text)
+         or re.search(r"configure: error: ([\w.+-]+)\.pc not found", text))
+    if m:
+        conf = f"conf-{m.group(1)}"
+        r = {"rule": "missing-pkg-config", "error": m.group(0)}
+        if conf in deps:
+            r.update(note=f"{conf} is a dependency, but its pkg-config file is missing on {platform}: {conf} lacks a depext for it.",
+                     confidence="medium")
+        elif src.versions(conf):
+            r.update(dep=conf, old=None, new=f'"{conf}"   (new line in depends)', confidence="medium")
+        else:
+            r.update(note=f"Add a depext providing {m.group(1)}.pc on {platform}.", confidence="low")
+        return r
+    m = re.search(r'Library "([\w.-]+)" not found', text) or re.search(r"Package `([\w.-]+)' not found", text)
+    if m:
+        lib = m.group(1)
+        pkg = lib.split(".", 1)[0]
+        in_tests = bool(re.search(r"(^|/)tests?/", text))
+        r = {"rule": "missing-library", "error": m.group(0)}
+        siblings = {split_pkg(p)[0]: split_pkg(p)[1] for p in (info.get("pr_packages") or [])}
+        installed = info["installed"].get(pkg)
+        if pkg in siblings and pkg in deps and pkg != fname and installed and installed != siblings[pkg]:
+            # e.g. a lower-bounds job installed an older release of the sibling,
+            # before the library was added (or made public) in the one of this PR.
+            old, new = constraint_edit(opam_text, pkg, ">=", siblings[pkg])
+            r.update(dep=pkg, old=old, new=new, confidence="medium",
+                     note=f"{pkg}.{installed} was installed and does not provide `{lib}`; "
+                          f"{pkg}.{siblings[pkg]} is released in this PR")
+            if siblings[pkg] == (info.get("failing") or ("", ""))[1]:
+                r["alternative"] = f'"{pkg}" {{= version}}  (released together, same version)'
+        elif pkg in siblings and pkg not in deps and pkg != fname:
+            r.update(note=f"`{lib}` comes from {pkg}, another package of this PR: the tests of {fname} use a sibling "
+                          f"package. Restrict them (a dune `(package ...)` field on the test stanza, or no `@runtest` "
+                          f"under `-p {fname}`) instead of adding a dependency, which would create a cycle.",
+                     confidence="medium")
+        elif pkg in deps or pkg == fname:
+            r.update(note=f"{pkg} is already a dependency: `{lib}` may only exist in other versions of {pkg}, "
+                          f"or be an optional sub-library.", confidence="low")
+        elif src.versions(pkg):
+            filt = " {with-test}" if in_tests else ""
+            r.update(dep=pkg, old=None, new=f'"{pkg}"{filt}   (new line in depends)', confidence="medium")
+        else:
+            r.update(note=f"`{lib}` is not an opam package. It is probably an internal library missing from the "
+                          f"release archive, or excluded by `-p {fname}`.", confidence="medium")
+        return r
+    m = re.search(r"fatal error: ([\w/.+-]+): No such file or directory", text)
+    if m:
+        return {"rule": "missing-header", "error": m.group(0), "confidence": "low",
+                "note": f"A system header is missing on {platform}. Add the depext (or conf-* dependency) that provides "
+                        f"{m.group(1)}, or x-ci-accept-failures for the platforms without it."}
+    return None
+
+
+TRIVIAL_DEPS = {"ocaml", "dune", "ocamlfind", "odoc", "ocaml-base-compiler", "ocaml-compiler", "base-unix",
+                "base-threads", "base-bytes", "conf-pkg-config", "dune-configurator"}
+
+
+def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
+    """No passing job to compare with: dependencies whose installed version was
+    released after the failing package itself are candidates for having changed
+    its test output. Bound: before their first release after that date.
+    Cost: one small opam.ocaml.org page per dependency looked at (at most
+    `max_lookups`, those mentioned in the error first) plus a binary search
+    over dates for the candidates."""
+    day = src.published(fname, fver)
+    if not day:
+        r["note"] = "No passing job to compare with, and no release date for the package."
+        return
+    opam_text = src.opam_file(fname, fver) or ""
+    dep_lines = re.findall(r'^\s*"([\w+-]+)"([^\n]*)$', opam_text.split("depends:", 1)[-1].split("\n]", 1)[0], re.M)
+    blob = "\n".join(bad["error_lines"]).lower()
+    deps = [d for d, rest in dep_lines
+            if d not in TRIVIAL_DEPS and d in bad["installed"]
+            and not re.search(r"\b(build|with-doc|with-dev-setup)\b", rest)]
+    deps.sort(key=lambda d: d.lower() not in blob)      # mentioned in the output first
+    newer = []
+    for d in deps[:max_lookups]:
+        v = bad["installed"][d]
+        dv = src.published(d, v)
+        if dv and dv > day:
+            newer.append((d.lower() not in blob, dv, d, v))
+    newer.sort()
+    cands = []
+    for _, dv, d, v in newer[:3]:
+        # first version released after `day`: binary search on release dates
+        vs = [w for w in src.versions(d) if opam_vcmp(w, v) <= 0]
+        lo, hi = 0, len(vs) - 1                  # vs[hi] == v is after `day`
+        while lo < hi:
+            mid = (lo + hi) // 2
+            dm = src.published(d, vs[mid])
+            if dm and dm > day:
+                hi = mid
+            else:
+                lo = mid + 1
+        cands.append((d.lower() not in blob, dv, d, v, vs[lo] if vs else v))
+    cands.sort(key=lambda c: (c[0], c[1]))
+    r["compared_with"] = f"release date of {fname}.{fver} ({day})"
+    r["candidates"] = [{"dep": d, "failing": v, "first_after": first, "old": None,
+                        "new": f'"{d}" {{with-test & < "{first}"}}   (new line in depends)'}
+                       for _, _, d, v, first in cands]
+    r["also_newer"] = [d for _, _, d, _ in newer[3:]]
+    r["confidence"] = "low (dependencies released after the package; check their changelogs)"
+    if not cands:
+        r["note"] = f"None of the {min(len(deps), max_lookups)} dependencies checked was released after {fname}.{fver} ({day})."

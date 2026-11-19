@@ -17,6 +17,15 @@ as a fallback (see "Data sources").
 Each command takes a commit sha, an opam.ci.ocaml.org URL, or `--pr N` (the
 PR's current head).
 
+The code is in the `triage/` package, one module per layer, each using only
+the ones before it: `net` (HTTP, GitHub API, git, caches), `ci` (CI pages and
+logs, job names), `sources` (opam files, versions, ocaml.org docs, upstream
+sources), `rules` (one job's log), `matrix` (pass/fail patterns), `context`
+(PR-level checks: pre-existing failures, opam-health-check, lint, reruns),
+`llm`, `suggest` (runs and merges everything), `render` (text, comment,
+review) and `cli`. `opam_repo_ci_triage.py` is the entry point, and re-exports
+the package for the scripts and tests.
+
 | Command | What it does |
 |---|---|
 | `summary` | One record per CI job: status, category (build, build-or-test, dependency, network, cancelled, solver, ignored, not-available, lint), job kind, platform; reverse-dependency failures grouped by package. |

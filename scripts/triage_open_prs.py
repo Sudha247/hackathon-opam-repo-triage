@@ -175,8 +175,14 @@ def llm_available():
 
 
 def tool_version():
-    with open(TOOL, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()[:12]
+    """A hash of the tool's code (the entry point and the triage/ package):
+    PRs are analysed again when it changes."""
+    h = hashlib.sha256()
+    pkg = os.path.join(ROOT, "triage")
+    for path in [TOOL] + sorted(os.path.join(pkg, f) for f in os.listdir(pkg) if f.endswith(".py")):
+        with open(path, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()[:12]
 
 
 def main():
