@@ -1229,6 +1229,18 @@ def suggest(sha, data, src, cache_dir, max_logs, match):
     results += matrix
     for r in results:
         r.pop("_key", None)
+    # The same suggestion found on several platforms or through several
+    # packages is reported once.
+    seen, unique = {}, []
+    for r in results:
+        k = (r.get("failing"), (r.get("new") or "").split("   ")[0]) if r.get("new") else None
+        if k and k in seen:
+            seen[k].setdefault("also_seen_on", []).append(r["variant"])
+            continue
+        if k:
+            seen[k] = r
+        unique.append(r)
+    results = unique
     if not match or re.search(match, "(lint)"):
         results += lint_rules(data, src, sha)
     results += skipped_rules(data, src, cache_dir, pr_packages)
