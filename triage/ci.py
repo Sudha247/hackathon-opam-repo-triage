@@ -46,7 +46,9 @@ def load_commit(sha, cache_dir, refresh=False):
         page = fetch(url, cache_dir, refresh=True)
         data = parse_commit_page(page)
     data["unfinished"] = len(unfinished_jobs(data))
-    if data["unfinished"]:
+    # A test fixture is a snapshot: keep the page when recording one, even if
+    # some jobs never finish (stuck experimental jobs on old commits).
+    if data["unfinished"] and os.environ.get("OPAM_CI_RECORD") != "1":
         try:
             os.remove(cache_path(url, cache_dir))
         except OSError:

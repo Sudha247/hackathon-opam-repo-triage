@@ -59,6 +59,19 @@ def log_info(text):
         info["ocaml"] = m.group(1)
     blk = excerpt(text, max_output_lines=200).get("error_block", "")
     info["error_lines"] = [re.sub(r"^# ?", "", l) for l in blk.splitlines()]
+    if not blk:
+        # Older day10 logs have no "#=== ERROR while" block: the build output
+        # (lines starting with "- ") comes before opam's "[ERROR] The
+        # compilation of pkg failed at ..." line.
+        m = re.search(r"(?m)^\[ERROR\] The (compilation|installation) of ([\w+-]+)\.(\S+?) failed at", text)
+        if m:
+            info["action"] = "compiling" if m.group(1) == "compilation" else "installing"
+            info.setdefault("failing", (m.group(2), m.group(3)))
+            before = text[:m.start()].splitlines()
+            out = [l[2:] if l.startswith("- ") else l for l in before[-80:]]
+            cut = max((i for i, l in enumerate(out) if re.match(r"\[(NOTE|ERROR)\]|Processing:", l)), default=-1)
+            info["error_lines"] = out[cut + 1:]
+            blk = "\n".join(info["error_lines"])
     info["test_diff"] = ".corrected" in blk or "git --no-pager diff" in blk
     info["base"] = excerpt(text).get("base")
     return info
@@ -431,6 +444,45 @@ def known_errors(text, full, fname, opam_text, info, dims, platform, deps):
                 "note": f"The SQL uses `unixepoch()`, added in SQLite 3.38, and the system SQLite is older on "
                         f"{platform}. Exclude these distributions (`x-ci-accept-failures`, or `available` on "
                         f"os-distribution and os-version), or avoid `unixepoch()` upstream."}
+    m = re.search(r"/lib/([\w+-]+)/META: No such file or directory", text)
+    if m and m.group(1) != fname:
+        pkg = m.group(1)
+        return {"rule": "broken-install", "confidence": "medium", "keep": True, "error": m.group(0),
+                "note": f"{pkg}'s directory in the switch has no META file: its installation was incomplete when "
+                        f"{fname} was built (being removed or reinstalled by opam at the same time). This is not a "
+                        f"missing dependency of {fname} (that gives `Library \"{pkg}\" not found`): look at what "
+                        f"opam did with {pkg} in this job, or rerun it."}
+    m = re.search(r"undefined reference to [`'‘]?([\w.$@]+)", text)
+    if m and re.search(r"collect2|ld returned|linker command failed|/ld:", text):
+        sym = m.group(1)
+        hint = ("core's linux_ext needs `core_unix_gettid`, which jst-config only enables with some glibc "
+                "versions: an old core/jst-config combination" if sym == "core_unix_gettid" else
+                "the LAPACKE functions are missing from the system LAPACK: a depext providing LAPACKE (or a newer "
+                "one) is needed" if sym.startswith("LAPACKE_") else
+                f"the library that provides `{sym}` is missing, too old, or not linked")
+        return {"rule": "link-error", "error": f"undefined reference to `{sym}`", "confidence": "medium",
+                "keep": True, "note": f"Link failure on {platform}: {hint}."}
+    m = re.search(r"unsupported option '(-m[\w=-]+)' for target '(arm64|aarch64)[^']*'", text)
+    if m:
+        return {"rule": "platform-unsupported", "confidence": "high", "keep": True,
+                "error": f"the build passes the x86-only flag {m.group(1)} to the {m.group(2)} compiler",
+                "note": "The C flags are x86-specific: upstream should only pass them on x86 (dune's "
+                        "%{architecture}, or a configurator check). For this release, exclude arm64 with "
+                        "`available: arch != \"arm64\"` if every arm64 build fails, or x-ci-accept-failures "
+                        "for the platforms concerned."}
+    m = re.search(r"execve\((\./[\w./-]+)\): No such file or directory", text)
+    if m and dims["os"] == "freebsd":
+        return {"rule": "platform-unsupported", "confidence": "medium", "keep": True,
+                "error": f"{m.group(1)} cannot be run on FreeBSD", "note":
+                f"{m.group(1)} exists, so its #! interpreter does not: usually `#!/bin/bash`, which FreeBSD does "
+                f"not have. Upstream: use `#!/usr/bin/env bash` (or sh), or run it as `bash {m.group(1)}` in "
+                f"the build; conf-bash provides bash."}
+    if re.search(r"exception Stack overflow", text) and "flambda" in info.get("_variant", ""):
+        return {"rule": "test-platform", "confidence": "medium", "keep": True,
+                "error": "stack overflow with flambda",
+                "note": "Only the flambda compiler overflows: its inlining makes deep recursion use more stack. "
+                        "Upstream can make the recursion tail-recursive or less deep; otherwise this extras "
+                        "job's failure is usually accepted."}
     m = re.search(r"Could NOT find Python3?\b[^\n]*", text)
     if m:
         r = {"rule": "missing-tool", "error": m.group(0).strip()[:200], "confidence": "high"}
@@ -516,9 +568,19 @@ def log_rules(src, err, fname, opam_text, info, job):
     deps = set(re.findall(r'^\s*"([\w+-]+)"', (opam_text or "").split("depends:", 1)[-1].split("\n]", 1)[0], re.M))
     dims = job_dims(job)
     platform = dims["distro"] or ("debian (classic builder)" if dims["os"] == "linux" else dims["os"])
+    m = re.search(r"implicit declaration of function ['‘]?(caml_\w+)", text)
+    if m:
+        ocaml = info.get("ocaml") or "this OCaml"
+        return {"rule": "ocaml-runtime-api", "confidence": "medium", "keep": True,
+                "error": f"the C stubs call {m.group(1)}, which OCaml {ocaml}'s runtime does not declare",
+                "note": f"{m.group(1)} is not part of this OCaml's C API: it exists only in other OCaml versions, "
+                        f"or in another compiler variant such as OxCaml. The package needs an `ocaml` constraint "
+                        f"to the versions that have it, or a fix upstream (not a GCC problem, although GCC 14 "
+                        f"reports it as an error)."}
     cc = c_compiler_rule(text, platform)
     if cc:
         return cc
+    info["_variant"] = job["variant"]
     known = known_errors(text, info.get("_text") or text, fname, opam_text, info, dims, platform, deps)
     if known:
         return known

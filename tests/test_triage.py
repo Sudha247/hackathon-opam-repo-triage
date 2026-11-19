@@ -195,6 +195,25 @@ CASES = {
         "b00f7d80717a0cc3f6d2777cb5e55331607d53d3", ["--max", "8"],
         [{"rule": "health-check-new", "failing": "git-mirage.3.18.0", "new": '< "0.7.0"'},
          {"not": {"rule": "health-check-new", "failing": "diffast.0.4"}}]),
+    # From a scan of 190 merged PRs whose first version failed.
+    "diffast-incomplete-install": (
+        "1b03be6378915db91ffe28eaa264a242da693e1c", ["--max", "1", "--match", "^compilers,4.14,.*revdeps,diffast.0.1.1$"],
+        [{"rule": "broken-install", "error": "uutf/META"}, {"not": {"rule": "missing-library", "new": '"uutf"'}}]),
+    "cohttp-curl-x86-flags": (
+        "9a18be928fec732b4b376fff7cfcbbcdfddb9c0e", ["--max", "1", "--match", "^macos,.*cohttp-curl-async"],
+        [{"rule": "platform-unsupported", "error": "-mpopcnt"}]),
+    "owl-link-error": (
+        "2cadc04b9adb2b758b70dab842ca5094c42c543b", ["--max", "1", "--match", "^compilers,4.14,.*revdeps,owl.1.0.2$"],
+        [{"rule": "link-error", "error": "LAPACKE_"}]),
+    "ocsipersist-freebsd-script": (
+        "094df7d8541218ef134342c3d82e9e191ffb2c59", ["--max", "1", "--match", "^freebsd,.*ocsipersist-pgsql"],
+        [{"rule": "platform-unsupported", "error": "genconfig.sh"}]),
+    "alcobar-flambda-stack": (
+        "952c1bf57515980ee939ade07e8a09b3040e161e", ["--max", "1", "--match", "^extras,ocaml-4.14-flambda,alcobar"],
+        [{"rule": "test-platform", "error": "flambda"}]),
+    "janestreet-cpuid-old-day10-log": (
+        "e1268d425980a62d80b8507a0148af0f5c54d2c2", ["--max", "1", "--match", "^day10,day10-archlinux-ocaml-5.5,janestreet_cpuid"],
+        [{"rule": "ocaml-runtime-api", "error": "caml_alloc_local"}]),
 }
 
 

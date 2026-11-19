@@ -366,7 +366,8 @@ RULE_TITLES = {
     "opam-same-version-reinstall": "opam reinstalls at the same version",
     "needs-git-checkout": "Build needs a git checkout", "install-outside-prefix": "Installs outside the switch",
     "unsupported-arch": "Architecture not supported", "platform-unsupported": "Platform not supported",
-    "health-check-new": "Builds on master, fails here", "lower-bound": "Lower bound too low", "health-check-preexisting": "Also failing on master",
+    "health-check-new": "Builds on master, fails here", "lower-bound": "Lower bound too low",
+    "link-error": "Link error", "broken-install": "Incomplete installation in the switch", "ocaml-runtime-api": "OCaml runtime function missing", "test-platform": "Fails on one compiler variant", "health-check-preexisting": "Also failing on master",
 }
 
 

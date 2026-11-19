@@ -95,6 +95,10 @@ recognises are grouped in one "Not recognised" entry listing their jobs.
 | Lower-bounds job: the package itself fails and no other rule applies | its downgraded direct dependencies as candidates (passing and failing versions), those named in the error first | low |
 | A new release fails with a dependency version that the previous release excludes on master (a bound maintainers added after a breakage, missing from the new opam file) | the same bound, citing the previous release; skipped when the new release changed that constraint on purpose | medium |
 | A reverse dependency builds on master (opam-health-check) but fails with the new release | the usual fix in the same PR: `"pkg" {< "new version"}` in its depends, or a `conflicts` entry when it does not depend on it directly; not for a PR that modifies an existing version, nor for a new conf package | medium |
+| `undefined reference to …` at link time | the missing symbol, with known causes (LAPACKE missing from the system LAPACK, core's `core_unix_gettid`) | medium |
+| `implicit declaration of function caml_…` | an OCaml runtime function this OCaml does not have (another version, or OxCaml): an `ocaml` constraint or an upstream fix | medium |
+| `lib/X/META: No such file or directory` | X's installation was incomplete while the package built (not a missing dependency) | medium |
+| x86-only C flags (`-mpopcnt`, …) rejected on arm64; a build script that FreeBSD cannot run (`#!/bin/bash`); a stack overflow only with flambda | the cause and the upstream fix or platform restriction | medium–high |
 | A package recompiled at the same version, removed, then failing to build or install (it has a `remove:` field; seen on lower-bounds jobs with opam 2.6) | an opam bug (ocaml/opam#6440 moves the same source directory for both steps), not a bound: the job can be ignored | high |
 
 A suggestion that restricts platforms (`x-ci-accept-failures`, or `available`
