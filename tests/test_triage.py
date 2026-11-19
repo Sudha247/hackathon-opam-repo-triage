@@ -195,10 +195,10 @@ def record(cases):
         shutil.rmtree(d, ignore_errors=True)
         out = run(case, offline=False)
         print(f"{case}: rc={out.returncode} {out.stderr.strip().splitlines()[-1:]}")
-        # compress pages and logs; drop git objects that only speed up later fetches
+        # compress pages, logs and JSON answers
         for name in os.listdir(d):
             p = os.path.join(d, name)
-            if name.endswith(".html"):
+            if name.endswith((".html", ".json")):
                 with open(p, "rb") as f, gzip.open(p + ".gz", "wb", compresslevel=9) as g:
                     g.write(f.read())
                 os.remove(p)

@@ -67,6 +67,19 @@ USER_AGENT = "opam-ci-triage"
 # Fetching
 
 
+def cached_json(path, max_age=None):
+    """The JSON stored at `path`, or in its gzip-compressed copy (test
+    fixtures), or None if there is neither (or it is older than `max_age`
+    seconds, except offline)."""
+    for p, opener in ((path, open), (path + ".gz", gzip.open)):
+        if os.path.exists(p):
+            if max_age is not None and not OFFLINE and time.time() - os.path.getmtime(p) >= max_age:
+                return None
+            with opener(p, "rt", encoding="utf-8") as f:
+                return {"value": json.load(f)}
+    return None
+
+
 def cache_path(url, cache_dir):
     return os.path.join(cache_dir, hashlib.sha256(url.encode()).hexdigest()[:32] + ".html")
 
@@ -486,9 +499,9 @@ def gh_api(path, cache_dir=".opam-ci-cache", cache=True):
     if path in _GH_CACHE:
         return _GH_CACHE[path]
     disk = os.path.join(cache_dir, "api-" + hashlib.sha256(path.encode()).hexdigest()[:24] + ".json")
-    if (cache or OFFLINE) and os.path.exists(disk):
-        with open(disk) as f:
-            _GH_CACHE[path] = json.load(f)
+    hit = cached_json(disk) if (cache or OFFLINE) else None
+    if hit:
+        _GH_CACHE[path] = hit["value"]
         return _GH_CACHE[path]
     if OFFLINE:
         return offline_miss("github-api " + path)
@@ -749,9 +762,9 @@ class Sources:
         key = ("tags", url)
         if key not in self.mem:
             disk = os.path.join(self.cache_dir, "tags-" + hashlib.sha256(url.encode()).hexdigest()[:16] + ".json")
-            if os.path.exists(disk) and (OFFLINE or time.time() - os.path.getmtime(disk) < 86400):
-                with open(disk) as f:
-                    tags = json.load(f)
+            hit = cached_json(disk, max_age=86400)
+            if hit:
+                tags = hit["value"]
             else:
                 r = git(["ls-remote", "--tags", "--refs", url], check=False)
                 tags = [l.split("refs/tags/", 1)[1] for l in r.stdout.splitlines() if "refs/tags/" in l]
@@ -833,11 +846,9 @@ class Sources:
         if key in self.mem:
             return self.mem[key]
         disk = os.path.join(self.cache_dir, "mcp-" + hashlib.sha256(key.encode()).hexdigest()[:24] + ".json")
-        fresh = os.path.exists(disk) and (
-            _max_age is None or OFFLINE or time.time() - os.path.getmtime(disk) < _max_age)
-        if fresh:
-            with open(disk) as f:
-                v = json.load(f)
+        hit = cached_json(disk, max_age=_max_age)
+        if hit:
+            v = hit["value"]
         elif OFFLINE:
             return offline_miss("mcp " + key)
         else:
@@ -1455,9 +1466,9 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
     disk = os.path.join(cache_dir, f"llm-{key}.json")
     if dry_run:
         return {"llm_prompt": prompt}
-    if os.path.exists(disk):
-        with open(disk) as f:
-            return json.load(f)
+    hit = cached_json(disk)
+    if hit:
+        return hit["value"]
     try:
         import anthropic
     except ImportError:
