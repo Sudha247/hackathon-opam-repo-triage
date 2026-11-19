@@ -1119,13 +1119,14 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
     plan = re.search(rf"(?m)^\s*- recompile\s+{re.escape(fname)}\s+{re.escape(fver)}\s+(?!.*pinned).*$", text)
     removed = plan and re.search(rf"(?m)^-> removed\s+{re.escape(fname)}\.{re.escape(fver)}\s*$", text[plan.end():])
     if removed and re.search(r"(?m)^remove:", opam_text or ""):
-        out.update(rule="opam-same-version-reinstall", confidence="medium", fix_in="opam (the CI's opam version)",
+        out.update(rule="opam-same-version-reinstall", confidence="high", fix_in="opam (the CI's opam version)",
                    error=f"{fname}.{fver} is recompiled at the same version, removed, then fails to "
                          f"{'install' if info.get('action') == 'installing' else 'build'}",
-                   note=f"opam removes {fname}.{fver} before rebuilding it at the same version, and the "
-                        f"package has a `remove:` field: the rebuild then finds an empty source directory. "
-                        f"This looks like an opam 2.6 issue, not a problem of the packages or their bounds; "
-                        f"the job can be ignored. A pinned {fname} (as in its own PR) does not hit it.")
+                   note=f"opam rebuilds {fname}.{fver} at the same version and also removes it, which needs "
+                        f"its sources (it has a `remove:` field). Since opam 2.6 (ocaml/opam#6440) both steps "
+                        f"move the same source directory, so the one that runs second gets an empty directory. "
+                        f"An opam bug, not a problem of the packages or their bounds: the job can be ignored. "
+                        f"A pinned {fname} (as in its own PR) does not hit it.")
         return out
 
     # Install failures: the install command failed (its output is in the block),

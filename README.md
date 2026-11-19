@@ -81,7 +81,7 @@ recognises are grouped in one "Not recognised" entry listing their jobs.
 | Source archive that cannot be unpacked (symlinks on msys2) | replace the symlinks upstream, or exclude the platform | high |
 | A day10 failure on a platform the failing package already lists in `x-ci-accept-failures` | nothing to change: day10 does not honour it there (cygwin, freebsd) | high |
 | Lint "conf packages should always use …" on npm depexts (`npm-version`) | known false positive for Melange bindings | high |
-| A package recompiled at the same version, removed, then failing to build or install (it has a `remove:` field; seen on lower-bounds jobs with opam 2.6) | an opam problem, not a bound: the job can be ignored | medium |
+| A package recompiled at the same version, removed, then failing to build or install (it has a `remove:` field; seen on lower-bounds jobs with opam 2.6) | an opam bug (ocaml/opam#6440 moves the same source directory for both steps), not a bound: the job can be ignored | high |
 
 Failures that would happen without the PR are marked "Pre-existing" in the note:
 
