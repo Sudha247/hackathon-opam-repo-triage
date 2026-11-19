@@ -297,6 +297,9 @@ def log_text(page):
     return html.unescape(re.sub(r"<[^>]+>", "", raw))
 
 
+ERROR_LINE = re.compile(r"^# ?(Error\b|.*\b(error|Error):)")
+
+
 def excerpt(text, max_output_lines=40):
     lines = text.splitlines()
     out = {}
@@ -315,7 +318,17 @@ def excerpt(text, max_output_lines=40):
                 body = block[k + 1:]
                 header = block[:k]
                 if len(body) > max_output_lines:
-                    body = [f"# [... {len(body) - max_output_lines} lines elided ...]"] + body[-max_output_lines:]
+                    cut = len(body) - max_output_lines
+                    # Keep the first error too when it is before the tail: dune
+                    # prints errors first and pages of warnings can follow.
+                    first = next((i for i, b in enumerate(body[:cut]) if ERROR_LINE.search(b)), None)
+                    if first is None:
+                        body = [f"# [... {cut} lines elided ...]"] + body[-max_output_lines:]
+                    else:
+                        lo, hi = max(0, first - 5), min(first + 15, cut)
+                        body = (([f"# [... {lo} lines elided ...]"] if lo else []) + body[lo:hi]
+                                + ([f"# [... {cut - hi} lines elided ...]"] if cut > hi else [])
+                                + body[-max_output_lines:])
                 block = header + ["### output ###"] + body
             except ValueError:
                 block = header
@@ -1885,8 +1898,18 @@ def log_rules(src, err, fname, opam_text, info, job):
         pkg = lib.split(".", 1)[0]
         in_tests = bool(re.search(r"(^|/)tests?/", text))
         r = {"rule": "missing-library", "error": m.group(0)}
-        siblings = {split_pkg(p)[0] for p in (info.get("pr_packages") or [])}
-        if pkg in siblings and pkg != fname:
+        siblings = {split_pkg(p)[0]: split_pkg(p)[1] for p in (info.get("pr_packages") or [])}
+        installed = info["installed"].get(pkg)
+        if pkg in siblings and pkg in deps and pkg != fname and installed and installed != siblings[pkg]:
+            # e.g. a lower-bounds job installed an older release of the sibling,
+            # before the library was added (or made public) in the one of this PR.
+            old, new = constraint_edit(opam_text, pkg, ">=", siblings[pkg])
+            r.update(dep=pkg, old=old, new=new, confidence="medium",
+                     note=f"{pkg}.{installed} was installed and does not provide `{lib}`; "
+                          f"{pkg}.{siblings[pkg]} is released in this PR")
+            if siblings[pkg] == (info.get("failing") or ("", ""))[1]:
+                r["alternative"] = f'"{pkg}" {{= version}}  (released together, same version)'
+        elif pkg in siblings and pkg not in deps and pkg != fname:
             r.update(note=f"`{lib}` comes from {pkg}, another package of this PR: the tests of {fname} use a sibling "
                           f"package; restrict them (dune `(package ...)` on the test stanza, or no `@runtest` under "
                           f"`-p {fname}`) rather than adding a dependency, which would create a cycle",

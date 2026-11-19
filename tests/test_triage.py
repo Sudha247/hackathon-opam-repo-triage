@@ -79,6 +79,12 @@ CASES = {
          {"rule": "builder-specific", "note": "conf-bison declares a depext for centos"},
          {"rule": "platform-matrix", "note": "relaxed `available` of unikraft.0.20.0"},
          {"failing": "ocaml-unikraft.1.2.1", "rule": "lint", "note": "#30209"}]),
+    # The error is printed before ~850 lines of warnings (it used to be cut from the
+    # excerpt); pgn_parser < 1.0.2 does not install its library (no `(package ...)`).
+    "pgn-parser-sibling-bound": (
+        "d524ea6c8a2ed6050068c8cedb293e595330dc67", ["--max", "6", "--match", "lower-bounds"],
+        [{"failing": "chess_com_api.1.0.2", "rule": "missing-library", "new": '"pgn_parser" {>= "1.0.2"}'},
+         {"failing": "lichess_api.1.0.2", "rule": "missing-library", "new": '"pgn_parser" {>= "1.0.2"}'}]),
     "dns-certify-bound": (
         "d1951c34e014d331928d961b53113a61c93b17fe", ["--max", "6"],
         [{"failing": "dns-certify.10.2.7", "new": '"ca-certs-nss" {>= "3.113.1"}'}]),
