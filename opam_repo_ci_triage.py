@@ -291,10 +291,19 @@ def parse_commit_page(page):
 # Log excerpt extraction
 
 
+# day10 prints opam's output indented by 8 spaces, and the build output with
+# an extra "- " prefix; remove both so that day10 logs read like classic ones
+# (the "#=== ERROR while ..." block, "-> installed ...", compiler errors).
+DAY10_INDENT = re.compile(r"(?m)^ {8}(?:- (?=\S))?")
+
+
 def log_text(page):
     m = re.search(r"<pre[^>]*>(.*?)</pre>", page, re.S)
     raw = m.group(1) if m else page
-    return html.unescape(re.sub(r"<[^>]+>", "", raw))
+    text = html.unescape(re.sub(r"<[^>]+>", "", raw))
+    if "Building with day10" in text or re.search(r"(?m)^ {8}#=== ERROR while ", text):
+        text = DAY10_INDENT.sub("", text)
+    return text
 
 
 ERROR_LINE = re.compile(r"^# ?(Error\b|.*\b(error|Error):)")
@@ -1358,7 +1367,12 @@ def llm_prompt(src, r, job, text, data, pr_packages):
     installed = {d: info["installed"][d] for d in deps if d in info["installed"]}
     same = [j for j in data["jobs"] if j["target"] == job["target"] and j["revdep"] == job["revdep"]
             and j["kind"] == job["kind"] and j["category"] not in NEUTRAL]
-    matrix = "\n".join(f"- {'/'.join(j['platform'])}: {j['category']}" for j in same[:30])
+    def state(j):
+        if j["category"] == "passed":
+            return "passed"
+        why = (j["reason"] or "").strip()[:100]
+        return f"FAILED ({j['category']}{': ' + why if why else ''})"
+    matrix = "\n".join(f"- {'/'.join(j['platform'])}: {state(j)}" for j in same[:30])
     dims = job_dims(job)
     # What opam did with the failing package, in order: the plans (install,
     # recompile, downgrade...) and the actions (removed, installed...). A
@@ -1375,7 +1389,7 @@ Packages of this PR: {', '.join(pr_packages)}
 Failing package: {pkg} ({'part of this PR' if in_pr else 'not part of this PR'})
 {('Reverse dependency tested: ' + job['revdep']) if job['revdep'] else ''}
 
-Same package on other CI jobs:
+The same job ({job['kind']}{' of ' + job['revdep'] if job['revdep'] else ''}) on other platforms (passed or FAILED):
 {matrix or '(none)'}
 
 Dependency versions installed by CI:
@@ -1453,6 +1467,10 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         seen.add(sig)
         done += 1
         text = log_text(fetch(r["url"], cache_dir))
+        if not (excerpt(text, max_output_lines=80).get("error_block") or log_info(text)["error_lines"]):
+            # Without the error itself the model can only guess (it guessed
+            # "transient" for a missing library): leave it unrecognised.
+            continue
         res = llm_suggest(src, r, jobs[r["variant"]], text, data, pr_packages, cache_dir, model, dry_run)
         if "llm_prompt" in res:
             r["llm_prompt"] = res["llm_prompt"]
@@ -1674,6 +1692,8 @@ RULE_TITLES = {
     "sources": "Source archive cannot be unpacked", "accept-failures-ignored": "Accepted failure not ignored",
     "unrecognised": "Not recognised", "llm": "LLM diagnosis (unchecked)",
     "opam-same-version-reinstall": "opam reinstalls at the same version",
+    "needs-git-checkout": "Build needs a git checkout", "install-outside-prefix": "Installs outside the switch",
+    "unsupported-arch": "Architecture not supported", "platform-unsupported": "Platform not supported",
 }
 
 
@@ -2297,6 +2317,85 @@ def system_package_version(text, lib):
     return None
 
 
+def known_errors(text, full, fname, opam_text, info, dims, platform, deps):
+    """Failures with a recognisable message and a known cause."""
+    installed = info.get("installed") or {}
+    m = re.search(r"no such function: unixepoch", text)
+    if m:
+        have = system_package_version(full, "sqlite3")
+        return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
+                "error": f"sqlite3 >= 3.38 required (unixepoch); {platform} has {have or 'an older version'}",
+                "note": f"The SQL uses `unixepoch()`, added in SQLite 3.38, and the system SQLite is older on "
+                        f"{platform}. Exclude these distributions (`x-ci-accept-failures`, or `available` on "
+                        f"os-distribution and os-version), or avoid `unixepoch()` upstream."}
+    m = re.search(r"Could NOT find Python3?\b[^\n]*", text)
+    if m:
+        r = {"rule": "missing-tool", "error": m.group(0).strip()[:200], "confidence": "high"}
+        if "conf-python-3" in deps:
+            r["note"] = f"conf-python-3 is a dependency, but CMake cannot find Python on {platform}."
+        else:
+            r.update(dep="conf-python-3", old=None, new='"conf-python-3" {build}   (new line in depends)',
+                     note="The CMake build needs a Python 3 interpreter.")
+        return r
+    if (re.search(r"fatal: not a git repository", text) and re.search(r"git (describe|rev-parse|log)", text)
+            and not re.search(r"Error: (Program|Library) ", text)):     # another cause, with git noise
+        return {"rule": "needs-git-checkout", "confidence": "high",
+                "error": "the build runs git, but the release archive is not a git checkout",
+                "note": "The build calls git (`git describe` or similar) to find the version. Release archives "
+                        "have no .git directory, so this fails everywhere. Fix upstream: take the version from "
+                        "the opam file (`%{version}%`) or from dune's `%%VERSION%%` substitution."}
+    m = re.search(r"cannot create (?:regular file|directory) '?(/usr/[^':\s]*)'?: Read-only file system", text)
+    if m:
+        return {"rule": "install-outside-prefix", "confidence": "high",
+                "error": f"the install step writes to {m.group(1)}, outside the opam switch",
+                "note": "The install command ignores the switch's prefix. Pass the switch's directories to it "
+                        "in the opam file, for example `PREFIX=%{prefix}%`, `BINDIR=%{bin}%` or "
+                        "`LIBDIR=%{lib}%`, whichever variables the Makefile uses."}
+    if re.search(r"No known cycle-counting instruction", text):
+        arch = dims["arch"]
+        fname = ".".join(info.get("failing") or (fname,))
+        return {"rule": "unsupported-arch", "confidence": "high",
+                "error": f"{fname} has no cycle counter for {arch}",
+                "new": f'available: arch != "{arch}"   (in {fname}, combined with its existing `available`)',
+                "old": None, "note": f"This version of {fname} does not support {arch}; newer versions do."}
+    if re.search(r"Core_kernel shadows Unix|Core_kernel\.Unix", text) and re.search(r"Unbound (constructor|value)", text):
+        return {"rule": "library-api", "confidence": "medium", "keep": True,
+                "error": "Core_kernel shadows the Unix module: Unix constructors and values are not found",
+                "note": f"{fname} opens Core_kernel, whose Unix module hides the standard one, then uses "
+                        f"Unix. Fix upstream (use `Caml_unix` or `Stdlib.Unix`); if only an optional part "
+                        f"(a depopt such as lwt) is affected, a `conflicts` entry for it avoids the build."}
+    m = re.search(r"Unbound value Conv\.(\w+)", text)
+    if m and "cmdliner" in installed and opam_vcmp(installed["cmdliner"], "2.0.0") >= 0:
+        old, new = constraint_edit(opam_text, "cmdliner", "<", "2.0.0")
+        return {"rule": "library-api", "dep": "cmdliner", "old": old, "new": new, "confidence": "high",
+                "error": m.group(0),
+                "note": f"`Arg.Conv.{m.group(1)}` does not exist in cmdliner {installed['cmdliner']}: the "
+                        f"conversion API changed in cmdliner 2.0."}
+    if re.search(r"checking for ar\.\.\. no", text) and dims["os"] == "win32":
+        return {"rule": "platform-unsupported", "confidence": "medium",
+                "error": f"the configure script of {fname} finds no `ar` on {platform}",
+                "new": 'available: os != "win32"   (combined with any existing `available`)', "old": None,
+                "note": f"{fname}'s configure script is not ported to Windows."}
+    m = re.search(r"'NotForRedeclaration' is not a member of 'clang::Sema'|has no member named 'getOriginalNamespace'",
+                  text)
+    if m:
+        clang = (re.search(r"libclang-(\d+)-dev", full) or [None, None])[1]
+        return {"rule": "system-library-version", "keep": True, "confidence": "high", "_plat": platform,
+                "error": m.group(0) + (f" (Clang {clang} installed)" if clang else ""),
+                "note": f"{fname} uses Clang APIs that Clang 19 removed. A bound on conf-libclang does not "
+                        f"choose the installed Clang (conf-libclang.N accepts any Clang up to N): it needs a "
+                        f"conf-libclang version whose depexts install Clang 18 or older on {platform}, or an "
+                        f"update to the newer Clang API."}
+    if re.search(r"the expected type is\s+(?:# )?string option \* Parsetree\.(expression|pattern|core_type)", text):
+        old, new = constraint_edit(opam_text, "ocaml", "<", "5.4")
+        return {"rule": "stdlib", "dep": "ocaml", "old": old, "new": new, "confidence": "high",
+                "error": "pattern on Parsetree tuples: OCaml 5.4's labelled tuples changed their type",
+                "note": "OCaml 5.4 added labelled tuples: the Parsetree's tuple nodes now hold "
+                        "(label option * node) pairs. Code matching them directly needs OCaml < 5.4, or an "
+                        "update (ppxlib's Ast versions abstract this)."}
+    return None
+
+
 def c_compiler_rule(text, platform):
     for rx, cause, fix in NEWER_CC:
         m = rx.search(text)
@@ -2317,6 +2416,9 @@ def log_rules(src, err, fname, opam_text, info, job):
     cc = c_compiler_rule(text, platform)
     if cc:
         return cc
+    known = known_errors(text, info.get("_text") or text, fname, opam_text, info, dims, platform, deps)
+    if known:
+        return known
     m = re.search(r"maximum_version=(\d+)[\s\S]*?llvm_version=(\d[\w.]*)", text)
     if m and int(m.group(2).split(".")[0]) > int(m.group(1)):
         want, have = m.group(1), m.group(2)
@@ -2356,7 +2458,8 @@ def log_rules(src, err, fname, opam_text, info, job):
          or re.search(r"([\w.+-]+): command not found", text)
          or re.search(r"Command not found: ([\w.+-]+)", text)
          or re.search(r"(?m)^\S*?([\w.+-]+): (?:command )?not found$", text))
-    if m and (m.group(1).startswith("-") or (m.group(1) == "brew" and dims["os"] != "macos")):
+    if m and (m.group(1).startswith("-") or (m.group(1) == "brew" and dims["os"] != "macos")
+              or m.group(1).startswith("llvm-config")):     # configure scripts probing for llvm-config-N
         m = None   # an empty variable expanded as a command, or a probe for another platform's tool
     if m:
         tool = m.group(1)
@@ -2393,7 +2496,8 @@ def log_rules(src, err, fname, opam_text, info, job):
         else:
             r.update(note=f"There is no {conf} package: add a depext providing `{tool}` on {platform}.", confidence="low")
         return r
-    m = re.search(r"Package (\S+) was not found in the pkg-config search path", text)
+    m = (re.search(r"Package (\S+) was not found in the pkg-config search path", text)
+         or re.search(r"configure: error: ([\w.+-]+)\.pc not found", text))
     if m:
         conf = f"conf-{m.group(1)}"
         r = {"rule": "missing-pkg-config", "error": m.group(0)}

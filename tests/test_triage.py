@@ -128,6 +128,42 @@ CASES = {
     "bun-afl-implicit-int": (
         "eb1089be5f315d8d5f5d749ad06f42bd92ae5b4b", ["--max", "2", "--match", "revdeps,bun"],
         [{"failing": "afl.2.52b", "rule": "newer-c-compiler", "note": "-Wimplicit-int"}]),
+    # Rules for causes found by grading the LLM fallback's answers.
+    "ordma-git-describe": (
+        "3670238c506b9ba55e76e0956102b5a5eca57118", ["--max", "1", "--match", "^compilers,4.11"],
+        [{"failing": "ordma.0.0.6", "rule": "needs-git-checkout"}]),
+    "llvm-python3": (
+        "e3b282a9c0eb1ef824245e3ffb935dc8fcc9b1ea", ["--max", "2", "--match", "llvm.20-shared"],
+        [{"rule": "missing-tool", "new": '"conf-python-3" {build}'},
+         {"not": {"error": "llvm-config-"}}]),
+    "slipshow-cmdliner2": (
+        "5697d67430433b6e7f81fe26a2cc05f4a4f816b6", ["--max", "2", "--match", "slipshow.0.2.0"],
+        [{"failing": "slipshow.0.2.0", "new": '< "2.0.0"'}]),
+    "mirage-crypto-riscv64": (
+        "79e6e2140ee3e82c58d607f1e294e74b3123089a", ["--max", "1", "--match", "riscv64.*current_git.0.6.2"],
+        [{"rule": "unsupported-arch", "new": 'arch != "riscv64"', "fix_in": "mirage-crypto.0.8.0"}]),
+    "biocaml-core-kernel-unix": (
+        "eb1089be5f315d8d5f5d749ad06f42bd92ae5b4b", ["--max", "1", "--match", "revdeps,biocaml"],
+        [{"failing": "biocaml.0.11.0", "rule": "library-api", "note": "Core_kernel"}]),
+    "mlcuddidl-win32": (
+        "e162f8cea2ee791d6b3c418bb56611b92a93e286", ["--max", "1", "--match", "cygwin"],
+        [{"rule": "platform-unsupported", "error": "mlcuddidl"}]),
+    "alt-ergo-prefix": (
+        "6818539645347aa49316df894e8160a9db5a7789", ["--max", "1", "--match", "frama_c_codex"],
+        [{"rule": "install-outside-prefix", "error": "/usr/local/bin"}]),
+    "frama-clang-clang19": (
+        "5f64e545c42823195503816088208e2d89a257c4", ["--max", "1", "--match", "revdeps,frama-clang.0.0.16"],
+        [{"rule": "system-library-version", "note": "Clang 19 removed"},
+         {"not": {"new": "conf-libclang"}}]),
+    "mlfront-labelled-tuples": (
+        "fa5fb3a6a806e832e4c7791145889a6bbe8b64ef", ["--max", "1", "--match", "revdeps,MlFront_Config.2.3.1"],
+        [{"failing": "MlFront_Config.2.3.1", "new": '< "5.4"'}]),
+    "pds-sqlite-unixepoch": (
+        "95c70e7638f27c185540b2efc1bb6fe8f64dcdfa", ["--max", "1", "--match", "centos-9.*tests"],
+        [{"rule": "system-library-version", "error": "3.34.1"}]),
+    "dspml-day10-excerpt": (
+        "d721bc4476e2693a8ae955aa0c8e8647d207ca16", ["--max", "1", "--match", "^day10"],
+        [{"failing": "dspml.1.0.2", "rule": "missing-library", "new": '"gnuplot"'}]),
 }
 
 
