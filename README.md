@@ -58,6 +58,9 @@ Common options:
 | Job matrix: fails only on Windows / one arch / some distributions | `"@runtest" {with-test & os != "win32"}`, `available: arch != "s390x"`, `x-ci-accept-failures: [...]`; aimed at the failing dependency when it is the one failing | medium |
 | A PR package installs on no platform | the constraint every solver conflict goes through (e.g. `js_of_ocaml-compiler < 5.0.0`) | high |
 | Lint warning 62 / 41, known false positives | SPDX id detected from the LICENSE text, `%{_:VAR}%`, or "known waiver" | high |
+| Lint warning 47 / 59, weak checksums, `extra-files`, error 46 / 60 | fixed synopsis line, `checksum: ["sha256=…"]` with the command to compute it, `extra-source` template, `conf` flag advice, archive changed upstream | high |
+| Install failure: files not built | the earlier build error that did not stop the build, then the usual rules on it | low–high |
+| `These packages are still missing: …` (system packages) | the distribution lacking them; correct the depext or `x-ci-accept-failures` | medium |
 
 The matrix rules use only the job list (no fetch); the others reuse the log
 already downloaded, plus at most one small lookup.

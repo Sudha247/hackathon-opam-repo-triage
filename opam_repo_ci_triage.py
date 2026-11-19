@@ -947,9 +947,10 @@ def log_info(text):
             info["installed"][m.group(1)] = m.group(2)
     for m in re.finditer(r'"([\w+-]+)\.([^"\s]+)"', "\n".join(l for l in text.splitlines() if "->" in l and '"' in l)):
         info["installed"].setdefault(m.group(1), m.group(2))   # day10 dependency graph
-    m = re.search(r"#=== ERROR while compiling ([\w+-]+)\.(\S+?) =", text)
+    m = re.search(r"#=== ERROR while (compiling|installing|removing) ([\w+-]+)\.(\S+?) =", text)
     if m:
-        info["failing"] = (m.group(1), m.group(2))
+        info["action"] = m.group(1)
+        info["failing"] = (m.group(2), m.group(3))
     m = re.search(r"ocaml(?:-base)?-compiler\.(\d+\.\d+\.\d+)", text)
     if m:
         info["ocaml"] = m.group(1)
@@ -1010,8 +1011,24 @@ def constraint_edit(opam_text, dep, op, version):
 def suggest_for_job(src, job, text, pr_packages, pr_sha):
     info = log_info(text)
     out = {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"]}
+    m = re.search(r"These packages are still missing: (.+)", text)
+    if "failing" not in info and m:
+        names = m.group(1).split()
+        dims = job_dims(job)
+        plat = dims["distro"] or ("debian-13" if dims["os"] == "linux" else dims["os"])
+        owner = job["revdep"] or job["target"]
+        is_conf = split_pkg(owner)[0].startswith("conf-")
+        out.update(rule="missing-system-package", failing=owner,
+                   fix_in=("this PR" if owner in pr_packages else f"{owner} (other package)") if is_conf
+                          else "the dependency declaring these depexts",
+                   error=f"system packages not available on {plat}: {', '.join(names)}",
+                   new=f'x-ci-accept-failures: ["{plat}"]   (or correct the depext names for {plat})',
+                   confidence="medium",
+                   note="wrong package name for this distribution, a package needing an extra repository "
+                        "(EPEL, CRB, ports), or one that does not exist there")
+        return out
     if "failing" not in info:
-        out["note"] = "no compile error block (dependency, network or install failure)"
+        out["note"] = "no ERROR block in the log (dependency, network or solver failure)"
         return out
     fname, fver = info["failing"]
     out["failing"] = f"{fname}.{fver}"
@@ -1020,6 +1037,26 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
     ref = pr_sha if in_pr else (info.get("base") or "master")
     opam_text = src.opam_file(fname, fver, ref) or src.opam_file(fname, fver)
     err = info["error_lines"]
+
+    # Install failures: the install command failed (its output is in the block),
+    # or files listed for installation were never built because an earlier
+    # build command failed without stopping the build.
+    if info.get("action") == "installing" and any("couldn't be installed" in l for l in err):
+        missing = [f for l in err for f in re.findall(r"/([^/\s]+) to /", l)]
+        exts = collections.Counter(os.path.splitext(f)[1] or f for f in missing)
+        cut = text.find("#=== ERROR while installing")
+        earlier = [re.sub(r"^[-#] ?", "", l).strip() for l in text[:cut].splitlines()
+                   if re.search(r"\bError\b|error:|Parse error|fatal error", l)
+                   and not re.search(r"Error report|\[ERROR\] The (compilation|installation)", l)]
+        out["install"] = f"files listed for installation were not built: {dict(exts)}"
+        if earlier:
+            err = earlier[-15:]
+            out["install"] += f"; earlier build error: {err[-1][:150]}"
+        else:
+            out.update(rule="install-missing-files", error=out.pop("install"), confidence="low",
+                       note="the build does not produce these files on this platform (e.g. .cmxs needs native "
+                            "dynlink): make them optional in the .install / build, or restrict `available`")
+            return out
 
     # Rule: safe-string
     if re.search(r"has type\s+string\s+but an expression was expected of type\s*$", "\n".join(err), re.M) and \
@@ -1145,6 +1182,9 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         out["rule"] = "test-output"
         out["error"] = "test output differs (cram/mdx)"
         return out   # completed by the caller with a passing job's versions
+    if out.get("install"):
+        out.update(error=out.pop("install"), note="no rule matched the earlier build error")
+        return out
     out["note"] = "no rule matched"
     return out
 
@@ -1190,7 +1230,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match):
     for r in results:
         r.pop("_key", None)
     if not match or re.search(match, "(lint)"):
-        results += lint_rules(data, src)
+        results += lint_rules(data, src, sha)
     results += skipped_rules(data, src, cache_dir, pr_packages)
     return results
 
@@ -1536,7 +1576,17 @@ def license_id(text):
     return None
 
 
-def lint_rules(data, src):
+def opam_field(text, field):
+    m = re.search(r'^' + re.escape(field) + r':\s*"([^"]*)"', text or "", re.M)
+    return m.group(1) if m else None
+
+
+def url_src(text):
+    m = re.search(r'^url\s*\{.*?\bsrc:\s*"([^"]+)"', text or "", re.M | re.S)
+    return m.group(1) if m else None
+
+
+def lint_rules(data, src, sha=None):
     out = []
     for j in data["jobs"]:
         if j["kind"] != "lint" or j["status"] != "failed":
@@ -1560,6 +1610,46 @@ def lint_rules(data, src):
                              note=f"detected from the license text: {lid}")
                 else:
                     r.update(note="use an SPDX identifier (https://spdx.org/licenses/)", confidence="medium")
+            elif "warning 47" in text:
+                opam = src.opam_file(name, ver, sha) if sha else None
+                syn = opam_field(opam, "synopsis")
+                if syn:
+                    fixed = syn.strip().rstrip(".")
+                    fixed = fixed[:1].upper() + fixed[1:]
+                    r.update(old=f'synopsis: "{syn}"', new=f'synopsis: "{fixed}"', confidence="high")
+                else:
+                    r.update(note="start the synopsis with a capital letter, no final dot", confidence="high")
+            elif "warning 59" in text or ("Weak checksum" in text and "field url" in text):
+                opam = src.opam_file(name, ver, sha) if sha else None
+                u = url_src(opam) or "<archive URL>"
+                r.update(new='checksum: ["sha256=<hash>" "sha512=<hash>"]   (in the url section)',
+                         note=f"compute with: curl -sL {u} | sha256sum   (and sha512sum)", confidence="high")
+            elif "extra-files" in text or "Unexpected file in packages/" in text:
+                opam = src.opam_file(name, ver, sha) if sha else None
+                section = (opam or "").split("extra-files:", 1)[1] if "extra-files:" in (opam or "") else ""
+                section = re.split(r"(?m)^[a-z][\w-]*:", section, 1)[0]      # up to the next field
+                files = re.findall(r'\[\s*"([^"]+)"\s+"(?:md5|sha\d+)=', section)
+                f0 = files[0] if files else "<file>"
+                r.update(new=f'extra-source "{f0}" {{ src: "<URL where {f0} is published>" '
+                             f'checksum: ["sha256=<hash>"] }}',
+                         note="opam-repository does not accept files/ any more: publish the file (upstream "
+                              "repository, release asset), refer to it with extra-source, and delete "
+                              f"extra-files and packages/{name}/{name}.{ver}/files/"
+                              + (f"; files: {', '.join(files)}" if files else ""), confidence="high")
+            elif "Weak checksum" in text:
+                r.update(note="use SHA-256 or SHA-512 checksums (compute with sha256sum / sha512sum)",
+                         confidence="high")
+            elif "error 60" in text:
+                opam = src.opam_file(name, ver, sha) if sha else None
+                u = url_src(opam) or "<archive URL>"
+                r.update(note="the upstream archive no longer matches the checksum (tag moved or archive "
+                              f"regenerated): recompute with curl -sL {u} | sha256sum, and check with upstream "
+                              "that the release did not change", confidence="high")
+            elif "error 46" in text:
+                r.update(note='flagged "conf" but has url/build/install: conf packages only check for system '
+                              'packages. Either remove the `conf` flag (and `conf-` prefix) if it really builds '
+                              'something, or drop url/build/install. A conf package that must build needs the '
+                              'maintainers\' agreement', confidence="medium")
             elif "warning 41" in text:
                 named = re.findall(r'"([\w+-]+)"', text)
                 if name in named:
@@ -1568,13 +1658,23 @@ def lint_rules(data, src):
                 else:
                     r.update(note=f"add {', '.join(named)} to depends or depopts", confidence="high")
             elif "No package source directory" in text:
-                r.update(note="known opam-ci-check false positive for packages without `url` (virtual "
-                              "packages); maintainers waive it", confidence="high")
+                opam = src.opam_file(name, ver, sha) if sha else None
+                if url_src(opam):
+                    r.update(note="the package has a url but its source could not be fetched or verified "
+                                  "(see the other lint errors, e.g. a checksum mismatch)", confidence="medium")
+                else:
+                    r.update(note="known opam-ci-check false positive for packages without `url` (virtual "
+                                  "packages); maintainers waive it", confidence="high")
             elif "conf packages should always use" in text:
                 r.update(note="non-conf package with `depexts`: move them into a conf-* package, or ask the "
                               "maintainers to waive it (often accepted)", confidence="medium")
             else:
                 r["note"] = "no rule for this lint message"
+            # one entry per (package, fix): several lint messages often share a fix
+            if r.get("new") and any(o["failing"] == r["failing"] and o.get("new") == r["new"] for o in out):
+                prev = next(o for o in out if o["failing"] == r["failing"] and o.get("new") == r["new"])
+                prev["error"] += " | " + r["error"][:120]
+                continue
             out.append(r)
     return out
 
