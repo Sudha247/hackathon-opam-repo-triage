@@ -1,0 +1,83 @@
+# Hourly: run opam_repo_ci_triage.py `suggest` on the open ocaml/opam-repository
+# PRs whose opam-ci status is `failure`, and publish the results on GitHub Pages.
+# Enable: Settings -> Pages -> Source: GitHub Actions, then run it once by hand.
+name: Triage page
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: triage-page
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # .opam-ci-cache/: pages, logs and lookups of the tool (finished CI results
+      # do not change); state/: per-PR head sha and last result, so unchanged PRs
+      # are not analysed again. One cache entry per run, restored from the latest.
+      - name: Restore cache and state
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            .opam-ci-cache
+            state
+          key: triage-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: triage-
+
+      - name: Prune cache entries older than 30 days
+        run: |
+          if [ -d .opam-ci-cache ]; then
+            find .opam-ci-cache -type f -mtime +30 -delete
+            du -sh .opam-ci-cache
+          fi
+
+      - name: Analyse failing PRs
+        id: triage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional LLM fallback for failures no rule explains: it needs an
+          # ANTHROPIC_API_KEY secret, `pip install anthropic`, and passing --llm
+          # to `suggest` in scripts/triage_open_prs.py (costs API tokens).
+          # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 scripts/triage_open_prs.py --time-budget 2100
+
+      - name: Save cache and state
+        if: always() && steps.triage.outputs.changed != 'false'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            .opam-ci-cache
+            state
+          key: triage-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Render the page
+        run: python3 scripts/render_page.py
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5

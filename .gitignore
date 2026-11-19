@@ -1,3 +1,5 @@
 ci-logs/
 .opam-ci-cache/
 __pycache__/
+site/
+state/

@@ -100,6 +100,41 @@ Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
 fallbacks enabled. Responses are cached in `.opam-ci-cache/`, so re-runs cost
 nothing. The log and opam file are passed as untrusted data.
 
+## Scheduled page
+
+`.github/workflows/triage-page.yml` runs every hour (and on demand) and
+publishes the results on the repository's GitHub Pages site:
+
+1. `scripts/triage_open_prs.py` lists the open ocaml/opam-repository PRs with
+   one GraphQL query (needs a token; the workflow's `GITHUB_TOKEN` is enough),
+   keeps those whose `opam-ci` status is `failure`, and runs `suggest <sha>
+   --json --max 6` (and `summary`, from the cached page) on each new or updated
+   one, sequentially. PRs whose head sha is unchanged reuse their result from
+   `state/prs.json`; closed PRs, and PRs no longer failing, are dropped. It
+   writes `site/data.json`. `--time-budget` stops starting new PRs; the next
+   run continues.
+2. `scripts/render_page.py` turns it into `site/index.html`: one static page,
+   no external resources, with filters (fix for the PR, blocked by other
+   packages, CI only), the suggestions of each PR by class, the `review`
+   command to run by hand, and the reverse dependencies that fail on several
+   PRs. PR titles, logs and suggestions are HTML-escaped.
+
+`.opam-ci-cache/` and `state/` are kept between runs with `actions/cache`
+(files older than 30 days are pruned). Rules only: the LLM fallback is not
+enabled (see the comment in the workflow).
+
+```sh
+python3 scripts/triage_open_prs.py --limit 4   # locally: needs GITHUB_TOKEN, GH_TOKEN or gh
+python3 scripts/render_page.py                 # site/index.html
+```
+
+To enable it:
+
+1. Push the workflow to the default branch (scheduled workflows run only from there).
+2. Settings → Pages → Build and deployment → Source: **GitHub Actions**.
+3. Actions → "Triage page" → Run workflow, once. The page is then at
+   `https://<owner>.github.io/<repository>/`, refreshed every hour.
+
 ## Tests
 
 `tests/test_triage.py` runs `suggest` on 14 recorded CI runs (ortools,
