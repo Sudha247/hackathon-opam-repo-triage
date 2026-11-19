@@ -1,0 +1,647 @@
+{
+ "totals": {
+  "scored": 15,
+  "hit": 12,
+  "fix_tokens": 31,
+  "fix_covered": 12
+ },
+ "prs": [
+  {
+   "pr": 31274,
+   "title": "[new release] owl (3 packages) (1.3)",
+   "initial": "93c17c685c7b9e1380e85713c42b016410056195",
+   "final": "5de04405366eece0c9f4031a5e06896ce82522b9",
+   "actual_fix": {
+    "owl-base.1.3": [
+     "field:x-maintenance-intent"
+    ],
+    "owl-top.1.3": [
+     "field:available",
+     "field:x-maintenance-intent"
+    ],
+    "owl.1.3": [
+     "field:available",
+     "field:conflicts",
+     "field:x-maintenance-intent"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "owl-top.1.3": [
+     "field:available",
+     "field:x-maintenance-intent"
+    ],
+    "owl.1.3": [
+     "field:available",
+     "field:conflicts",
+     "field:x-maintenance-intent"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "owl.1.3",
+     "rule": "platform-matrix",
+     "new": "in owl.1.3: a depext for cygwin, msys2, or x-ci-accept-failures / available",
+     "hit": false,
+     "tokens": []
+    },
+    {
+     "package": "owl.1.3",
+     "rule": "platform-matrix",
+     "new": "available: os != \"win32\"   (combined with any existing `available`)",
+     "hit": true,
+     "tokens": [
+      "field:available"
+     ]
+    }
+   ],
+   "explanations": 1
+  },
+  {
+   "pr": 31273,
+   "title": "[new release] elpi, ppx_elpi and elpi-lsp (4.1.1)",
+   "initial": "4d8739382c8b10dc9bb75cd16cc7e0e763634ad4",
+   "final": "60f0a7a4bee1114d4d9843a9de299a28b51ba942",
+   "actual_fix": {
+    "elpi.4.1.1": [
+     "field:runtest"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "elpi.4.1.1": [
+     "field:runtest"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "elpi.4.1.1",
+     "rule": "platform-matrix",
+     "new": "\"@runtest\" {with-test & os != \"win32\"}   (or the equivalent filter on the test command)",
+     "hit": true,
+     "tokens": [
+      "field:runtest"
+     ]
+    }
+   ],
+   "explanations": 0
+  },
+  {
+   "pr": 31250,
+   "title": "[new version] ocaml-emcc (1.0.3)",
+   "initial": "bd89efbd861a1d10b1a9bd2138845e744863e327",
+   "final": "319f837d99492237ecbff4d01f65101ebd940ace",
+   "actual_fix": {
+    "ppx_string_interpolation.1.0.0": [
+     "field:flags"
+    ],
+    "ppx_string_interpolation.1.0.1": [
+     "field:flags"
+    ],
+    "ppx_string_interpolation.1.1.0": [
+     "field:flags"
+    ],
+    "raylib.2.4.0": [
+     "dep:dune"
+    ]
+   },
+   "fix_in_failing_packages": {},
+   "suggestions": [
+    {
+     "package": "ocaml-emcc.1.0.0",
+     "rule": "platform-matrix",
+     "new": "\"@runtest\" {with-test & os != \"win32\"}   (or the equivalent filter on the test command)",
+     "hit": false,
+     "tokens": [
+      "field:runtest"
+     ]
+    }
+   ],
+   "explanations": 0
+  },
+  {
+   "pr": 31224,
+   "title": "[new release] quickjs (0.6.1)",
+   "initial": "c4ea69ee77ff61eb1d11b39a0e98d3f733fec2fc",
+   "final": "bd98da63f21857e51278ab42a52b3f459dded6c4",
+   "actual_fix": {
+    "quickjs.0.6.1": [
+     "field:runtest"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "quickjs.0.6.1": [
+     "field:runtest"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "quickjs.0.6.1",
+     "rule": "platform-matrix",
+     "new": "\"@runtest\" {with-test & os != \"win32\"}   (or the equivalent filter on the test command)",
+     "hit": true,
+     "tokens": [
+      "field:runtest",
+      "field:x-maintained"
+     ]
+    }
+   ],
+   "explanations": 0
+  },
+  {
+   "pr": 31206,
+   "title": "Package eventually.0.2.0",
+   "initial": "9738cca01c16ebc799600fecc413c75bc55690ab",
+   "final": "85131769b51c80aa868bb4ce0b1e36272668856e",
+   "actual_fix": {
+    "base_bigstring.v0.14.0": [
+     "field:available"
+    ],
+    "base_bigstring.v0.15.0": [
+     "field:available"
+    ],
+    "base_bigstring.v0.16.0": [
+     "field:available"
+    ],
+    "caqti-async.1.7.0": [
+     "field:runtest"
+    ],
+    "cohttp-curl-async.6.0.0~alpha1": [
+     "field:runtest"
+    ],
+    "eigen.0.0.6": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.1.0": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.1.1": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.1.2": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.1.3": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.1.4": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.1.5": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.1.6": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.2.0": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.2.1": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.3.0": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.3.1": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.3.2": [
+     "dep:conf-c++"
+    ],
+    "eigen.0.3.3": [
+     "dep:conf-c++",
+     "field:x-maintenance-intent"
+    ],
+    "eio.0.9": [
+     "field:available"
+    ],
+    "lambda_streams_async.0.1.2": [
+     "field:runtest"
+    ],
+    "mssql.2.0.3": [
+     "field:runtest"
+    ],
+    "mssql.2.1.0": [
+     "field:runtest"
+    ],
+    "mssql.2.2.0": [
+     "field:runtest"
+    ],
+    "public-suffix.0.0.1": [
+     "dep:alcotest",
+     "dep:dmarc",
+     "field:runtest"
+    ],
+    "public-suffix.0.0.2": [
+     "dep:alcotest",
+     "dep:dmarc",
+     "field:runtest"
+    ],
+    "routes.0.7.0": [
+     "dep:alcotest",
+     "dep:mdx",
+     "field:runtest"
+    ],
+    "sihl-type.0.2.0": [
+     "dep:alcotest"
+    ],
+    "sihl-type.0.2.1": [
+     "dep:alcotest"
+    ],
+    "sihl-type.0.2.2": [
+     "dep:alcotest"
+    ],
+    "sihl.0.0.56": [
+     "dep:alcotest"
+    ],
+    "sihl.0.1.0": [
+     "dep:alcotest"
+    ],
+    "sihl.0.1.1": [
+     "dep:alcotest"
+    ],
+    "sihl.0.1.10": [
+     "dep:alcotest"
+    ],
+    "sihl.0.1.2": [
+     "dep:alcotest"
+    ],
+    "sihl.0.1.3": [
+     "dep:alcotest"
+    ],
+    "sihl.0.1.8": [
+     "dep:alcotest"
+    ],
+    "sihl.0.1.9": [
+     "dep:alcotest"
+    ],
+    "sihl.0.3.0~rc2": [
+     "dep:sihl-token",
+     "dep:sihl-user"
+    ],
+    "smtml.0.25.0": [
+     "dep:dolmen",
+     "dep:dolmen_model",
+     "dep:dolmen_type"
+    ],
+    "smtml.0.26.0": [
+     "dep:dolmen",
+     "dep:dolmen_model",
+     "dep:dolmen_type"
+    ],
+    "smtml.0.27.0": [
+     "dep:dolmen",
+     "dep:dolmen_model",
+     "dep:dolmen_type"
+    ],
+    "smtml.0.28.0": [
+     "dep:dolmen",
+     "dep:dolmen_model",
+     "dep:dolmen_type"
+    ],
+    "smtml.0.29.0": [
+     "dep:dolmen",
+     "dep:dolmen_model",
+     "dep:dolmen_type"
+    ],
+    "smtml.0.30.0": [
+     "dep:dolmen",
+     "dep:dolmen_model",
+     "dep:dolmen_type"
+    ],
+    "smtml.0.31.0": [
+     "dep:dolmen",
+     "dep:dolmen_model",
+     "dep:dolmen_type"
+    ],
+    "topojsone.0.1.0": [
+     "dep:ocaml"
+    ],
+    "uunf.18.0.0": [
+     "dep:debian-13",
+     "field:x-ci-accept-failures",
+     "field:x-maintenance-intent"
+    ]
+   },
+   "fix_in_failing_packages": {},
+   "suggestions": [
+    {
+     "package": "eventually.0.2.0",
+     "rule": "platform-matrix",
+     "new": "\"@runtest\" {with-test & os != \"win32\"}   (or the equivalent filter on the test command)",
+     "hit": false,
+     "tokens": [
+      "field:runtest"
+     ]
+    }
+   ],
+   "explanations": 1
+  },
+  {
+   "pr": 31205,
+   "title": "graphql-async: disable tests",
+   "initial": "765646df4b8a6b4fcf3b68949aa3a82236d89e0d",
+   "final": "6a999a91866929578ed0c6deaf3e4601659ce3bd",
+   "actual_fix": {
+    "graphql-async.0.13.0": [
+     "field:license"
+    ],
+    "graphql-async.0.9.0": [
+     "field:license"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "graphql-async.0.13.0": [
+     "field:license"
+    ],
+    "graphql-async.0.9.0": [
+     "field:license"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "graphql-async.0.13.0",
+     "rule": "lint",
+     "new": "license: \"MIT\"",
+     "hit": true,
+     "tokens": [
+      "field:license"
+     ]
+    },
+    {
+     "package": "graphql-async.0.9.0",
+     "rule": "lint",
+     "new": "license: \"MIT\"",
+     "hit": true,
+     "tokens": [
+      "field:license"
+     ]
+    }
+   ],
+   "explanations": 3
+  },
+  {
+   "pr": 31202,
+   "title": "routes.0.7.0: disable tests",
+   "initial": "baeaf2b66f72dbbf9c95df0968f3b916a5fb7c3d",
+   "final": "85bf56b9517e849d6b5a08086830be923c728306",
+   "actual_fix": {
+    "routes.0.7.0": [
+     "dep:alcotest",
+     "dep:mdx",
+     "field:runtest"
+    ]
+   },
+   "fix_in_failing_packages": {},
+   "suggestions": [],
+   "explanations": 1
+  },
+  {
+   "pr": 31184,
+   "title": "[new release] camlid (0.3)",
+   "initial": "d846d296c5bb830720281a5a56f0b673a2ff8a84",
+   "final": "84c97f5aae5e35ddc871429cfd592f2b53276b4e",
+   "actual_fix": {
+    "camlid.0.3": [
+     "field:runtest"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "camlid.0.3": [
+     "field:runtest"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "camlid.0.3",
+     "rule": "platform-matrix",
+     "new": "\"@runtest\" {with-test & os != \"win32\"}   (or the equivalent filter on the test command)",
+     "hit": true,
+     "tokens": [
+      "field:runtest"
+     ]
+    }
+   ],
+   "explanations": 0
+  },
+  {
+   "pr": 31181,
+   "title": "pg_query, ocaml-r, ahrocksdb: accept CI failures with newer system libraries",
+   "initial": "ab3adebc3709da97cafdc3546a50c8158b229dcd",
+   "final": "ad3dcf3f6b356fd3a926811f15408c9f1dd36e07",
+   "actual_fix": {
+    "ahrocksdb.0.2.0": [
+     "field:x-maintained"
+    ],
+    "ahrocksdb.0.2.1": [
+     "field:x-maintained"
+    ],
+    "ahrocksdb.0.2.2": [
+     "field:x-maintained"
+    ],
+    "ocaml-r.0.4.0": [
+     "field:x-maintained"
+    ],
+    "ocaml-r.0.5.0": [
+     "field:x-maintained"
+    ],
+    "pg_query.0.9.7": [
+     "field:x-maintained"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "ahrocksdb.0.2.0": [
+     "field:x-maintained"
+    ],
+    "ahrocksdb.0.2.1": [
+     "field:x-maintained"
+    ],
+    "ahrocksdb.0.2.2": [
+     "field:x-maintained"
+    ],
+    "ocaml-r.0.4.0": [
+     "field:x-maintained"
+    ],
+    "ocaml-r.0.5.0": [
+     "field:x-maintained"
+    ],
+    "pg_query.0.9.7": [
+     "field:x-maintained"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "ocaml-r.0.4.0",
+     "rule": "platform-matrix",
+     "new": "x-ci-accept-failures: [\"alpine-3.24\" \"archlinux\" \"centos-10\" \"centos-9\" \"cygwin\" \"fedora-4",
+     "hit": true,
+     "tokens": [
+      "field:x-ci-accept-failures",
+      "field:x-maintained"
+     ]
+    },
+    {
+     "package": "ocaml-r.0.5.0",
+     "rule": "platform-matrix",
+     "new": "x-ci-accept-failures: [\"alpine-3.24\" \"archlinux\" \"centos-10\" \"centos-9\" \"cygwin\" \"fedora-4",
+     "hit": true,
+     "tokens": [
+      "field:x-ci-accept-failures",
+      "field:x-maintained"
+     ]
+    },
+    {
+     "package": "pg_query.0.9.7",
+     "rule": "platform-matrix",
+     "new": "x-ci-accept-failures: [\"alpine-3.24\" \"archlinux\" \"centos-10\" \"cygwin\" \"fedora-43\" \"fedora-",
+     "hit": true,
+     "tokens": [
+      "field:x-ci-accept-failures",
+      "field:x-maintained"
+     ]
+    }
+   ],
+   "explanations": 4
+  },
+  {
+   "pr": 31170,
+   "title": "[new release] k7 (0.10.0)",
+   "initial": "9f22cb71bd72b1f99ca10fd7a8f1712d0b0f5ce1",
+   "final": "9521380eabee90f254e0488ee2e824557ffb5c1c",
+   "actual_fix": {
+    "console-eio.0.9.0": [
+     "dep:matrix"
+    ]
+   },
+   "fix_in_failing_packages": {},
+   "suggestions": [],
+   "explanations": 2
+  },
+  {
+   "pr": 31155,
+   "title": "[new release] git (4 packages) (3.19.0)",
+   "initial": "1b03be6378915db91ffe28eaa264a242da693e1c",
+   "final": "3bbb519e11f625cf14f3fef2bdf68e3f4c915ef6",
+   "actual_fix": {
+    "git-paf.3.19.0": [
+     "dep:bstr"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "git-paf.3.19.0": [
+     "dep:bstr"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "git-paf.3.19.0",
+     "rule": "missing-library",
+     "new": "\"bstr\"   (new line in depends)",
+     "hit": true,
+     "tokens": [
+      "dep:bstr"
+     ]
+    }
+   ],
+   "explanations": 0
+  },
+  {
+   "pr": 31124,
+   "title": "[new release] websocket (2 packages) (2.18)",
+   "initial": "f290556e5d03adbda8dc847188358e06abe16436",
+   "final": "6bc98131d828d2d5d1640e81075a00fed8de4521",
+   "actual_fix": {
+    "websocket-lwt-unix.2.18": [
+     "dep:lwt",
+     "dep:mirage-crypto-rng",
+     "dep:ocaml"
+    ],
+    "websocket.2.18": [
+     "dep:ocaml",
+     "field:runtest"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "websocket-lwt-unix.2.18": [
+     "dep:lwt",
+     "dep:mirage-crypto-rng",
+     "dep:ocaml"
+    ],
+    "websocket.2.18": [
+     "dep:ocaml",
+     "field:runtest"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "websocket-lwt-unix.2.18",
+     "rule": "library-api",
+     "new": "\"mirage-crypto-rng\" {>= \"1.2.0\"}",
+     "hit": true,
+     "tokens": [
+      "dep:mirage-crypto-rng"
+     ]
+    }
+   ],
+   "explanations": 2
+  },
+  {
+   "pr": 31110,
+   "title": "release utcp 0.0.10 (2026-11-05)",
+   "initial": "901c21591d0ff200a56029ea2e13e0d3ffdb3df4",
+   "final": "fa7d2545b5ac623c4a6bf78423576258ad8fc09a",
+   "actual_fix": {
+    "utcp.0.0.10": [
+     "field:version"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "utcp.0.0.10": [
+     "field:version"
+    ]
+   },
+   "suggestions": [],
+   "explanations": 1
+  },
+  {
+   "pr": 31107,
+   "title": "[new release] lambdapi (4.0.0)",
+   "initial": "5fe799b6cebb0d22cd7b963e1103bd17aa545bae",
+   "final": "f827390a5fdab179c3cf417b9a8f522fa625d8d2",
+   "actual_fix": {
+    "lambdapi.4.0.0": [
+     "dep:alt-ergo",
+     "dep:dedukti",
+     "dep:dream-httpaf",
+     "dep:dream-pure",
+     "dep:sedlex",
+     "dep:stdlib-shims",
+     "field:checksum",
+     "field:x-commit-hash"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "lambdapi.4.0.0": [
+     "dep:alt-ergo",
+     "dep:dedukti",
+     "dep:dream-httpaf",
+     "dep:dream-pure",
+     "dep:sedlex",
+     "dep:stdlib-shims",
+     "field:checksum",
+     "field:x-commit-hash"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "lambdapi.4.0.0",
+     "rule": "library-api",
+     "new": "\"sedlex\" {>= \"3.3\"}",
+     "hit": true,
+     "tokens": [
+      "dep:sedlex"
+     ]
+    }
+   ],
+   "explanations": 2
+  }
+ ]
+}
