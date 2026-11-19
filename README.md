@@ -91,6 +91,8 @@ recognises are grouped in one "Not recognised" entry listing their jobs.
 | A day10 failure on a platform the failing package already lists in `x-ci-accept-failures` | nothing to change: day10 does not honour it there (cygwin, freebsd) | high |
 | Lint "conf packages should always use …" on npm depexts (`npm-version`) | known false positive for Melange bindings | high |
 | Known messages: `no such function: unixepoch` (SQLite < 3.38), `Could NOT find Python3`, `fatal: not a git repository` from `git describe`, an install into `/usr/...` (read-only), `No known cycle-counting instruction`, Core_kernel shadowing Unix, `Unbound value Conv.…` with cmdliner ≥ 2, `checking for ar... no` on Windows, Clang 19's removed APIs, OCaml 5.4's labelled tuples in Parsetree patterns, `configure: error: x.pc not found` | the cause and the change: a bound, a dependency, `available`, or the install variables | high/medium |
+| Lower-bounds job: a dependency downgraded to a version that no longer builds | `>=` the version used in the other jobs, on the direct dependency that pulls it in (found through opam's "required by") | medium |
+| Lower-bounds job: the package itself fails and no other rule applies | its downgraded direct dependencies as candidates (passing and failing versions), those named in the error first | low |
 | A package recompiled at the same version, removed, then failing to build or install (it has a `remove:` field; seen on lower-bounds jobs with opam 2.6) | an opam bug (ocaml/opam#6440 moves the same source directory for both steps), not a bound: the job can be ignored | high |
 
 Failures that would happen without the PR are marked "Pre-existing" in the note:

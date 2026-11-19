@@ -32,6 +32,7 @@ from .ci import (  # noqa: F401
 )
 from .rules import (  # noqa: F401
     complete_test_output,
+    lower_bounds_rule,
     suggest_for_job,
 )
 from .matrix import (  # noqa: F401
@@ -87,9 +88,13 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         r = suggest_for_job(src, j, text, pr_packages, sha)
         if r.get("rule") == "test-output":
             complete_test_output(src, r, j, text, data, cache_dir)
+        lb = lower_bounds_rule(src, j, text, r, pr_packages, sha)
         r["_key"] = failure_key(j)
         r["jobs"] = merged[group_key(j)]
         results.append(r)
+        if lb:
+            lb.update(_key=failure_key(j), jobs=merged[group_key(j)])
+            results.append(lb)
     failing_in_log = {r["_key"]: r["failing"] for r in results if r.get("failing")}
     # Jobs that failed because of the CI (tool crash, network) say nothing
     # about the package: leave them out of the pass/fail patterns.
@@ -263,7 +268,7 @@ RULE_TITLES = {
     "opam-same-version-reinstall": "opam reinstalls at the same version",
     "needs-git-checkout": "Build needs a git checkout", "install-outside-prefix": "Installs outside the switch",
     "unsupported-arch": "Architecture not supported", "platform-unsupported": "Platform not supported",
-    "health-check-new": "Builds on master, fails here", "health-check-preexisting": "Also failing on master",
+    "health-check-new": "Builds on master, fails here", "lower-bound": "Lower bound too low", "health-check-preexisting": "Also failing on master",
 }
 
 
@@ -292,7 +297,7 @@ def readable(results):
 
 
 # Rules whose explanation does not depend on the platform: reported once.
-PER_PACKAGE_RULES = {"newer-c-compiler", "system-library-version", "opam-same-version-reinstall"}
+PER_PACKAGE_RULES = {"newer-c-compiler", "system-library-version", "opam-same-version-reinstall", "lower-bound"}
 
 
 WORKAROUND_RULES = {"platform-matrix", "missing-system-package"}

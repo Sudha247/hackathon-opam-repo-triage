@@ -167,6 +167,17 @@ CASES = {
     "dspml-day10-excerpt": (
         "d721bc4476e2693a8ae955aa0c8e8647d207ca16", ["--max", "1", "--match", "^day10"],
         [{"failing": "dspml.1.0.2", "rule": "missing-library", "new": '"gnuplot"'}]),
+    # Lower-bounds jobs: a downgraded dependency that no longer builds, and
+    # the package's own failure with its downgraded dependencies as candidates.
+    "colibri2-lower-bound-dep": (
+        "e0a519e15c3951b6ed6a838cda48da8742cdad33", ["--max", "1", "--match", "4.14,colibri2.0.6,lower-bounds"],
+        [{"failing": "colibri2.0.6", "rule": "lower-bound", "new": '"mlcuddidl" {>= "3.0.8"}'}]),
+    "orrandomforest-lower-bound-chain": (
+        "41de505ec8ff3637ab3cb06a41ccbc29683f566c", ["--max", "1", "--match", "4.14,orrandomForest.3.0.0,lower"],
+        [{"rule": "lower-bound", "new": '"parany" {>= "14.0.1"}', "error": "pulls in ocamlnet.4.1.8"}]),
+    "miaou-lower-bound-candidates": (
+        "a8e39569b4d59572ae01a7800cf55dcd9d854d1e", ["--max", "1", "--match", "5.2,miaou-core.0.6.0,lower"],
+        [{"failing": "miaou-registry.0.6.0", "rule": "lower-bound", "candidate": '"dune" {>= "3.24.2"}'}]),
 }
 
 

@@ -699,3 +699,103 @@ def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
     r["confidence"] = "low (dependencies released after the package; check their changelogs)"
     if not cands:
         r["note"] = f"None of the {min(len(deps), max_lookups)} dependencies checked was released after {fname}.{fver} ({day})."
+
+
+# opam's plan lines: "- downgrade dune 3.24.2 to 3.15.3 [required by miaou-core]".
+PLAN_LINE = re.compile(r"^\s*- (install|downgrade|upgrade|recompile)\s+([\w+-]+)\s+(\S+)(?:\s+to\s+(\S+))?"
+                       r"[^\[\n]*(?:\[(?:required by|uses) ([^\]]*)\])?", re.M)
+
+
+def opam_plan(text):
+    """({name: (from, to)} for the downgraded packages, {name: {packages requiring it}})."""
+    downgraded, required_by = {}, collections.defaultdict(set)
+    for m in PLAN_LINE.finditer(text):
+        action, name, v1, v2, by = m.groups()
+        if action == "downgrade" and v2:
+            downgraded[name] = (v1, v2)
+        if by and "required by" in m.group(0):
+            required_by[name].update(p.strip() for p in by.replace("etc.", "").split(",") if p.strip())
+    return downgraded, required_by
+
+
+def direct_deps(opam_text):
+    return re.findall(r'^\s*"([\w+-]+)"', (opam_text or "").split("depends:", 1)[-1].split("\n]", 1)[0], re.M)
+
+
+def lower_bounds_rule(src, job, text, r, pr_packages, pr_sha):
+    """A lower-bounds job: CI installs the PR's package with the oldest
+    versions its constraints allow. Either a dependency of it was downgraded
+    to a version that no longer builds (a new suggestion: raise the bound of
+    the direct dependency that pulls it in), or the package itself fails and
+    no rule explains why (r gets the downgraded direct dependencies as
+    candidates, those named in the error first)."""
+    if job["kind"] != "lower-bounds":
+        return None
+    info = log_info(text)
+    if "failing" not in info:
+        return None
+    fname, fver = info["failing"]
+    downgraded, required_by = opam_plan(text)
+    siblings = {split_pkg(p)[0]: p for p in pr_packages}
+    target = siblings.get(fname) or job["revdep"] or job["target"]
+    tname, tver = split_pkg(target)
+    opam = (src.opam_file(tname, tver, pr_sha) if target in pr_packages else None) or src.opam_file(tname, tver)
+    deps = [d for d in direct_deps(opam) if d not in TRIVIAL_DEPS or d == "dune"]
+
+    if fname != tname:
+        # A: a dependency failed to build. Walk "required by" up to a direct
+        # dependency of the package that was downgraded.
+        seen, frontier, path = {fname}, [fname], {fname: None}
+        found = None
+        while frontier and not found:
+            nxt = []
+            for p in frontier:
+                if p in deps and p in downgraded:
+                    found = p
+                    break
+                for q in sorted(required_by.get(p, ())):
+                    if q not in seen:
+                        seen.add(q)
+                        path[q] = p
+                        nxt.append(q)
+            frontier = nxt
+        if not found:
+            return None
+        chain, p = [], found
+        while p:
+            chain.append(p)
+            p = path[p]
+        old, new = constraint_edit(opam, found, ">=", downgraded[found][0])
+        via = f" (through {' -> '.join(chain[1:-1])})" if len(chain) > 2 else ""
+        what = (f"{fname}.{fver}" if found == fname else f"{found}.{downgraded[found][1]}, which pulls in "
+                f"{fname}.{fver}{via}")
+        return {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"],
+                "rule": "lower-bound", "failing": target, "fix_in": "this PR" if target in pr_packages
+                else f"{target} (other package)", "dep": found, "old": old, "new": new, "confidence": "medium",
+                "error": f"the lower-bounds job installs {what}, which fails to build",
+                "note": f"{found}.{downgraded[found][0]}, used in the other jobs, builds. A version in between "
+                        f"may build too: this is the bound the CI results support."}
+
+    # B: the package itself fails, and no rule explains the error.
+    if r.get("rule") or r.get("new") or r.get("candidates"):
+        return None
+    err = "\n".join(info["error_lines"])
+    mentioned = {norm(w) for w in re.findall(r"\b([A-Za-z][\w-]+)", err)}
+    cands = [d for d in deps if d in downgraded]
+    if not cands:
+        return None
+    cands.sort(key=lambda d: (norm(d) not in mentioned and not any(m.startswith(norm(d)) for m in mentioned
+                                                                  if len(norm(d)) >= 3), d))
+    out = []
+    for d in cands[:5]:
+        old, new = constraint_edit(opam, d, ">=", downgraded[d][0])
+        out.append({"dep": d, "passing": downgraded[d][0], "failing": downgraded[d][1], "old": old, "new": new})
+    named = [c["dep"] for c in out if norm(c["dep"]) in mentioned
+             or any(m.startswith(norm(c["dep"])) for m in mentioned if len(norm(c["dep"])) >= 3)]
+    r.update(rule="lower-bound", candidates=out, compared_with="the other jobs", confidence="low",
+             failing=target, fix_in="this PR" if target in pr_packages else f"{target} (other package)",
+             error=r.get("error") or next((l for l in info["error_lines"] if "Error" in l), "build error"),
+             note=("The error names " + ", ".join(named) + ": most likely the lower bound to raise. "
+                   if named else "")
+             + "These direct dependencies are older in the lower-bounds job than in the other jobs, which pass.")
+    return None
