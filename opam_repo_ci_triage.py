@@ -1341,6 +1341,15 @@ def llm_prompt(src, r, job, text, data, pr_packages):
             and j["kind"] == job["kind"] and j["category"] not in NEUTRAL]
     matrix = "\n".join(f"- {'/'.join(j['platform'])}: {j['category']}" for j in same[:30])
     dims = job_dims(job)
+    # What opam did with the failing package, in order: the plans (install,
+    # recompile, downgrade...) and the actions (removed, installed...). A
+    # lower-bounds job, for instance, reinstalls packages after downgrading.
+    name_rx = re.escape(fname)
+    actions = [l.strip() for l in text.splitlines()
+               if re.match(r"^\s*=== \w+ \d+ packages?", l)
+               or re.match(rf"^\s*- (install|recompile|downgrade|upgrade|reinstall|remove)\s+{name_rx}\s", l)
+               or re.match(rf"^-> \w+\s+{name_rx}\.", l)
+               or re.match(rf"^#=== ERROR while \w+ {name_rx}\.", l)]
     return f"""Failing job: {job['variant']} ({'experimental platform' if job['experimental'] else 'blocking platform'})
 Platform: OCaml {dims['ocaml']}, os {dims['os']}, distribution {dims['distro'] or 'debian (classic builder)'}, arch {dims['arch']}
 Packages of this PR: {', '.join(pr_packages)}
@@ -1356,6 +1365,10 @@ Dependency versions installed by CI:
 <opam_file package="{pkg}">
 {opam[:6000]}
 </opam_file>
+
+<opam_actions package="{pkg}">
+{chr(10).join(actions[-60:]) or '(none found)'}
+</opam_actions>
 
 <error_excerpt>
 {block[:12000]}
@@ -1410,9 +1423,12 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         return not r.get("rule") and not r.get("new") and not r.get("candidates") and \
             (note in LLM_UNEXPLAINED or note.startswith("no rule matched"))
     todo = [r for r in results if r.get("url") and r.get("variant") in jobs and unexplained(r)]
-    seen, done = set(), 0
+    seen, done, answers = set(), 0, {}
+
+    def sig_of(r):
+        return re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
     for r in todo:
-        sig = re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
+        sig = sig_of(r)
         if sig in seen or done >= limit:
             continue
         seen.add(sig)
@@ -1429,10 +1445,20 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         fix_in = {"this-pr": "this PR" if pkg in pr_packages else f"{pkg} (other package)",
                   "other-package": f"{pkg} (other package)", "upstream": "upstream (the package's source)",
                   "ci": "the CI environment", "unknown": r.get("fix_in") or "unknown"}[res["fix_in"]]
+        answers[sig] = (res, pkg, fix_in)
+    # Failures with the same signature (the same error on other platforms) share the answer.
+    for r in todo:
+        if sig_of(r) not in answers:
+            continue
+        res, pkg, fix_in = answers[sig_of(r)]
         pre = f"Pre-existing: {r['preexisting']}. " if r.get("preexisting") else ""
+        verify = re.sub(r"^(Check|Verify)( that)?:?\s*", "", res["verify"].strip())
+        verify = verify[:1].upper() + verify[1:]
         r.update(rule="llm", failing=pkg, fix_in=fix_in, confidence=res["confidence"],
-                 error=r.get("error") or res["diagnosis"],
-                 note=f"{pre}{res['diagnosis']} Check: {res['verify']}", llm_usage=res.get("llm_usage"))
+                 diagnosis=res["diagnosis"], llm_usage=res.get("llm_usage"),
+                 note=pre + (f"{res['diagnosis']} " if r.get("error") else "") + f"To check: {verify}")
+        if not r.get("error"):
+            r["error"] = res["diagnosis"]
         if res.get("change_new"):
             r.update(old=res.get("change_old") or None, new=res["change_new"])
     if len(seen) < len({re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
