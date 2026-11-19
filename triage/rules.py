@@ -322,8 +322,12 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
             mm = ".".join(info["ocaml"].split(".")[:2])
             m = re.search(r'^[ \t]*"ocaml"[ \t]*(?:\{([^}]*)\})?[^\n]*$', opam_text or "", re.M)
             term = f'< "{mm}" | !with-test'
-            if m and m.group(1) and m.group(1).strip():
-                new = f'"ocaml" {{{m.group(1).strip()} & ({term})}}'
+            filt = (m.group(1) or "").strip() if m else ""
+            prev = re.search(r'\(<\s*"[^"]+"\s*\|\s*!with-test\)', filt)
+            if prev:                    # already disabled from a later version: lower it
+                new = f'"ocaml" {{{filt.replace(prev.group(0), "(" + term + ")")}}}'
+            elif filt:
+                new = f'"ocaml" {{{filt} & ({term})}}'
             else:
                 new = f'"ocaml" {{{term}}}'
             out.update(rule="test-output-ocaml", dep="ocaml", confidence="medium",

@@ -31,6 +31,7 @@ from .ci import (  # noqa: F401
     job_dims,
     log_text,
     merge_jobs,
+    opam_vcmp,
     parse_commit_page,
     split_pkg,
 )
@@ -181,7 +182,17 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
     # opam-health-check: master, newest version of each package, no tests, on
     # the classic builder's default platform.
     if src is not None:
-        cache, asked = {}, set()
+        cache, asked, newest = {}, set(), {}
+
+        def is_newest(target):
+            # opam-health-check builds a reverse dependency with the newest
+            # versions; a job testing it against an older version of the
+            # target (a PR fixing old releases) is not comparable to that.
+            if target not in newest:
+                tn, tv = split_pkg(target)
+                vs = src.versions(tn)
+                newest[target] = not vs or all(opam_vcmp(tv, v) >= 0 for v in vs)
+            return newest[target]
         for j in failing:
             rd, d = j["revdep"], job_dims(j)
             if (not rd or j["variant"] in per_job or j["category"] == "build-or-test" or j["kind"] == "tests"
@@ -201,6 +212,8 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
             elif status == "partial":
                 per_job[j["variant"]] = (f"a dependency of {rd} also fails on master in opam-health-check "
                                          f"({when})")
+            if status == "good" and not is_newest(j["target"]):
+                continue
             if notes is not None and status in ("bad", "partial", "good"):
                 notes.setdefault("health", {}).setdefault(status, {}).setdefault(rd, set()).add(
                     (d["ocaml"], j["variant"]))
