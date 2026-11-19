@@ -713,10 +713,8 @@ class Sources:
         page (one small HTML page); git listing only if that page is unavailable."""
         if ref == "master":
             page = self.raw(f"https://opam.ocaml.org/packages/{name}/")
-            if page:
-                vs = set(re.findall(re.escape(name) + r"\.(\d[^\s\"'<>/]*)", page))
-                if vs:
-                    return sorted(vs, key=functools.cmp_to_key(opam_vcmp))
+            vs = set(re.findall(re.escape(name) + r"\.(\d[^\s\"'<>/]*)", page or ""))
+            return sorted(vs, key=functools.cmp_to_key(opam_vcmp))   # [] if not a package
         return self._versions_git(name, ref)
 
     def _versions_git(self, name, ref="master"):
@@ -1030,6 +1028,11 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                    dep="ocaml", old=old, new=new, confidence="high")
         return out
 
+    lr = log_rules(src, err, fname, opam_text, info, job)
+    if lr:
+        out.update(lr)
+        return out
+
     unb = find_unbound(err)
     if unb:
         kind, mods, ident = unb
@@ -1144,6 +1147,10 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
     return out
 
 
+def failure_key(j):
+    return (j["target"], j["revdep"], j["kind"], re.sub(r"[`\"']|-j \d+", "", j["reason"] or ""))
+
+
 def suggest(sha, data, src, cache_dir, max_logs, match):
     pr_packages = sorted({j["target"] for j in data["jobs"] if j["target"]})
     cats = {"build", "build-or-test", "solver"}
@@ -1152,7 +1159,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match):
     # One job per (package, revdep, kind, reason): the same error on many platforms is one problem.
     seen, uniq = set(), []
     for j in sel:
-        key = (j["target"], j["revdep"], j["kind"], re.sub(r"[`\"']|-j \d+", "", j["reason"] or ""))
+        key = failure_key(j)
         if key not in seen:
             seen.add(key)
             uniq.append(j)
@@ -1169,7 +1176,20 @@ def suggest(sha, data, src, cache_dir, max_logs, match):
         r = suggest_for_job(src, j, text, pr_packages, sha)
         if r.get("rule") == "test-output":
             complete_test_output(src, r, j, text, data, cache_dir)
+        r["_key"] = failure_key(j)
         results.append(r)
+    failing_in_log = {r["_key"]: r["failing"] for r in results if r.get("failing")}
+    matrix = matrix_rules(data["jobs"], results, match, set(pr_packages), failing_in_log)
+    # A matrix suggestion explains the per-job failures that had no rule.
+    explained = {k for m in matrix for k in m.pop("_keys", [])}
+    results = [r for r in results
+               if not (r.get("_key") in explained and not r.get("new") and not r.get("candidates"))]
+    results += matrix
+    for r in results:
+        r.pop("_key", None)
+    if not match or re.search(match, "(lint)"):
+        results += lint_rules(data, src)
+    results += skipped_rules(data, src, cache_dir, pr_packages)
     return results
 
 
@@ -1204,6 +1224,340 @@ def complete_test_output(src, r, job, text, data, cache_dir):
             r["candidates"].append({"dep": p, "passing": good_v, "failing": bad_v, "old": None,
                                     "new": f'"{p}" {{with-test & < "{first}"}}   (new line in depends)'})
     r["confidence"] = "low (candidates differ between a passing and the failing job)"
+
+
+# --------------------------------------------------------------------------
+# Rules on the job matrix (no fetch), on log text, on lint messages, and on
+# packages that install nowhere.
+
+ARCHES = ("x86_64", "amd64", "arm64", "aarch64", "riscv64", "s390x", "ppc64", "ppc64le", "x86_32", "i386", "arm32")
+NEUTRAL = {"not-available", "ignored", "network", "cancelled", "sources"}
+FAILING_CATS = {"build", "build-or-test", "dependency", "solver"}
+
+
+def job_dims(job):
+    """Platform of a CI job: OCaml version (X.Y), os (opam variable), distro, arch."""
+    p = job["platform"]
+    joined = ",".join(p)
+    d = {"ocaml": None, "os": "linux", "distro": None, "arch": "x86_64"}
+    m = re.search(r"ocaml-(\d+\.\d+)", joined)
+    if m:
+        d["ocaml"] = m.group(1)
+    if p[:1] == ["compilers"] and len(p) >= 2:
+        d["ocaml"] = p[1]
+    elif p[:1] == ["day10"] and len(p) >= 4:
+        d["distro"], d["arch"], d["ocaml"] = p[1], p[2], p[3]
+    elif p[:1] == ["distributions"] and len(p) >= 2:
+        d["distro"] = re.sub(r"-ocaml-.*$", "", p[1])
+    elif p[:1] == ["extras"] and len(p) >= 2 and p[1].split("-", 1)[0] in ARCHES:
+        d["arch"] = p[1].split("-", 1)[0]
+    elif p[:1] in (["freebsd"], ["macos"]) and len(p) >= 2:
+        d["distro"] = re.sub(r"-ocaml-.*$", "", p[1])
+        m = re.search(r"-(amd64|arm64|x86_64)$", p[1])
+        if m:
+            d["arch"] = m.group(1)
+    dist = d["distro"] or ""
+    if dist.startswith(("cygwin", "msys2")):
+        d["os"] = "win32"
+    elif dist.startswith("freebsd"):
+        d["os"] = "freebsd"
+    elif dist.startswith("macos"):
+        d["os"] = "macos"
+    return d
+
+
+def vkey(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+def failing_dep(reason):
+    """For a dependency failure, the failing package named in the reason."""
+    m = re.match(r"\s*([\w+-]+\.[^\s:]+)(?: [\w+-]+\.[^\s:]+)* failed", reason or "")
+    return m.group(1) if m else None
+
+
+def matrix_groups(jobs, match):
+    groups = {}
+    for j in jobs:
+        if j["kind"] not in ("build", "tests", "revdeps") or not j["target"]:
+            continue
+        if match and not re.search(match, j["variant"]):
+            continue
+        groups.setdefault((j["target"], j["revdep"], j["kind"]), []).append(j)
+    return groups
+
+
+def compiler_matrix(js):
+    """Fails on every job of the older (or newer) OCaml versions, passes on the
+    others -> ('>=' | '<', version, failing versions, passing versions)."""
+    per = {}
+    for j in js:
+        if j["experimental"] or j["category"] in NEUTRAL:
+            continue
+        v = job_dims(j)["ocaml"]
+        s = "fail" if j["category"] in FAILING_CATS else "pass" if j["category"] == "passed" else None
+        if v and s:
+            per.setdefault(v, set()).add(s)
+    if len(per) < 2 or any(len(s) > 1 for s in per.values()):
+        return None
+    vs = sorted(per, key=vkey)
+    seq = ["".join(per[v]) for v in vs]
+    fails = [v for v, s in zip(vs, seq) if s == "fail"]
+    passes = [v for v, s in zip(vs, seq) if s == "pass"]
+    if not fails or not passes:
+        return None
+    if seq == sorted(seq):                    # fail ... fail pass ... pass
+        return (">=", passes[0], fails, passes)
+    if seq == sorted(seq, reverse=True):      # pass ... pass fail ... fail
+        return ("<", fails[0], fails, passes)
+    return None
+
+
+def platform_matrix(js):
+    """Fails only on Windows, one arch, or some distros -> (dimension, values)."""
+    fails = [j for j in js if not j["experimental"] and j["category"] in FAILING_CATS]
+    passes = [j for j in js if not j["experimental"] and j["category"] == "passed"]
+    if not fails or not passes:
+        return None
+    fd, pd = [job_dims(j) for j in fails], [job_dims(j) for j in passes]
+    if all(d["os"] == "win32" for d in fd) and any(d["os"] != "win32" for d in pd):
+        return ("os", sorted({d["distro"] for d in fd}))
+    archs = {d["arch"] for d in fd}
+    if len(archs) == 1 and archs != {"x86_64"} and not archs & {d["arch"] for d in pd}:
+        return ("arch", sorted(archs))
+    dists = {d["distro"] for d in fd}
+    if None not in dists and not dists & {d["distro"] for d in pd} and \
+       {d["ocaml"] for d in fd} <= {d["ocaml"] for d in pd}:
+        return ("distro", sorted(dists))
+    return None
+
+
+CYGWIN_PKG = {"awk": "gawk", "gawk": "gawk", "gcc": "gcc-core", "cc": "gcc-core", "g++": "gcc-g++",
+              "make": "make", "autoconf": "autoconf", "automake": "automake", "pkg-config": "pkgconf",
+              "m4": "m4", "patch": "patch", "perl": "perl", "python3": "python3", "bison": "bison", "flex": "flex"}
+
+
+def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
+    """Suggestions from the pass/fail pattern of the jobs only (no fetch)."""
+    failing_in_log = failing_in_log or {}
+    done = {(r.get("failing"), r.get("dep")) for r in earlier}
+    out = []
+    for (target, revdep, kind), js in sorted(matrix_groups(jobs, match).items(), key=lambda kv: str(kv[0])):
+        pkg = revdep or target
+        fails = [j for j in js if not j["experimental"] and j["category"] in FAILING_CATS]
+        if not fails:
+            continue
+        # Who has to change: a failing dependency (named by CI, or found in the
+        # log's ERROR block), or the package itself.
+        named = set()
+        for j in fails:
+            d = failing_dep(j["reason"]) if j["category"] == "dependency" else None
+            d = d or failing_in_log.get(failure_key(j))
+            named.add(d if d and split_pkg(d)[0] != split_pkg(pkg)[0] else None)
+        culprit = named.pop() if len(named) == 1 and None not in named else None
+        owner = culprit or pkg
+        tests_only = kind == "tests" or all(j["category"] == "build-or-test" for j in fails)
+        where = "this PR" if owner in pr_packages else f"{owner} (other package)"
+        label = f"{pkg} [{kind}{', revdep of ' + target if revdep else ''}]"
+        cm = compiler_matrix(js)
+        if cm and (owner, "ocaml") not in done:
+            op, v, fv, pv = cm
+            filt = f'with-test & {op} "{v}"' if tests_only else f'{op} "{v}"'
+            gap = ""
+            if op == ">=":
+                gap = f"; versions between {fv[-1]} and {v} were not tested, the bound may be lower"
+            out.append({"variant": label, "failing": owner, "fix_in": where, "rule": "compiler-matrix",
+                        "error": f"fails on OCaml {', '.join(fv)}, passes on {', '.join(pv)}"
+                                 + (" (tests only)" if tests_only else "")
+                                 + (f"; the failure is in the dependency {culprit}" if culprit else ""),
+                        "dep": "ocaml", "old": None,
+                        "new": f'"ocaml" {{{filt}}}' + ("   (new line in depends)" if tests_only else ""),
+                        "confidence": "medium", "note": ("job matrix only" + gap),
+                        "_keys": [failure_key(j) for j in fails]})
+            continue
+        pm = platform_matrix(js)
+        if not pm:
+            continue
+        dim, vals = pm
+        if dim == "os":
+            cond, what = 'os != "win32"', "Windows (" + ", ".join(vals) + ")"
+        elif dim == "arch":
+            cond, what = " & ".join(f'arch != "{a}"' for a in vals), "arch " + ", ".join(vals)
+        else:
+            cond, what = None, "distributions " + ", ".join(vals)
+        if culprit:
+            tool = None
+            for r in earlier:
+                if r.get("failing") == culprit and r.get("rule") == "missing-tool":
+                    tool = re.search(r'(?:Program "?|")([\w.+-]+)', r.get("error", ""))
+            dep = CYGWIN_PKG.get(tool.group(1)) if tool and dim == "os" else None
+            if dep and any(v.startswith("cygwin") for v in vals):
+                new = f'depexts: ["{dep}"] {{os-distribution = "cygwin"}}   (in {culprit})'
+            else:
+                plats = ", ".join(vals)
+                new = f"in {culprit}: a depext for {plats}, or x-ci-accept-failures / available"
+        elif cond and tests_only:
+            new = f'"@runtest" {{with-test & {cond}}}   (or the equivalent filter on the test command)'
+        elif cond:
+            new = f"available: {cond}   (combined with any existing `available`)"
+        else:
+            new = "x-ci-accept-failures: [" + " ".join(f'"{d}"' for d in vals) + "]"
+        reason = sorted({(j["reason"] or "")[:120] for j in fails})[0]
+        out.append({"variant": label, "failing": owner, "fix_in": where, "rule": "platform-matrix",
+                    "error": f"fails only on {what}" + (" (tests only)" if tests_only else "")
+                             + (f"; the failure is in the dependency {culprit}" if culprit else "")
+                             + f": {reason}",
+                    "old": None, "new": new, "confidence": "medium",
+                    "note": ("nothing to change in " + pkg if culprit else
+                             "restricting the platform hides the problem; an upstream fix (or a depext) is better"),
+                    "_keys": [failure_key(j) for j in fails]})
+    return out
+
+
+def log_rules(src, err, fname, opam_text, info, job):
+    """Missing dune language version, tool, library or C header."""
+    text = "\n".join(err)
+    deps = set(re.findall(r'^\s*"([\w+-]+)"', (opam_text or "").split("depends:", 1)[-1].split("\n]", 1)[0], re.M))
+    dims = job_dims(job)
+    platform = dims["distro"] or ("debian (classic builder)" if dims["os"] == "linux" else dims["os"])
+    m = re.search(r"Version (\d+\.\d+) of the dune language is not supported", text)
+    if m:
+        old, new = constraint_edit(opam_text, "dune", ">=", m.group(1))
+        return {"rule": "dune-lang", "error": m.group(0), "dep": "dune", "old": old, "new": new, "confidence": "high"}
+    m = (re.search(r'Program "?([\w.+-]+)"? not found in the tree or in PATH', text)
+         or re.search(r'"([\w.+-]+)": command not found', text)
+         or re.search(r"(?m)^\S*?([\w.+-]+): (?:command )?not found$", text))
+    if m:
+        tool = m.group(1)
+        conf = f"conf-{tool}"
+        r = {"rule": "missing-tool", "error": m.group(0)}
+        if fname.startswith("conf-"):
+            r.update(note=f"{fname} does not provide `{tool}` on {platform}: its depexts lack an entry for that "
+                          f"platform (add one), or the CI image is missing it", confidence="medium")
+        elif conf in deps:
+            r.update(note=f"{conf} is a dependency but `{tool}` is missing on {platform}: depext gap in {conf}",
+                     confidence="medium")
+        elif src.versions(conf):
+            r.update(dep=conf, old=None, new=f'"{conf}" {{build}}   (new line in depends)', confidence="medium")
+        else:
+            r.update(note=f"no {conf} package: add a depext providing `{tool}` for {platform}", confidence="low")
+        return r
+    m = re.search(r'Library "([\w.-]+)" not found', text) or re.search(r"Package `([\w.-]+)' not found", text)
+    if m:
+        lib = m.group(1)
+        pkg = lib.split(".", 1)[0]
+        in_tests = bool(re.search(r"(^|/)tests?/", text))
+        r = {"rule": "missing-library", "error": m.group(0)}
+        if pkg in deps or pkg == fname:
+            r.update(note=f"{pkg} is already a dependency: `{lib}` may only exist in other versions of {pkg}, "
+                          f"or be an optional sub-library", confidence="low")
+        elif src.versions(pkg):
+            filt = " {with-test}" if in_tests else ""
+            r.update(dep=pkg, old=None, new=f'"{pkg}"{filt}   (new line in depends)', confidence="medium")
+        else:
+            r.update(note=f"`{lib}` is not an opam package: an internal library, probably missing from the "
+                          f"release archive or excluded by `-p {fname}`", confidence="medium")
+        return r
+    m = re.search(r"fatal error: ([\w/.+-]+): No such file or directory", text)
+    if m:
+        return {"rule": "missing-header", "error": m.group(0), "confidence": "low",
+                "note": f"system header missing on {platform}: add the depext (or conf-* dependency) that provides "
+                        f"{m.group(1)}, or x-ci-accept-failures for platforms without it"}
+    return None
+
+
+def license_id(text):
+    """A coarse SPDX guess from a license text."""
+    t = re.sub(r"\s+", " ", text or "")
+    if "Permission is hereby granted, free of charge" in t:
+        return "MIT"
+    if "Apache License" in t and "Version 2.0" in t:
+        return "Apache-2.0"
+    if "Redistribution and use in source and binary forms" in t:
+        return "BSD-3-Clause" if re.search(r"Neither the name|names of its contributors", t) else "BSD-2-Clause"
+    if "Permission to use, copy, modify, and/or distribute" in t or "Permission to use, copy, modify, and distribute" in t:
+        return "ISC"
+    if "GNU LESSER GENERAL PUBLIC LICENSE" in t:
+        return "LGPL-2.1-or-later (check: -only vs -or-later, OCaml linking exception)" if "2.1" in t else "LGPL-3.0-or-later (check)"
+    if "GNU GENERAL PUBLIC LICENSE" in t:
+        return "GPL-3.0-or-later (check)" if "Version 3" in t else "GPL-2.0-or-later (check)"
+    if "Mozilla Public License" in t and "2.0" in t:
+        return "MPL-2.0"
+    return None
+
+
+def lint_rules(data, src):
+    out = []
+    for j in data["jobs"]:
+        if j["kind"] != "lint" or j["status"] != "failed":
+            continue
+        for msg in j["messages"]:
+            m = re.match(r"Error in ([\w+-]+)\.(\S+?): (.*)$", msg)
+            if not m:
+                continue
+            name, ver, text = m.groups()
+            r = {"variant": "(lint)", "failing": f"{name}.{ver}", "fix_in": "this PR", "rule": "lint",
+                 "error": text[:220]}
+            if "warning 62" in text:
+                val = (re.findall(r'"([^"]+)"', text) or [""])[-1]
+                lid = None
+                gm = re.match(r"https://github\.com/([^/]+/[^/]+)/blob/(.+)$", val)
+                if gm:
+                    lid = license_id(src.raw(f"https://raw.githubusercontent.com/{gm.group(1)}/{gm.group(2)}"))
+                if lid:
+                    r.update(old=f'license: "{val}"', new=f'license: "{lid.split(" ")[0]}"',
+                             confidence="high" if "check" not in lid else "medium",
+                             note=f"detected from the license text: {lid}")
+                else:
+                    r.update(note="use an SPDX identifier (https://spdx.org/licenses/)", confidence="medium")
+            elif "warning 41" in text:
+                named = re.findall(r'"([\w+-]+)"', text)
+                if name in named:
+                    r.update(old=f"%{{{name}:VAR}}%", new="%{_:VAR}%   (in build/install/remove)",
+                             confidence="high", note="the package refers to itself: use the `_` prefix")
+                else:
+                    r.update(note=f"add {', '.join(named)} to depends or depopts", confidence="high")
+            elif "No package source directory" in text:
+                r.update(note="known opam-ci-check false positive for packages without `url` (virtual "
+                              "packages); maintainers waive it", confidence="high")
+            elif "conf packages should always use" in text:
+                r.update(note="non-conf package with `depexts`: move them into a conf-* package, or ask the "
+                              "maintainers to waive it (often accepted)", confidence="medium")
+            else:
+                r["note"] = "no rule for this lint message"
+            out.append(r)
+    return out
+
+
+def skipped_rules(data, src, cache_dir, pr_packages):
+    """A PR package that installs nowhere: report the solver's conflict chain."""
+    out = []
+    for t in pr_packages:
+        own = [j for j in data["jobs"] if j["target"] == t and j["kind"] == "build"]
+        if len(own) < 3 or any(j["category"] != "not-available" for j in own):
+            continue
+        pick = sorted(own, key=lambda j: (not j["variant"].startswith("compilers,"), j["variant"]))[-1:]
+        chains = []
+        for j in pick:
+            try:
+                txt = log_text(fetch(j["url"], cache_dir))
+            except Exception:
+                continue
+            chains += re.findall(rf"^\s*- ({re.escape(t.split('.')[0])} = \S+ -> .+)$", txt, re.M)
+        if not chains:
+            continue
+        firsts = {c.split(" -> ")[1] for c in chains if " -> " in c}
+        r = {"variant": f"{t} [all build jobs skipped]", "failing": t, "fix_in": "this PR", "rule": "uninstallable",
+             "error": "not installable on any tested platform; solver: " + "; ".join(sorted(set(chains))[:3])}
+        if len(firsts) == 1:
+            first = firsts.pop()
+            ends = sorted({c.split(" -> ")[2] for c in chains if c.count(" -> ") >= 2})
+            r.update(confidence="high",
+                     note=f"every conflict goes through `{first}`"
+                          + (f", which requires {' or '.join(ends)}" if ends else "")
+                          + ": relax or drop that constraint (check which versions of the dependency really fail)")
+        out.append(r)
+    return out
 
 
 TRIVIAL_DEPS = {"ocaml", "dune", "ocamlfind", "odoc", "ocaml-base-compiler", "ocaml-compiler", "base-unix",
