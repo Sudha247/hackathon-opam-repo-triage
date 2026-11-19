@@ -825,13 +825,17 @@ class Sources:
 
     MCP_URL = "https://ocaml.org/mcp"
 
-    def mcp(self, tool, **args):
-        """Call an ocaml.org MCP tool; parsed JSON result, or None on error."""
+    def mcp(self, tool, _max_age=None, **args):
+        """Call an ocaml.org MCP tool; parsed JSON result, or None on error.
+        Answers are cached on disk; with `_max_age` (seconds), an older answer
+        is fetched again (for data that changes, like health-check results)."""
         key = json.dumps([tool, args], sort_keys=True)
         if key in self.mem:
             return self.mem[key]
         disk = os.path.join(self.cache_dir, "mcp-" + hashlib.sha256(key.encode()).hexdigest()[:24] + ".json")
-        if os.path.exists(disk):
+        fresh = os.path.exists(disk) and (
+            _max_age is None or OFFLINE or time.time() - os.path.getmtime(disk) < _max_age)
+        if fresh:
             with open(disk) as f:
                 v = json.load(f)
         elif OFFLINE:
@@ -1624,9 +1628,14 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
                          "change. " + (m.get("note") or ""))
     results += matrix
     accepted_but_failing(results, src, sha, set(pr_packages))
-    pre = preexisting_failures(data, sha, base, cache_dir)
+    new_notes = {}
+    pre = preexisting_failures(data, sha, base, cache_dir, src, new_notes)
     for r in results:
         keys = r.get("_keys") or ([r["_key"]] if r.get("_key") else [])
+        hints = {new_notes["new"][k] for k in keys if k in new_notes.get("new", {})}
+        if hints and not any(k in pre for k in keys):
+            r["new_on_master"] = sorted(hints)[0]
+            r["note"] = sorted(hints)[0] + (" " + r["note"] if r.get("note") else "")
         why = {pre.get(k) for k in keys}
         if keys and None not in why:
             r["preexisting"] = (sorted(why)[0] if len(why) == 1 or not all(w.startswith("this PR only adds")
@@ -1634,6 +1643,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
                                 else "this PR only adds upper bounds to these packages, so their dependencies "
                                      "are the same as on master")
             r["note"] = f"Pre-existing: {r['preexisting']}." + (" " + r["note"] if r.get("note") else "")
+    results += health_summary(new_notes)
     for r in results:
         r.pop("_key", None)
         r.pop("_keys", None)
@@ -1751,6 +1761,7 @@ RULE_TITLES = {
     "opam-same-version-reinstall": "opam reinstalls at the same version",
     "needs-git-checkout": "Build needs a git checkout", "install-outside-prefix": "Installs outside the switch",
     "unsupported-arch": "Architecture not supported", "platform-unsupported": "Platform not supported",
+    "health-check-new": "Builds on master, fails here", "health-check-preexisting": "Also failing on master",
 }
 
 
@@ -1880,10 +1891,56 @@ def bound_only_changes(base, sha, cache_dir):
     return out
 
 
-def preexisting_failures(data, sha, base, cache_dir):
+def health_check(src, name, cache):
+    """opam-health-check's results for the newest version of a package, from
+    ocaml.org's MCP: ({compiler: (status, log url)}, version, run date), or
+    None. It builds the newest version of every package on master, without
+    tests; its results change daily, so they are cached for a day."""
+    if name not in cache:
+        r = src.mcp("ocaml_package_build_information", _max_age=86400, package=name, limit=5)
+        res = next((x for x in (r or {}).get("results", []) if x.get("package") == name), None)
+        cache[name] = res and ({b["compiler"]: (b["status"], b.get("log_url")) for b in res.get("builds", [])},
+                               res.get("version"), ((r or {}).get("run") or {}).get("date"))
+    return cache[name]
+
+
+def health_summary(notes):
+    """Entries comparing the failing reverse dependencies with opam-health-check
+    (master): the ones that also fail there, and the ones that build there."""
+    h, run = notes.get("health") or {}, notes.get("run")
+    when = f" (run of {run})" if run else ""
+    out = []
+
+    def listing(d):
+        return ", ".join(f"{rd} (OCaml {', '.join(sorted({v for v, _ in xs}))})" for rd, xs in sorted(d.items()))
+    good = h.get("good") or {}
+    if good:
+        out.append({"variant": f"{len(good)} reverse dependenc{'ies' if len(good) > 1 else 'y'}",
+                    "rule": "health-check-new", "fix_in": "this PR", "confidence": "medium",
+                    "failing": ", ".join(sorted(good)),
+                    "error": f"build on master in opam-health-check{when} but fail here: {listing(good)}",
+                    "note": "These failures are probably caused by this PR: look at them first. "
+                            "opam-health-check builds the newest version of each package, without tests.",
+                    "jobs": sorted({v for xs in good.values() for _, v in xs})})
+    bad = {**(h.get("bad") or {}), **(h.get("partial") or {})}
+    if bad:
+        out.append({"variant": f"{len(bad)} reverse dependenc{'ies' if len(bad) > 1 else 'y'}",
+                    "rule": "health-check-preexisting", "fix_in": "the reverse dependencies (other packages)",
+                    "confidence": "high", "failing": ", ".join(sorted(bad)),
+                    "error": f"also fail on master in opam-health-check{when}: {listing(bad)}",
+                    "note": "Pre-existing: these reverse dependencies fail without this PR (or one of their "
+                            "dependencies does). Nothing to change in this PR for them.",
+                    "jobs": sorted({v for xs in bad.values() for _, v in xs})})
+    return out
+
+
+def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
     """{failure_key: why} for the failing jobs that would fail without this PR:
-    packages the PR only bounds, and failures that the CI run of the previous
-    release of a package also had (same platform, same job)."""
+    packages the PR only bounds, failures that the CI run of the previous
+    release of a package also had (same platform, same job), and reverse
+    dependencies that opam-health-check also sees failing on master. Build
+    failures that opam-health-check sees passing on master get a note in
+    `notes` instead: they are probably caused by the PR."""
     failing = [j for j in data["jobs"] if j["status"] == "failed" and j["category"] in FAILING_CATS]
     per_job = {}
     bound = bound_only_changes(base, sha, cache_dir) if base else {}
@@ -1910,6 +1967,37 @@ def preexisting_failures(data, sha, base, cache_dir):
             if b and b["category"] in FAILING_CATS:
                 pr = f"#{info['pr']}" if info.get("pr") else info["sha"][:12]
                 per_job[j["variant"]] = f"{info['prev']} failed the same job in the CI of {pr}"
+    # opam-health-check: master, newest version of each package, no tests, on
+    # the classic builder's default platform.
+    if src is not None:
+        cache, asked = {}, set()
+        for j in failing:
+            rd, d = j["revdep"], job_dims(j)
+            if (not rd or j["variant"] in per_job or j["category"] == "build-or-test" or j["kind"] == "tests"
+                    or d["distro"] != CLASSIC_DISTRO or d["arch"] != "x86_64" or not d["ocaml"]):
+                continue
+            name, ver = split_pkg(rd)
+            if name not in asked and len(asked) >= 25:
+                continue
+            asked.add(name)
+            hc = health_check(src, name, cache)
+            if not hc or hc[1] != ver or d["ocaml"] not in hc[0]:
+                continue
+            status, log = hc[0][d["ocaml"]]
+            when = f"OCaml {d['ocaml']}, run of {hc[2]}" if hc[2] else f"OCaml {d['ocaml']}"
+            if status == "bad":
+                per_job[j["variant"]] = f"{rd} also fails to build on master in opam-health-check ({when})"
+            elif status == "partial":
+                per_job[j["variant"]] = (f"a dependency of {rd} also fails on master in opam-health-check "
+                                         f"({when})")
+            if notes is not None and status in ("bad", "partial", "good"):
+                notes.setdefault("health", {}).setdefault(status, {}).setdefault(rd, set()).add(
+                    (d["ocaml"], j["variant"]))
+                notes.setdefault("run", hc[2])
+            if status == "good" and notes is not None:
+                notes.setdefault("new", {})[failure_key(j)] = (
+                    f"{rd} builds on master in opam-health-check ({when}): this failure is probably caused "
+                    f"by this PR.")
     out = {}
     for j in failing:
         out.setdefault(failure_key(j), []).append(per_job.get(j["variant"]))

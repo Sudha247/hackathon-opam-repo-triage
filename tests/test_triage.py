@@ -94,7 +94,8 @@ CASES = {
          {"rule": "rerun", "error": "Segmentation fault of the CI tool day10-install"},
          {"rule": "rerun", "error": "7 cancelled"},
          {"failing": "solo5-bindings-hvt.0.6.9", "rule": "newer-c-compiler", "note": "-Werror"},
-         {"failing": "tar-eio.3.5.0", "rule": "builder-specific"}]),
+         {"failing": "tar-eio.3.5.0", "rule": "builder-specific"},
+         {"rule": "health-check-preexisting", "failing": "cca.0.7"}]),
     "frama-clang-llvm": (
         "8f970cb1aaa9971525c904c59e168a4ab5169d00", ["--max", "8"],
         [{"failing": "conf-libclang.22", "rule": "system-library-version", "error": "archlinux has LLVM 23"},
@@ -127,7 +128,9 @@ CASES = {
         [{"failing": "libbinaryen.109.0.1", "rule": "newer-c-compiler", "note": "<cstdint>"}]),
     "bun-afl-implicit-int": (
         "eb1089be5f315d8d5f5d749ad06f42bd92ae5b4b", ["--max", "2", "--match", "revdeps,bun"],
-        [{"failing": "afl.2.52b", "rule": "newer-c-compiler", "note": "-Wimplicit-int"}]),
+        [{"failing": "afl.2.52b", "rule": "newer-c-compiler", "note": "-Wimplicit-int"},
+         {"rule": "health-check-preexisting", "failing": "xen-gnt-unix.4.0.2"},
+         {"rule": "health-check-new", "failing": "jext.0.1.1"}]),
     # Rules for causes found by grading the LLM fallback's answers.
     "ordma-git-describe": (
         "3670238c506b9ba55e76e0956102b5a5eca57118", ["--max", "1", "--match", "^compilers,4.11"],

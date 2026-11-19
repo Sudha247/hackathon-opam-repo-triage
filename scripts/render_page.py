@@ -146,6 +146,12 @@ def render_suggestion(r, sha=None):
         out.append(f'<div class="meta">Tried: {e(t)}</div>')
     if r.get("note"):
         out.append(f'<div class="note">{e(r["note"])}</div>')
+    if r.get("also_failing_in"):
+        prs = r["also_failing_in"]
+        out.append(f'<div class="note shared">Also failing in {len(prs)} other open PRs, so probably not '
+                   f'caused by this one: '
+                   + ", ".join(link(f"{REPO_URL}/pull/{int(n)}", f"#{int(n)}") for n in prs[:12])
+                   + (f" and {len(prs) - 12} more" if len(prs) > 12 else "") + "</div>")
     if lists_jobs and jobs:
         out.append(f'<ul class="jobs">{"".join(f"<li>{job_link(sha, v)}</li>" for v in jobs)}</ul>')
     else:
@@ -406,7 +412,9 @@ the PR does not break them.</dd>
 day10 builder (the jobs named <code>day10,…</code>). When a job fails only on day10 while the classic
 builder passes on the same system, the problem is in the CI setup, not in the package.</dd>
 <dt>Pre-existing</dt><dd>The failure would happen without the PR: it also failed in the CI of the previous
-release, or the PR only adds an upper bound to that package.</dd>
+release, the PR only adds an upper bound to that package, or opam-health-check (which builds every package on
+master, without tests) sees it failing too. "Also failing in other open PRs" says the same from the other PRs
+on this page.</dd>
 <dt>LLM diagnosis (unchecked)</dt><dd>For failures that no rule recognises, an LLM reads the log and
 suggests a cause. These answers are not checked: in a test on 25 of them, 15 were right, 7 plausible and 3
 wrong. Changes to version bounds or depexts are shown as text to check, and low-confidence answers are

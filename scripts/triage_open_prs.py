@@ -145,6 +145,29 @@ def save_state(path, prs):
     os.replace(path + ".tmp", path)
 
 
+SHARED_MIN = 3   # other open PRs a failure must also appear in to be marked
+
+
+def mark_shared_failures(prs):
+    """Mark the suggestions about reverse dependencies that also fail in at
+    least SHARED_MIN other open PRs: such a failure is not caused by this PR.
+    Uses the failing reverse dependencies of every PR (from `summary`)."""
+    where = collections.defaultdict(set)
+    for e in prs.values():
+        for rd in ((e.get("jobs") or {}).get("failing_revdeps") or {}):
+            where[rd].add(int(e["number"]))
+    for e in prs.values():
+        n = int(e["number"])
+        for r in (e.get("result") or {}).get("suggestions", []):
+            rds = {m.group(1) for v in (r.get("jobs") or [r.get("variant") or ""])
+                   for m in [re.search(r"revdeps,([^,]+)", v or "")] if m}
+            others = sorted(set().union(*(where[rd] for rd in rds)) - {n}) if rds else []
+            if len(others) >= SHARED_MIN:
+                r["also_failing_in"] = others
+            else:
+                r.pop("also_failing_in", None)
+
+
 def llm_available():
     """The LLM fallback runs only with an API key and the anthropic package;
     without them the page is built from the rules alone."""
@@ -260,6 +283,7 @@ def main():
         new_state[key] = entry
         save_state(args.state, {**old, **new_state})      # keep the progress if the run is killed
 
+    mark_shared_failures(new_state)
     stats["dropped"] = len(set(old) - set(new_state))
     save_state(args.state, new_state)
 
