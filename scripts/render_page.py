@@ -27,7 +27,8 @@ from opam_repo_ci_triage import title_of as rule_title  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
 # One verdict per PR: the first that applies, in this order (see `verdict`).
 VERDICTS = [("ready", "Not this PR's fault"), ("change", "Change this PR"), ("blocked", "Blocked elsewhere"),
-            ("ci", "CI only"), ("rerun", "Needs a rerun"), ("other", "Needs a look"), ("error", "Not analysed")]
+            ("ci", "Not this PR's, on hold"), ("rerun", "Needs a rerun"), ("other", "Needs a look"),
+            ("error", "Not analysed")]
 VERDICT_LABEL = dict(VERDICTS)
 VERDICT_HELP = {
     "ready": "CI fails, but none of the failures is this PR's fault: each one also fails without this PR, comes "
@@ -36,8 +37,9 @@ VERDICT_HELP = {
               "tests",
     "blocked": "At least one failure must be fixed in another package (failures that also happen without this "
                "PR do not count)",
-    "ci": "Every failure comes from the CI's setup (the day10 builder, the CI's opam), but the PR is a draft, has "
-          "a label that keeps it out of the ready list, or its CI is still running",
+    "ci": "No failure is this PR's fault (each one also fails without this PR, comes from the CI's setup, or is "
+          "on an experimental platform), but the PR is a draft, has a label that keeps it out of the ready list, "
+          "or its CI is still running",
     "rerun": "Some jobs did not run to the end because of the CI (network errors, cancelled or aborted jobs, jobs "
              "that never started, a crash of the CI's tools), and nothing else points at this PR: rerun them "
              "before merging",
@@ -53,6 +55,7 @@ NOT_READY_LABELS = {NO_MERGE_LABEL, "needs reporter action"}
 # Where the fix goes (`where_kind`, see triage/where.py) for failures that
 # do not come from the PR: the CI's setup (or its opam), nothing to fix (a
 # bound the PR adds on purpose). Not "rerun": CI did not test those jobs.
+# Never for an LLM answer (see ci_side).
 CI_SIDE = {"ci", "none"}
 # Rules whose failures also happen on master (opam-health-check).
 PREEXISTING_RULES = {"health-check-preexisting"}
@@ -118,6 +121,13 @@ def ci_running(pr):
     return pr.get("ci_state") == "PENDING" and pr.get("ci_unfinished") != 0
 
 
+def ci_side(r, kinds=CI_SIDE):
+    """Whether the fix of `r` goes on the CI's side (`kinds`). An LLM answer
+    never counts: the model blames the CI too easily, and answers stored
+    before apply_llm stopped saying "the CI environment" still say it."""
+    return where_kind(r) in kinds and r.get("rule") != "llm"
+
+
 def not_this_pr(r):
     """Whether a failure is not the PR's: it happens without the PR (pre-existing,
     or also failing in other open PRs), comes from the CI, or is on an
@@ -129,7 +139,7 @@ def not_this_pr(r):
     # `depends` that some version satisfies), not from a result stored before.
     unchecked = r.get("rule") == "bounded-out" and "where_kind" not in r
     return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or shared
-                or r.get("experimental") or (where_kind(r) in CI_SIDE and not unchecked)
+                or r.get("experimental") or (ci_side(r) and not unchecked)
                 or r.get("rule") in PREEXISTING_RULES)
 
 
@@ -151,10 +161,11 @@ def seems_ready(pr):
 def verdict(pr):
     """The one verdict of a failing PR (a key of VERDICTS), the first that
     applies: not this PR's fault (`seems_ready`), a change to this PR is
-    suggested, another package must be fixed, every failure comes from the
-    CI's setup (CI only), jobs to rerun and nothing else of this PR (needs a
-    rerun), or anything else (needs a look): failures of this PR without a
-    suggestion, of unknown cause, or not explained at all."""
+    suggested, another package must be fixed, no failure is this PR's but
+    the PR is a draft, labelled or its CI still runs (not this PR's, on
+    hold), jobs to rerun and nothing else of this PR (needs a rerun), or
+    anything else (needs a look): failures of this PR without a suggestion,
+    of unknown cause, or not explained at all."""
     if pr.get("pending") or pr.get("result") is None:
         return "error"
     if seems_ready(pr):
@@ -167,10 +178,11 @@ def verdict(pr):
         return "blocked"
     if not sugg or pr["result"].get("unanalysed"):
         return "other"
-    if all(where_kind(r) == "ci" for r in sugg):
+    # Not ready only because of the PR's state (a draft, a label, CI running).
+    if all(not_this_pr(r) for r in sugg):
         return "ci"
     reruns = [r for r in sugg if where_kind(r) == "rerun" and not not_this_pr(r)]
-    if reruns and all(where_kind(r) in ("ci", "rerun") or not_this_pr(r) for r in sugg):
+    if reruns and all(ci_side(r, {"ci", "rerun"}) or not_this_pr(r) for r in sugg):
         return "rerun"
     return "other"
 

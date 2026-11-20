@@ -1885,11 +1885,11 @@ class PageTest(unittest.TestCase):
                                                         "rule": "uninstallable"})])), "other")
         self.assertEqual(v(self.pr([], pending=True)), "error")
         self.assertEqual(v(self.pr([], result=None)), "error")
-        # A draft is never ready: then its CI-only failures say so.
+        # A draft is never ready: then "not this PR's, on hold".
         self.assertEqual(v(self.pr([self.day10], draft=True)), "ci")
 
     def test_ci_only_is_an_allow_list(self):
-        # "CI only" needs every failure to come from the CI; anything else
+        # "Not this PR's, on hold" (key "ci") needs every failure to be not the PR's; anything else
         # not this PR's change nor another package's needs a look.
         v = self.r.verdict
         draft = {"draft": True}           # never ready: the verdicts below are not "ready"
@@ -1918,6 +1918,37 @@ class PageTest(unittest.TestCase):
         unanalysed = self.pr([self.day10], **draft)
         unanalysed["result"]["unanalysed"] = 2
         self.assertEqual(v(unanalysed), "other")
+
+    def test_on_hold(self):
+        # No failure is the PR's, but it is a draft, labelled, or its CI runs: "not this PR's, on
+        # hold", whatever makes the failures not the PR's (it was "needs a look" unless all came from the CI).
+        v = self.r.verdict
+        pre = dict(self.revdep, preexisting="on master")
+        hc = {"class": "elsewhere", "rule": "health-check-preexisting", "fix_in": "y.1 (other package)",
+              "where_kind": "other-package", "failing": "y.1", "variant": "v"}
+        for kw in ({"draft": True}, {"labels": ["do not merge"]}, {"ci_unfinished": 3}):
+            self.assertEqual(v(self.pr([pre], **kw)), "ci", kw)
+            exp = {"class": "explanation", "rule": "unrecognised", "fix_in": "unknown", "variant": "v",
+                   "experimental": True}
+            self.assertEqual(v(self.pr([hc, exp], **kw)), "ci", kw)
+            self.assertEqual(v(self.pr([self.day10, pre], **kw)), "ci", kw)
+        self.assertIn("No failure is this PR's fault", self.r.VERDICT_HELP["ci"])
+        self.assertEqual(self.r.VERDICT_LABEL["ci"], "Not this PR's, on hold")
+
+    def test_llm_never_ci_side(self):
+        # An old stored LLM answer saying "the CI environment" (its where_kind is ci): not a reason
+        # for "not this PR's fault", nor for "on hold" or "needs a rerun".
+        llm_ci = {"class": "elsewhere", "rule": "llm", "failing": "x.1", "variant": "v",
+                  "fix_in": "the CI environment"}
+        self.assertEqual(self.r.where_kind(llm_ci), "ci")
+        self.assertFalse(self.r.not_this_pr(llm_ci))
+        self.assertFalse(self.r.seems_ready(self.pr([self.day10, llm_ci])))
+        self.assertEqual(self.r.verdict(self.pr([self.day10, llm_ci])), "other")
+        self.assertEqual(self.r.verdict(self.pr([self.day10, llm_ci], draft=True)), "other")
+        rerun = {"class": "elsewhere", "rule": "rerun", "fix_in": "CI (rerun)", "variant": "7 jobs"}
+        self.assertEqual(self.r.verdict(self.pr([rerun, llm_ci])), "other")
+        # Still shared with other PRs, pre-existing or experimental: those do not depend on the model.
+        self.assertTrue(self.r.not_this_pr(dict(llm_ci, experimental=True)))
 
     def test_needs_a_rerun(self):
         # Jobs that failed because of the CI were not tested: such a PR is not ready, even when nothing
