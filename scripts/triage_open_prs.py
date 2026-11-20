@@ -34,7 +34,8 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "opam_repo_ci_triage.py")
 sys.path.insert(0, ROOT)
-from opam_repo_ci_triage import BASE, USER_AGENT, github_token, split_pkg, where_kind  # noqa: E402
+from opam_repo_ci_triage import (  # noqa: E402
+    BASE, GIT_DOWN_MAX_AGE, LLM_BREAKER, USER_AGENT, github_token, split_pkg, tied_to_pr, where_kind)
 
 OWNER, NAME = "ocaml", "opam-repository"
 CONTEXT = "opam-ci"
@@ -364,27 +365,32 @@ def mark_shared_failures(prs):
     PRs must fail on each of its reverse dependencies: three revdeps each
     failing in one other PR do not make a failure shared by three PRs.
 
-    Another PR counts only when its failing job tests another package (two
-    releases of lwt break the same reverse dependencies: they do not vouch for
-    each other) and fails the same way (its category, when known), and
-    SHARED_MIN of those PRs must test different packages (the packages of
-    their matching jobs, pairwise disjoint): two releases of lwt count as one
-    piece of evidence for a third PR, and so do three PRs that each release
-    dune, dune-configurator and dune-site. `also_failing_in` lists every
-    PR that counts, not only those picked as independent. Never for a
-    failure the analysis puts on this PR (health-check-new, where_kind "pr"):
-    the evidence says it is this PR's."""
-    where = collections.defaultdict(dict)       # revdep -> PR -> [(tested package name, category)]
+    Another PR counts only when its failing job is on the same platform (the
+    job's name before the tested package: builder, distribution,
+    architecture, OCaml version) as the job of this PR, tests another
+    package (two releases of lwt break the same reverse dependencies: they
+    do not vouch for each other) and fails the same way (its category, when
+    known), and SHARED_MIN of those PRs must test different packages (the
+    packages of their matching jobs, pairwise disjoint): two releases of lwt
+    count as one piece of evidence for a third PR, and so do three PRs that
+    each release dune, dune-configurator and dune-site. `also_failing_in`
+    lists every PR that counts, not only those picked as independent. Never
+    for a failure the analysis ties to this PR (tied_to_pr: where_kind "pr",
+    a rule saying the PR's change causes it, a change suggested for it): the
+    evidence says it is this PR's; nor for jobs to rerun (cancelled or
+    network errors, which `summary` does not list as failing revdeps)."""
+    where = collections.defaultdict(dict)       # revdep -> PR -> [(platform, tested package name, category)]
     for e in prs.values():
         for rd, js in ((e.get("jobs") or {}).get("failing_revdeps") or {}).items():
-            where[rd][int(e["number"])] = [(split_pkg(j.get("target") or "")[0], j.get("category"))
+            where[rd][int(e["number"])] = [(job_platform(j.get("variant")), split_pkg(j.get("target") or "")[0],
+                                            j.get("category"))
                                            for j in js or [] if isinstance(j, dict)]
     for e in prs.values():
         n = int(e["number"])
         mine = (e.get("jobs") or {}).get("failing_revdeps") or {}
         for r in (e.get("result") or {}).get("suggestions", []):
             r.pop("also_failing_in", None)
-            if r.get("rule") == "health-check-new" or where_kind(r) == "pr":
+            if tied_to_pr(r) or where_kind(r) == "rerun":
                 continue
             others, tested = None, {}          # tested: PR -> the packages its failing jobs test
             for v in (r.get("jobs") or [r.get("variant") or ""]):
@@ -392,12 +398,13 @@ def mark_shared_failures(prs):
                 if not m:
                     others = set()
                     break
-                name, rd = split_pkg(m.group(1))[0], m.group(2)
+                plat, name, rd = v[:m.start(1)], split_pkg(m.group(1))[0], m.group(2)
                 cats = {j.get("category") for j in mine.get(rd) or [] if isinstance(j, dict)
                         and j.get("variant") == v} - {None}
                 same = {}
                 for p, js in where[rd].items():
-                    names = {t for t, c in js if p != n and t and t != name and (not cats or c in cats)}
+                    names = {t for pl, t, c in js
+                             if p != n and pl == plat and t and t != name and (not cats or c in cats)}
                     if names:
                         same[p] = names
                 others = set(same) if others is None else others & set(same)
@@ -405,6 +412,14 @@ def mark_shared_failures(prs):
                     tested.setdefault(p, set()).update(names)
             if others and len(independent(others, tested)) >= SHARED_MIN:
                 r["also_failing_in"] = sorted(others)
+
+
+def job_platform(variant):
+    """The platform of a reverse-dependency job: its name before the tested
+    package ("compilers,4.14," for "compilers,4.14,foo.1,revdeps,bar.2"),
+    or None."""
+    m = REVDEP_JOB.search(variant or "")
+    return variant[:m.start(1)] if m else None
 
 
 def independent(prs, tested):

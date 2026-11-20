@@ -270,7 +270,10 @@ def rule_error(job, e, jobs):
             "_key": failure_key(job), "jobs": jobs, "keep": True}
 
 
-VERSION_TERM = re.compile(r'(<=|>=|!=|<|>|=)\s*"([^"]+)"')
+# A constraint on the package's own version (`>= "1.0"`), not a comparison
+# of a variable (`os = "linux"`, `ocaml:version < "5.0"`): the operator
+# comes first in the formula or after `{`, `&`, `|` or `(`.
+VERSION_TERM = re.compile(r'(?:^|(?<=[{&|(]))\s*(<=|>=|!=|<|>|=)\s*"([^"]+)"')
 
 
 def unsatisfiable(terms):

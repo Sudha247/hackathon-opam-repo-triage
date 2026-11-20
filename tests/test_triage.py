@@ -1680,6 +1680,19 @@ class BoundedOutTest(unittest.TestCase):
         self.assertNotEqual(r["fix_in"], "this PR")
         self.assertIn('< "4.06"', r["note"])
 
+    def test_bound_with_alternatives_or_variables(self):
+        # A bound with alternatives is not checked: not counted as intended. A comparison of a
+        # variable (`os = "linux"`) is not a version bound: no "lower bound above an upper bound".
+        [r] = self.run_rule({"kinetic-client.0.0.9": {"ocaml": '"ocaml" {< "4.06" | = "4.14.2"}'}})
+        self.assertEqual((r["rule"], r["where_kind"], r["confidence"]), ("uninstallable", "pr", "medium"))
+        self.assertIn("has alternatives", r["note"])
+        [r] = self.run_rule({"kinetic-client.0.0.9": {"ocaml": '"ocaml" {os = "linux" & < "4.06"}'}})
+        self.assertEqual(r["rule"], "bounded-out")
+        terms = __import__("triage.suggest", fromlist=["x"]).VERSION_TERM.findall
+        self.assertEqual(terms('"x" {os = "linux" & >= "1.0" & ocaml:version < "5.0" & os-family != "bsd"}'),
+                         [(">=", "1.0")])
+        self.assertEqual(terms('>= "1.0" & < "2.0"'), [(">=", "1.0"), ("<", "2.0")])
+
     def test_not_intended(self):
         # Without a bound added by the PR, it is a problem, and the alternatives
         # of a disjunction are not read as one package's constraint.
@@ -1715,7 +1728,13 @@ class PageTest(unittest.TestCase):
         # A revdep failure is the PR's, unless it happens without the PR.
         self.assertFalse(self.r.seems_ready(self.pr([self.day10, self.revdep])))
         self.assertTrue(self.r.seems_ready(self.pr([self.day10, dict(self.revdep, preexisting="on master")])))
-        self.assertTrue(self.r.seems_ready(self.pr([dict(self.revdep, also_failing_in=[2, 3])])))
+        self.assertTrue(self.r.seems_ready(self.pr([dict(self.revdep, rule="missing-library",
+                                                          also_failing_in=[2, 3])])))
+        # ... but not when a rule ties it to the PR's package (its API changed), nor for jobs to rerun.
+        self.assertFalse(self.r.seems_ready(self.pr([dict(self.revdep, also_failing_in=[2, 3])])))
+        rerun = {"class": "elsewhere", "rule": "rerun", "fix_in": "CI (rerun)", "where_kind": "rerun",
+                 "variant": "1 job"}
+        self.assertFalse(self.r.seems_ready(self.pr([dict(rerun, also_failing_in=[2, 3, 4])])))
         # ... but not against evidence that it is this PR's (stored before mark_shared_failures skipped them).
         new = {"class": "fix", "rule": "health-check-new", "fix_in": "this PR", "failing": "y.1", "variant": "v"}
         self.assertFalse(self.r.seems_ready(self.pr([dict(new, also_failing_in=[2, 3, 4])])))
@@ -1814,7 +1833,7 @@ class PageTest(unittest.TestCase):
                 {"variant": f"compilers,5.3,{t},revdeps,X.1", "category": c, "target": t, "url": "u"}
                 for t, c in targets]}}, "result": {"suggestions": []}}
         dune = lambda n, v: multi(n, [(f"{p}.{v}", "build") for p in ("dune", "dune-configurator", "dune-site")])
-        mine = {"rule": "library-api", "where_kind": "other-package", "where_pkg": "X.1", "class": "elsewhere",
+        mine = {"rule": "missing-library", "where_kind": "other-package", "where_pkg": "X.1", "class": "elsewhere",
                 "variant": "compilers,5.3,foo.1,revdeps,X.1", "jobs": ["compilers,5.3,foo.1,revdeps,X.1"]}
         prs = {"1": dune(1, "3.1"), "2": dune(2, "3.2"), "3": dune(3, "3.3"),
                "4": dict(multi(4, [("foo.1", "build")]), result={"suggestions": [dict(mine)]})}
@@ -1840,6 +1859,51 @@ class PageTest(unittest.TestCase):
                                  suggestion={"rule": "health-check-new", "fix_in": "this PR"}))
         self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
                                  suggestion={"rule": "library-api", "fix_in": "this PR", "where_kind": "pr"}))
+        # Nor when a rule ties the failure to the PR's package (its API changed, a bound on it), or
+        # suggests a change for it, even with the fix in the reverse dependency.
+        for sugg in ({"rule": "library-api"}, {"rule": "previous-release-bound"}, {"rule": "lower-bound"},
+                     {"rule": "missing-library", "new": '"x" {< "1"}'}):
+            self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
+                                     suggestion=dict(sugg, fix_in="d.1 (other package)",
+                                                     where_kind="other-package", where_pkg="d.1")), sugg)
+        self.assertEqual(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
+                                suggestion={"rule": "missing-library", "fix_in": "d.1 (other package)",
+                                            "where_kind": "other-package", "where_pkg": "d.1"}), [2, 3, 4])
+        # Nor on jobs to rerun: cancelled jobs are not failing revdeps, so nothing says how they fail.
+        self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
+                                 suggestion={"rule": "rerun", "fix_in": "CI (rerun)", "where_kind": "rerun"}))
+        prs = {"1": {"number": 1, "jobs": {"failing_revdeps": {}}, "result": {"suggestions": [
+            {"rule": "rerun", "where_kind": "rerun", "variant": "1 job", "jobs": [rd.format("d.1")]}]}}}
+        for k, t in ((2, "y.1"), (3, "z.1"), (4, "w.1")):
+            prs[str(k)] = entry(k, ["d.1"], target=t)
+        T.mark_shared_failures(prs)
+        self.assertIsNone(prs["1"]["result"]["suggestions"][0].get("also_failing_in"))
+
+    def test_shared_failures_same_platform(self):
+        # The other PRs must fail on the same platform as each job of the suggestion: a reverse
+        # dependency failing elsewhere on OCaml 5.5 only (as on master) says nothing about its
+        # failure on OCaml 4.14 here.
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+
+        def job(plat, target, rd="bar.1"):
+            return {"variant": f"compilers,{plat},{target},revdeps,{rd}", "category": "build", "target": target}
+        mine = [job("4.14", "foo.2"), job("5.5", "foo.2")]
+        sugg = {"rule": "missing-library", "where_kind": "other-package", "where_pkg": "bar.1",
+                "class": "elsewhere", "variant": "2 jobs", "jobs": [j["variant"] for j in mine]}
+
+        def run(plats):
+            prs = {"1": {"number": 1, "jobs": {"failing_revdeps": {"bar.1": mine}},
+                         "result": {"suggestions": [dict(sugg)]}}}
+            for n, t in ((2, "lwt.6"), (3, "dune.3"), (4, "cmdliner.2")):
+                prs[str(n)] = {"number": n, "jobs": {"failing_revdeps": {"bar.1": [job(p, t) for p in plats]}},
+                               "result": {"suggestions": []}}
+            T.mark_shared_failures(prs)
+            return prs["1"]["result"]["suggestions"][0].get("also_failing_in")
+        self.assertIsNone(run(["5.5"]))
+        self.assertIsNone(run(["4.14-flambda", "5.5"]))
+        self.assertEqual(run(["4.14", "5.5"]), [2, 3, 4])
+        self.assertEqual(T.job_platform("compilers,4.14,foo.2,revdeps,bar.1"), "compilers,4.14,")
 
     def test_stale_labels(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))

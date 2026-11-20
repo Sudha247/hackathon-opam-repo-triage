@@ -22,7 +22,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from opam_repo_ci_triage import (  # noqa: E402
-    BASE, RULE_TITLES, compared_text, describe_job, fix_label, render_comment, where_kind, where_pkg, where_text)
+    BASE, RULE_TITLES, compared_text, describe_job, fix_label, render_comment, tied_to_pr, where_kind, where_pkg,
+    where_text)
 from opam_repo_ci_triage import title_of as rule_title  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
 # One verdict per PR: the first that applies, in this order (see `verdict`).
@@ -133,8 +134,10 @@ def not_this_pr(r):
     or also failing in other open PRs), comes from the CI, or is on an
     experimental platform, whose failures do not block a PR. Failing in other
     PRs does not outweigh evidence that the failure is this PR's (it builds
-    on master, say: see mark_shared_failures)."""
-    shared = r.get("also_failing_in") and where_kind(r) != "pr" and r.get("rule") != "health-check-new"
+    on master, say: see mark_shared_failures), nor counts for jobs to rerun
+    (CI did not test them)."""
+    shared = (r.get("also_failing_in") and where_kind(r) not in ("pr", "rerun")
+              and not tied_to_pr(r))
     # A bound the PR adds on purpose: only as checked since where_kind exists (a lowered upper bound of
     # `depends` that some version satisfies), not from a result stored before.
     unchecked = r.get("rule") == "bounded-out" and "where_kind" not in r

@@ -60,6 +60,21 @@ def where_kind(r):
     return k if k in WHERE_KINDS else _legacy(r)[0]
 
 
+# Rules that tie a failure to the package the PR changes: its API changed
+# (library-api), a bound on it is needed (previous-release-bound,
+# lower-bound), or opam-health-check sees the failing package build on
+# master (health-check-new).
+PR_EVIDENCE_RULES = {"library-api", "previous-release-bound", "lower-bound", "health-check-new"}
+
+
+def tied_to_pr(r):
+    """Whether the analysis ties failure `r` to this PR: its fix goes in the
+    PR (where_kind "pr"), a rule of PR_EVIDENCE_RULES says the PR's change
+    causes it, or it suggests a change (`new`) made for this failure.
+    Failing in other open PRs too does not outweigh that evidence."""
+    return where_kind(r) == "pr" or r.get("rule") in PR_EVIDENCE_RULES or bool(r.get("new"))
+
+
 def where_pkg(r):
     """The other package where the fix of `r` goes, or None."""
     if r.get("where_kind") in WHERE_KINDS:

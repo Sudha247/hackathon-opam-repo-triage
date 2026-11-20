@@ -932,12 +932,16 @@ def skipped_rules(data, src, cache_dir, pr_packages, bounds=None):
         # A bound that no version satisfies (`{>= "3.0" & < "2.0"}`), or no published version (a typo
         # such as `{< "0.3"}` for dune), is a mistake, not the point of the change. The versions come
         # from ocaml.org (and this PR); when they are unknown (no answer, counted in NET["mcp-errors"]:
-        # the analysis is retried), nothing says the bound is intended. A disjunction is not checked.
+        # the analysis is retried), nothing says the bound is intended. A disjunction is not checked,
+        # so nothing says it is intended either.
         from .suggest import VERSION_TERM, allows, unsatisfiable       # (suggest imports this module)
-        empty, unpublished, unchecked = [], [], []
+        empty, unpublished, unchecked, alternatives = [], [], [], []
         for d in sorted(through) if bounded else []:
             terms = VERSION_TERM.findall(added[d])
-            if "|" in added[d] or not terms:
+            if "|" in added[d]:
+                alternatives.append(d)
+                continue
+            if not terms:
                 continue
             if unsatisfiable(terms):
                 empty.append(d)
@@ -958,6 +962,11 @@ def skipped_rules(data, src, cache_dir, pr_packages, bounds=None):
             r.update(confidence="high",
                      note=f"This PR adds {lines} to {t}, and no published version of {', '.join(unpublished)} "
                           f"satisfies {'it' if len(unpublished) == 1 else 'them'}: check the bound for a typo.")
+        elif alternatives:
+            r.update(confidence="medium",
+                     note=f"This PR adds {lines} to {t}, which no tested platform satisfies, so CI cannot build "
+                          f"it. The bound on {', '.join(alternatives)} has alternatives (`|`), which are not "
+                          f"checked: check that some version satisfies it and that it is intended.")
         elif unchecked:
             r.update(confidence="medium",
                      note=f"This PR adds {lines} to {t}, which no tested platform satisfies, so CI cannot build "
