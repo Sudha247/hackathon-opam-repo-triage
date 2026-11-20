@@ -222,8 +222,10 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
                       + f": {reason}",
              "old": None, "new": new, "confidence": "medium",
              "note": (f"Nothing to change in {pkg}." + (f" {advice}" if advice else "") if culprit else
-                      "This change only hides the failure on these platforms. Prefer an upstream fix or the "
-                      "missing depext."),
+                      ("This change only skips the tests on these platforms. Prefer fixing the failing tests."
+                       if tests_only and cond else
+                       "This change only hides the failure on these platforms. Prefer an upstream fix or the "
+                       "missing depext.")),
              "_keys": [failure_key(j) for j in fails], "jobs": [j["variant"] for j in fails]}
         if advice:
             r["advice"] = advice
