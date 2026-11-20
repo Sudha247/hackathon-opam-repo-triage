@@ -8,16 +8,19 @@ changed before the merge:
   2. diff the opam files between the initial and the merged version (the fix
      the author actually made),
   3. count a suggestion as a hit when the author changed the same dependency
-     or field of the same package.
+     or field of the same package. A new upstream archive (checksum,
+     x-commit-hash) is counted apart: it is not a change the tool suggests.
 
 Usage:
   python3 evaluate_closed_prs.py [--since 2026-08-01] [--limit 150] [--json out.json]
 
-Needs a logged-in `gh` (one GraphQL query per 50 PRs, one compare call per
-candidate). opam-repo-ci deletes old runs, so only recent PRs can be used.
+Needs a logged-in `gh` (one GraphQL query per 50 PRs; for each candidate,
+its list of files and one GraphQL query per 50 opam files). opam-repo-ci
+deletes old runs, so only recent PRs can be used.
 """
 
 import argparse
+import difflib
 import json
 import re
 import subprocess
@@ -95,22 +98,53 @@ def line_tokens(line):
     return toks
 
 
-def actual_fix(initial, final):
-    """{package.version: set(tokens)} changed in opam files between the two commits."""
-    d = gh(["api", f"repos/{REPO}/compare/{initial}...{final}"])
+def pr_files(number):
+    """The files of a PR's merged version (relative to its own base, so not
+    what master gained meanwhile)."""
+    out = subprocess.run(["gh", "api", "--paginate", f"repos/{REPO}/pulls/{number}/files?per_page=100",
+                          "--jq", ".[].filename"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip()[:300])
+    return out.stdout.split()
+
+
+def blobs(commit, paths):
+    """{path: text} of the files that exist at `commit` (GraphQL, 50 paths per query)."""
+    out = {}
+    for i in range(0, len(paths), 50):
+        chunk = paths[i:i + 50]
+        fields = " ".join(f"b{k}: object(expression: {json.dumps(commit + ':' + p)}) {{ ... on Blob {{ text }} }}"
+                          for k, p in enumerate(chunk))
+        q = f'query {{ repository(owner: "{REPO.split("/")[0]}", name: "{REPO.split("/")[1]}") {{ {fields} }} }}'
+        repo = gh(["api", "graphql", "-f", f"query={q}"])["data"]["repository"]
+        out.update({p: repo[f"b{k}"]["text"] for k, p in enumerate(chunk)
+                    if repo.get(f"b{k}") and repo[f"b{k}"].get("text") is not None})
+    return out
+
+
+def actual_fix(number, initial, final):
+    """{package.version: set(tokens)} changed in the PR's opam files between
+    its initial and merged versions. Each file is compared as a whole: a
+    compare of the two commits would go through their merge base, which for
+    a PR rebased before its force-push shows the PR's files as added and
+    master's changes as the author's."""
+    paths = [f for f in pr_files(number) if re.match(r"packages/[^/]+/[^/]+/opam$", f)]
+    old, new = blobs(initial, paths), blobs(final, paths)
     changed = {}
-    for f in d.get("files", []):
-        m = re.match(r"packages/[^/]+/([^/]+)/opam$", f["filename"])
-        if not m:
-            continue
-        if f["status"] != "modified":
+    for path in paths:
+        if path not in old or path not in new:
             continue      # packages added/removed between the two versions are not fixes
         toks = set()
-        for line in (f.get("patch") or "").splitlines():
+        for line in difflib.unified_diff(old[path].splitlines(), new[path].splitlines(), lineterm="", n=0):
             if line[:1] in "+-" and not line.startswith(("+++", "---")):
                 toks |= line_tokens(line[1:])
-        changed[m.group(1)] = toks
+        changed[path.split("/")[2]] = toks
     return changed
+
+
+# A new upstream archive (a fix made upstream, then released again): not a
+# change of the opam file that the tool could suggest, so not in the recall.
+NEW_ARCHIVE = {"field:checksum", "field:x-commit-hash"}
 
 
 def failing_packages(sha):
@@ -176,9 +210,9 @@ def main():
     print(f"{len(prs)} merged PRs since {args.since}; {len(cands)} whose initial version failed opam-ci "
           f"and was changed before the merge", file=sys.stderr)
 
-    rows, totals = [], {"scored": 0, "hit": 0, "fix_tokens": 0, "fix_covered": 0}
+    rows, totals = [], {"scored": 0, "hit": 0, "fix_tokens": 0, "fix_covered": 0, "new_archive": 0}
     for pr, init in cands:
-        fix = actual_fix(init, pr["headRefOid"])
+        fix = actual_fix(pr["number"], init, pr["headRefOid"])
         fix = {k: v for k, v in fix.items() if v}
         if not fix:
             continue        # the author changed nothing in opam files (e.g. CI rerun only)
@@ -202,7 +236,9 @@ def main():
         # initial run (rebases, version bumps and metadata edits elsewhere are
         # not fixes of a CI failure).
         failed = failing_packages(init)
-        fix_failed = {p: ts for p, ts in fix.items() if p in failed}
+        fix_failed = {p: ts - NEW_ARCHIVE for p, ts in fix.items() if p in failed}
+        totals["new_archive"] += sum(1 for p, ts in fix.items() if p in failed and ts & NEW_ARCHIVE)
+        fix_failed = {p: ts for p, ts in fix_failed.items() if ts}
         covered = {(p, t) for p, ts in fix_failed.items() for t in ts
                    if any(x["package"] == p and t in x["tokens"] for x in scored)}
         n_fix = sum(len(v) for v in fix_failed.values())
@@ -233,6 +269,7 @@ def main():
     print(f"author's changes in packages that failed (dependency/field per package): {t['fix_tokens']}, "
           f"anticipated: {t['fix_covered']}"
           + (f" ({100 * t['fix_covered'] // t['fix_tokens']}%)" if t["fix_tokens"] else ""))
+    print(f"packages that failed and got a new upstream archive (not counted above): {t['new_archive']}")
     if args.json:
         with open(args.json, "w") as f:
             json.dump({"totals": t, "prs": rows}, f, indent=2)
