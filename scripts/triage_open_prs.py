@@ -17,12 +17,14 @@ import argparse
 import collections
 import datetime
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -35,6 +37,9 @@ from opam_repo_ci_triage import BASE, USER_AGENT, github_token  # noqa: E402
 OWNER, NAME = "ocaml", "opam-repository"
 CONTEXT = "opam-ci"
 MAX_ATTEMPTS = 3            # retries of a failed analysis of the same sha
+# Attempts expire a day after the last one: a timeout or a server that failed
+# (ocaml.org, opam.ci.ocaml.org) may be gone by then.
+ATTEMPTS_EXPIRE = 24 * 3600
 # Failed-job categories (from `summary`) that are not about the package itself.
 NOISE = {"passed", "network", "cancelled", "not-available", "ignored"}
 
@@ -79,10 +84,17 @@ def graphql(query, variables, token):
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 d = json.loads(r.read())
+            data = d.get("data")
             if d.get("errors"):
-                raise RuntimeError(f"GraphQL errors: {d['errors']}")
-            return d["data"]
-        except (urllib.error.URLError, TimeoutError) as e:
+                # Partial errors (a node GitHub could not resolve): the data
+                # is used when every top-level field is there.
+                if not data or any(v is None for v in data.values()):
+                    raise RuntimeError(f"GraphQL errors: {str(d['errors'])[:500]}")
+                print(f"GitHub GraphQL errors, using the data returned: {str(d['errors'])[:300]}", file=sys.stderr)
+            if not isinstance(data, dict):
+                raise RuntimeError("GraphQL answer without data")
+            return data
+        except (OSError, http.client.HTTPException, ValueError, RuntimeError) as e:
             if attempt == 2:
                 raise
             print(f"GitHub API error ({e}), retrying", file=sys.stderr)
@@ -130,8 +142,10 @@ def list_open_prs(token):
         page = graphql(QUERY, {"owner": OWNER, "name": NAME, "cursor": cursor}, token)
         conn = page["repository"]["pullRequests"]
         for n in conn["nodes"]:
+            if not n:           # left out of a partial answer
+                continue
             ci = None
-            commits = n["commits"]["nodes"]
+            commits = (n.get("commits") or {}).get("nodes") or []
             head = commits[0]["commit"] if commits else {}
             if head.get("oid") == n["headRefOid"]:
                 for c in (head.get("status") or {}).get("contexts", []):
@@ -148,12 +162,27 @@ def list_open_prs(token):
         cursor = conn["pageInfo"]["endCursor"]
 
 
-def reuse(prev, p, version, llm):
+def attempts_used(prev, now_=None):
+    """The analyses of `prev`'s commit made so far that count toward
+    MAX_ATTEMPTS: none once ATTEMPTS_EXPIRE has passed since the last one."""
+    if not prev:
+        return 0
+    try:
+        last = datetime.datetime.fromisoformat(prev["analysed_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        last = None
+    if last is not None and (now_ or time.time()) - last >= ATTEMPTS_EXPIRE:
+        return 0
+    return prev.get("attempts", 0)
+
+
+def reuse(prev, p, version, llm, now_=None):
     """Whether the previous analysis of PR `p` can be kept: (same, same_commit,
-    mcp_retry). `same`: it describes the current state and need not be redone;
+    mcp_retry). `same`: it describes the current state and need not be redone
+    (a failed one is redone while attempts_used() < MAX_ATTEMPTS);
     `same_commit`: it has a result for the same commit, shown until it is
-    redone; `mcp_retry`: it is redone because ocaml.org's MCP server failed
-    during it."""
+    redone; `mcp_retry`: it is redone because ocaml.org's MCP server (or
+    another server) failed during it."""
     # A PR whose CI is running is analysed again on every run, until its CI finishes.
     same = (prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
             and prev.get("ci_state") == p["ci_state"] and p["ci_state"] != "PENDING")
@@ -163,23 +192,47 @@ def reuse(prev, p, version, llm):
     if same and llm and not prev.get("llm"):
         same = False
     # An analysis made while ocaml.org's MCP server failed lacks versions,
-    # docs or health-check results: done again, a few times at most.
-    mcp_retry = bool(same and prev.get("mcp_errors") and prev.get("attempts", 0) < MAX_ATTEMPTS)
+    # docs or health-check results: done again, a few times a day at most.
+    mcp_retry = bool(same and (prev.get("mcp_errors") or prev.get("net_errors"))
+                     and attempts_used(prev, now_) < MAX_ATTEMPTS)
     if mcp_retry:
         same = False
     return same, same_commit, mcp_retry
 
 
-def run_tool(args, timeout):
-    """Run the triage tool; (parsed JSON or None, error message or None, request counts)."""
+def keep_failed(prev, now_=None):
+    """Whether a failed analysis (no result) of the same commit is kept
+    rather than tried again."""
+    return attempts_used(prev, now_) >= MAX_ATTEMPTS
+
+
+def read_counts(path):
+    """The request counts the tool wrote to `path` (OPAM_CI_NET_FILE), or {}."""
     try:
-        p = subprocess.run([sys.executable, TOOL] + args, cwd=ROOT, capture_output=True, text=True,
-                           timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return None, f"timeout after {timeout}s", {}
-    net = {}
+        with open(path) as f:
+            d = json.load(f)
+        return {k: v for k, v in d.items() if isinstance(v, int)} if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def run_tool(args, timeout, tool=None):
+    """Run the triage tool; (parsed JSON or None, error message or None, request
+    counts). The counts come from a file the tool updates as it goes, so they
+    are known after a timeout too (with "timeout": 1 added)."""
+    fd, counts = tempfile.mkstemp(prefix="opam-ci-net-", suffix=".json")
+    os.close(fd)
+    try:
+        try:
+            p = subprocess.run([sys.executable, tool or TOOL] + args, cwd=ROOT, capture_output=True, text=True,
+                               timeout=timeout, env={**os.environ, "OPAM_CI_NET_FILE": counts})
+        except subprocess.TimeoutExpired:
+            return None, f"timeout after {timeout}s", {**read_counts(counts), "timeout": 1}
+        net = read_counts(counts)
+    finally:
+        os.remove(counts)
     m = re.search(r"network requests: (.*)", p.stderr)
-    if m:
+    if m and not net:
         net = {k: int(v) for k, v in re.findall(r"([\w-]+)=(\d+)", m.group(1))}
     if p.returncode != 0:
         lines = [x for x in p.stderr.strip().splitlines() if x.strip()]
@@ -321,7 +374,7 @@ def main():
                                          "stale_labels")})
         entry["ci_url"] = p["ci_url"] or BASE + p["sha"]
         same, same_commit, mcp_retry = reuse(prev, p, version, llm)
-        if same and (prev.get("result") is not None or prev.get("attempts", 0) >= MAX_ATTEMPTS):
+        if same and (prev.get("result") is not None or keep_failed(prev)):
             stats["unchanged"] += 1
             new_state[key] = entry
             continue
@@ -347,13 +400,15 @@ def main():
             if not failed:
                 stats["running, no failure yet"] += 1
                 continue
-        attempts = (prev.get("attempts", 0) if same or mcp_retry else 0) + 1
+        attempts = (attempts_used(prev) if same or mcp_retry else 0) + 1
         use_llm = llm_left > 0
         extra = ["--llm", "--llm-max", str(min(args.llm_max, llm_left))] if use_llm else []
         result, err, net = run_tool(["suggest", p["sha"], "--json", "--max", str(args.max),
                                      "--cache-dir", args.cache_dir] + extra, args.timeout)
         net_total.update(net)
         llm_left -= net.get("llm", 0)
+        if net.get("timeout") and use_llm:      # an LLM call may have been under way: count it
+            llm_left -= 1
         if summary is None:
             summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
         if prev and prev.get("sha") != p["sha"] and prev.get("result") is not None and result is not None:
@@ -364,6 +419,7 @@ def main():
                       "ci_unfinished": (result or {}).get("ci_unfinished", 0)})
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
                       "llm": use_llm, "mcp_errors": net.get("mcp-errors", 0),
+                      "net_errors": net.get("net-errors", 0) + net.get("timeout", 0),
                       "analysed_at": now(), "seconds": round(time.monotonic() - t0, 1),
                       "jobs": jobs_overview(summary) if summary else None})
         entry.pop("pending", None)

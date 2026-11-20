@@ -11,6 +11,7 @@ import html.parser
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ import urllib.request
 
 from .net import (  # noqa: F401
     NET,
+    NET_ERRORS,
     OFFLINE,
     REPO,
     USER_AGENT,
@@ -29,6 +31,7 @@ from .net import (  # noqa: F401
     git,
     offline_miss,
     repo_url,
+    write_atomic,
 )
 from .ci import (  # noqa: F401
     opam_vcmp,
@@ -40,7 +43,7 @@ def find_baseline_commit(target, cache_dir=".opam-ci-cache"):
     """For target 'lwt.5.10.2', return info about the PR that added the
     previous version on master, or None."""
     name, version = split_pkg(target)
-    versions = Sources(cache_dir).versions(name)
+    versions = Sources(cache_dir).versions(name) or []
     older = [v for v in versions if opam_vcmp(v, version) < 0]
     if not older:
         return None
@@ -61,6 +64,10 @@ def find_publication(name, version, cache_dir=".opam-ci-cache"):
     return {"pr": pr["number"] if pr else None, "sha": pr["head"]["sha"] if pr else first}
 
 
+# Failed ocaml.org MCP calls in this process (see Sources.MCP_MAX_FAILURES).
+MCP_FAILURES = {"n": 0}
+
+
 class Sources:
     """Cached, token-free access to opam-repository and upstream repositories."""
 
@@ -70,27 +77,48 @@ class Sources:
         self.cache_dir = cache_dir
         self.mem = {}
 
-    def raw(self, url):
+    def raw(self, url, max_age=None):
+        """The body of `url`, or None if it does not exist or could not be
+        fetched (a network error is counted in NET["net-errors"])."""
         if url in self.mem:
             return self.mem[url]
         try:
-            v = fetch(url, self.cache_dir)
-        except (urllib.error.HTTPError, RuntimeError):
+            v = fetch(url, self.cache_dir, max_age=max_age)
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                NET["net-errors"] = NET.get("net-errors", 0) + 1
+            v = None
+        except NET_ERRORS:
+            NET["net-errors"] = NET.get("net-errors", 0) + 1
+            v = None
+        except RuntimeError:            # offline cache miss, empty answer
             v = None
         self.mem[url] = v
         return v
 
     # ---- git plumbing (bare, shallow, blob-less mirrors under cache_dir/git)
 
+    # Touched on each use: the CI workflow deletes the mirrors not used for a month.
+    GIT_STAMP = "opam-ci-last-used"
+
     def _gitdir(self, url):
         d = os.path.join(self.cache_dir, "git", hashlib.sha256(url.encode()).hexdigest()[:16])
-        if not os.path.isdir(d):
+        if ("gitdir", d) in self.mem:
+            return d
+        # A mirror whose files were deleted (cache pruning) is made again.
+        valid = (os.path.isdir(d)
+                 and git(["rev-parse", "--git-dir"], git_dir=d, check=False).returncode == 0
+                 and git(["config", "--get", "remote.origin.url"], git_dir=d, check=False).stdout.strip() == url)
+        if not valid and not OFFLINE:
+            shutil.rmtree(d, ignore_errors=True)
             os.makedirs(d)
             git(["init", "-q", "--bare", d])
-            git(["remote", "add", "origin", url], cwd=d)
-            git(["config", "remote.origin.promisor", "true"], cwd=d)
-            git(["config", "remote.origin.partialclonefilter", "blob:none"], cwd=d)
-            git(["config", "extensions.partialClone", "origin"], cwd=d)
+            git(["remote", "add", "origin", url], git_dir=d)
+            git(["config", "remote.origin.promisor", "true"], git_dir=d)
+            git(["config", "remote.origin.partialclonefilter", "blob:none"], git_dir=d)
+            git(["config", "extensions.partialClone", "origin"], git_dir=d)
+        write_atomic(os.path.join(d, self.GIT_STAMP), "")
+        self.mem[("gitdir", d)] = True
         return d
 
     def _ensure(self, url, ref, is_tag):
@@ -100,9 +128,9 @@ class Sources:
             return self.mem[key]
         d = self._gitdir(url)
         rev = f"refs/tags/{ref}" if is_tag else ref
-        if git(["rev-parse", "--verify", "-q", rev + "^{tree}"], cwd=d, check=False).returncode != 0:
+        if git(["rev-parse", "--verify", "-q", rev + "^{tree}"], git_dir=d, check=False).returncode != 0:
             spec = f"+refs/tags/{ref}:refs/tags/{ref}" if is_tag else ref
-            r = git(["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", spec], cwd=d, check=False)
+            r = git(["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", spec], git_dir=d, check=False)
             if r.returncode != 0:
                 rev = None
         self.mem[key] = rev
@@ -113,14 +141,14 @@ class Sources:
         if key not in self.mem:
             disk = os.path.join(self.cache_dir, "tags-" + hashlib.sha256(url.encode()).hexdigest()[:16] + ".json")
             hit = cached_json(disk, max_age=86400)
-            if hit:
+            if hit and isinstance(hit["value"], list) and hit["value"]:
                 tags = hit["value"]
             else:
                 r = git(["ls-remote", "--tags", "--refs", url], check=False)
                 tags = [l.split("refs/tags/", 1)[1] for l in r.stdout.splitlines() if "refs/tags/" in l]
-                os.makedirs(self.cache_dir, exist_ok=True)
-                with open(disk, "w") as f:
-                    json.dump(tags, f)
+                # A failed listing (network error, offline) is not kept on disk.
+                if r.returncode == 0 and tags:
+                    write_atomic(disk, json.dumps(tags))
             self.mem[key] = tags
         return self.mem[key]
 
@@ -140,7 +168,7 @@ class Sources:
             rev = self._ensure(url, ref, is_tag)
             paths = []
             if rev:
-                r = git(["ls-tree", "-r", "--name-only", rev], cwd=self._gitdir(url), check=False)
+                r = git(["ls-tree", "-r", "--name-only", rev], git_dir=self._gitdir(url), check=False)
                 paths = r.stdout.splitlines()
             self.mem[key] = paths
         return self.mem[key]
@@ -152,18 +180,21 @@ class Sources:
         rev = self._ensure(url, ref, is_tag)
         if not rev:
             return None
-        r = git(["cat-file", "-p", f"{rev}:{path}"], cwd=self._gitdir(url), check=False)
+        r = git(["cat-file", "-p", f"{rev}:{path}"], git_dir=self._gitdir(url), check=False)
         return r.stdout if r.returncode == 0 else None
 
     # ---- opam-repository
 
     def versions(self, name, ref="master"):
         """Versions of `name` in opam-repository, oldest first: from ocaml.org's
-        ocaml_package_versions for master ([] if not a package, or if the MCP
-        server did not answer: counted in NET["mcp-errors"]), from a git
-        listing for another ref."""
+        ocaml_package_versions for master ([] if not a package; None if the
+        MCP server did not answer, counted in NET["mcp-errors"]: callers must
+        then not conclude that `name` is not a package), from a git listing
+        for another ref."""
         if ref == "master":
-            vs = self.mcp_versions(name) or []
+            vs = self.mcp_versions(name)
+            if vs is None:
+                return None
             return sorted({v["version"] for v in vs if isinstance(v.get("version"), str)},
                           key=functools.cmp_to_key(opam_vcmp))
         return self._versions_git(name, ref)
@@ -181,7 +212,7 @@ class Sources:
         rev = self._ensure(self.OPAM_REPO_URL, ref, is_tag=False)
         if not rev:
             return []
-        r = git(["ls-tree", "--name-only", f"{rev}:packages/{name}"], cwd=d, check=False)
+        r = git(["ls-tree", "--name-only", f"{rev}:packages/{name}"], git_dir=d, check=False)
         vs = [split_pkg(l)[1] for l in r.stdout.splitlines() if l.startswith(name + ".")]
         return sorted(vs, key=functools.cmp_to_key(opam_vcmp))
 
@@ -189,24 +220,41 @@ class Sources:
     # signatures; docs are built for every package version in opam-repository)
 
     MCP_URL = "https://ocaml.org/mcp"
+    MCP_TIMEOUT = 20
+    # After this many failed calls in a process, ocaml.org is not called
+    # again: each skipped call counts as a failure (NET["mcp-errors"]).
+    MCP_MAX_FAILURES = 3
+    # The tool's own errors (an unknown package, a version without docs yet)
+    # are asked again after a day: docs get built, a tool error may be transient.
+    MCP_ERROR_MAX_AGE = 24 * 3600
 
     def mcp(self, tool, _max_age=None, **args):
         """Call an ocaml.org MCP tool; parsed JSON result, or None on error.
         Answers are cached on disk, including the tool's own errors (an unknown
-        package, a version without docs), as None; with `_max_age` (seconds),
-        an older answer is fetched again (for data that changes, like
-        health-check results). A call that fails (network error, timeout, HTTP
-        error, unreadable answer) is not cached and is counted in
+        package, a version without docs), as None, for a day; with `_max_age`
+        (seconds), an older answer is fetched again (for data that changes,
+        like health-check results). A call that fails (network error, timeout,
+        HTTP error, unreadable answer) is not cached and is counted in
         NET["mcp-errors"]: the analysis is then incomplete."""
+        return self._mcp(tool, _max_age, args)[0]
+
+    def _mcp(self, tool, max_age, args):
+        """mcp(): (value, answered), `answered` False when the call failed
+        (as opposed to the tool answering with an error)."""
         key = json.dumps([tool, args], sort_keys=True)
         if key in self.mem:
-            return self.mem[key]
+            return self.mem[key], True
         disk = os.path.join(self.cache_dir, "mcp-" + hashlib.sha256(key.encode()).hexdigest()[:24] + ".json")
-        hit = cached_json(disk, max_age=_max_age)
+        hit = cached_json(disk, max_age=max_age)
+        if hit and hit["value"] is None:
+            hit = cached_json(disk, max_age=min(max_age or self.MCP_ERROR_MAX_AGE, self.MCP_ERROR_MAX_AGE))
         if hit:
             v = hit["value"]
         elif OFFLINE:
-            return offline_miss("mcp " + key)
+            return offline_miss("mcp " + key), False
+        elif MCP_FAILURES["n"] >= self.MCP_MAX_FAILURES:
+            NET["mcp-errors"] = NET.get("mcp-errors", 0) + 1
+            return None, False
         else:
             NET["mcp"] += 1
             body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -215,34 +263,40 @@ class Sources:
                 "User-Agent": USER_AGENT, "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream"})
             try:
-                with urllib.request.urlopen(req, timeout=60) as r:
-                    res = json.loads(r.read()).get("result", {})
+                with urllib.request.urlopen(req, timeout=self.MCP_TIMEOUT) as r:
+                    res = json.loads(r.read())["result"]
+                if not isinstance(res, dict):
+                    raise ValueError(f"no result: {res!r:.100}")
                 v = None if res.get("isError") else json.loads(res["content"][0]["text"])
-            except (urllib.error.URLError, TimeoutError, ValueError, KeyError, IndexError):
+            except NET_ERRORS + (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
                 NET["mcp-errors"] = NET.get("mcp-errors", 0) + 1
-                return None                      # transient: do not cache
-            os.makedirs(self.cache_dir, exist_ok=True)
-            with open(disk, "w") as f:
-                json.dump(v, f)
+                MCP_FAILURES["n"] += 1
+                if MCP_FAILURES["n"] == self.MCP_MAX_FAILURES:
+                    print(f"note: ocaml.org's MCP server failed {MCP_FAILURES['n']} times (last: "
+                          f"{type(e).__name__}: {str(e)[:100]}); not called again in this run", file=sys.stderr)
+                return None, False                # transient: not cached
+            write_atomic(disk, json.dumps(v))
         self.mem[key] = v
-        return v
+        return v, True
 
     # Version lists change with each release: their answers are kept a day.
     VERSIONS_MAX_AGE = 24 * 3600
 
     def mcp_versions(self, name):
         """[{version, published, statuses}] of `name`, newest first, from
-        ocaml_package_versions (one call per 500 versions), or None if the
-        server did not answer (or `name` is not a package)."""
+        ocaml_package_versions (one call per 500 versions): [] if `name` is
+        not a package, None if the server did not answer."""
         key = ("mcp-versions", name)
         if key not in self.mem:
             out, offset = [], 0
             while True:
                 args = {"package": name, "limit": 500, **({"offset": offset} if offset else {})}
-                d = self.mcp("ocaml_package_versions", _max_age=self.VERSIONS_MAX_AGE, **args)
-                if not isinstance(d, dict) or not isinstance(d.get("versions"), list):
+                d, answered = self._mcp("ocaml_package_versions", self.VERSIONS_MAX_AGE, args)
+                if not answered:
                     out = None
                     break
+                if not isinstance(d, dict) or not isinstance(d.get("versions"), list):
+                    break                       # not a package (the tool's error)
                 out += [v for v in d["versions"] if isinstance(v, dict)]
                 if not d.get("truncated") or not d["versions"] or len(out) >= 5000:
                     break
@@ -320,8 +374,12 @@ class Sources:
                 return v["published"]
         return None
 
+    # An opam file on master can be edited (bounds, x-maintained): fetched again after a day.
+    MASTER_MAX_AGE = 24 * 3600
+
     def opam_file(self, name, version, ref="master"):
-        return self.raw(f"https://raw.githubusercontent.com/{REPO}/{ref}/packages/{name}/{name}.{version}/opam")
+        return self.raw(f"https://raw.githubusercontent.com/{REPO}/{ref}/packages/{name}/{name}.{version}/opam",
+                        max_age=self.MASTER_MAX_AGE if ref == "master" else None)
 
     def upstream(self, name, version, ref="master"):
         """Upstream git URL of a package, from its opam dev-repo (or url src)."""

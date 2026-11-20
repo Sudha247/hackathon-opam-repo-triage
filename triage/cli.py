@@ -120,8 +120,11 @@ def main():
             print("network requests: " + ", ".join(f"{k}={v}" for k, v in NET.items()), file=sys.stderr)
             return
         if args.json:
+            # incomplete: ocaml.org or another server failed during the analysis (see the counts).
+            errors = {k: NET[k] for k in ("mcp-errors", "net-errors") if NET.get(k)}
             json.dump({"sha": sha, "pr": data["pr"], "ci_unfinished": data["unfinished"],
-                       "ci_jobs": len(data["jobs"]), "suggestions": results}, sys.stdout, indent=2)
+                       "ci_jobs": len(data["jobs"]), "incomplete": bool(errors), "errors": errors,
+                       "suggestions": results}, sys.stdout, indent=2)
             print()
         else:
             render_suggestions(results)
