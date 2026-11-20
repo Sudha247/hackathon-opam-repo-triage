@@ -183,7 +183,7 @@ publishes the results on the repository's GitHub Pages site:
    one GraphQL query (needs a token; the workflow's `GITHUB_TOKEN` is enough),
    keeps those whose `opam-ci` status is `failure`, and runs `suggest <sha>
    --json --max 6` (and `summary`, from the cached page) on each new or updated
-   one, sequentially. PRs whose head sha is unchanged reuse their result from
+   one, sequentially. PRs whose head sha and status are unchanged reuse their result from
    `state/prs.json`; closed PRs, and PRs no longer failing, are dropped. It
    writes `site/data.json`. `--time-budget` stops starting new PRs; the next
    run continues.

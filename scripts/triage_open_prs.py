@@ -6,11 +6,13 @@ opam-ci status is `failure`, and write the results to site/data.json.
 
 The open PRs and the opam-ci status of their head commit are listed with one
 GitHub GraphQL query per 100 PRs (needs a token: GITHUB_TOKEN, GH_TOKEN or a
-logged-in gh). A PR whose head sha is unchanged since the previous run is not
-analysed again: its result comes from the state file. PRs that were closed,
-or whose CI is no longer `failure`, are dropped. PRs are analysed one at a
-time, to respect opam.ci.ocaml.org's rate limit; `--time-budget` stops
-starting new ones after that many seconds, and the next run continues.
+logged-in gh). A PR whose head sha and opam-ci status are unchanged since the
+previous run is not analysed again: its result comes from the state file (after
+a rebuild, the status changes and the PR is analysed from fresh CI results).
+PRs that were closed, or whose CI is no longer `failure`, are dropped. PRs are
+analysed one at a time, to respect opam.ci.ocaml.org's rate limit;
+`--time-budget` stops starting new ones after that many seconds, and the next
+run continues.
 """
 
 import argparse
