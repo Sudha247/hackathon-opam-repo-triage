@@ -75,7 +75,7 @@ failures" entry listing their jobs.
 | Failure | Suggestion | Confidence |
 |---|---|---|
 | Unbound value / module / constructor / record field / type / module type / class from a library | `>=` the version that introduced it, or `<` the version that removed it, found from ocaml.org's API history of the item (per-version docs, upstream sources for versions without docs); `{= version}` when both packages come from the same repository | high |
-| Same, from the OCaml stdlib | `"ocaml" {>= "X"}` / `{< "X"}` from the stdlib `.mli` of each release | high |
+| Same, from the OCaml stdlib | `"ocaml" {>= "X"}` / `{< "X"}` from ocaml.org's API history of the compiler packages, else the stdlib `.mli` of each release | high |
 | `string` used where `bytes` is expected | `"ocaml" {< "4.06"}` (safe-string) | high |
 | Test output diff (cram/mdx) | `"dep" {with-test & < "X"}` for dependencies whose version differs from a passing job, or that were released after the failing package | low (possible causes) |
 | `Version X of the dune language is not supported` | `"dune" {>= "X"}` | high |
@@ -397,9 +397,12 @@ is looked up one by one as before (the item may be in versions without docs, a r
 built yet). A partial answer (docs-ci failed for some versions, or the call ran out of time) is used for the
 versions it has, not cached, and counted in `mcp-errors`. When ocaml.org does not have the tool (`unknown
 tool`), the version-by-version lookup is used, without counting a failure. An unbound top-level module
-(`Unbound module Foo`) and the standard library (the stdlib `.mli` of each OCaml release, from git: ocaml.org
-documents the stdlib in `ocaml-base-compiler`, not in the `ocaml` package the bounds are on) keep their own
-lookups.
+(`Unbound module Foo`) keeps its own lookup. For the standard library, ocaml.org documents the stdlib
+with the compiler: `ocaml-base-compiler` up to OCaml 5.2, `ocaml-compiler` from 5.3 (where the compiler's
+sources moved). The tool makes one call for each, with the module path in full (`Stdlib.List`: in those
+packages, `List` alone also names compiler-libs modules), restricted to the releases ocaml.org lists; the
+stdlib `.mli` of a release, from git, covers the releases without docs (4.14.5, those before 4.11) and a
+failed call.
 5. The GitHub REST API, only for `--pr` and for `compare`'s baseline lookup (2–3 calls). It works without a token (60 requests per hour); `GITHUB_TOKEN`, `GH_TOKEN` or a logged-in `gh` are used if present.
 
 Results are cached in `.opam-ci-cache/` (the tool's own errors from ocaml.org,

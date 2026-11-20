@@ -1057,6 +1057,77 @@ class ApiHistoryTest(NetTestBase):
         self.assertEqual(self.errors(), before + 1)
 
 
+class StdlibHistoryTest(unittest.TestCase):
+    """The standard-library rule with ocaml.org's API history: ocaml-base-compiler
+    up to 5.2, ocaml-compiler from 5.3, the .mli of a release it cannot tell."""
+
+    LOG = ("-> installed ocaml-base-compiler.5.0.0\n#=== ERROR while compiling x.1 ===#\n# exit-code 1\n"
+           "### output ###\n# File \"x.ml\", line 1, characters 0-7:\n# Error: Unbound value List.is_empty\n")
+    JOB = {"variant": "compilers,5.0,x.1", "url": "u", "kind": "build", "experimental": False,
+           "platform": ["compilers", "5.0"], "target": "x.1", "revdep": None}
+    TAGS = ["4.14.0", "5.0.0", "5.1.0", "5.2.0", "5.3.0", "5.4.0"]
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import rules
+        self.rules = rules
+
+    def suggest(self, statuses):
+        """`statuses`: {package: {version: status}} answered by the tool."""
+        calls, tags = [], self.TAGS
+
+        class Src:
+            def opam_file(self, *a):
+                return 'opam-version: "2.0"\ndepends: [\n  "ocaml"\n]\n'
+
+            def raw(self, url, max_age=None):
+                calls.append(("mli", url.split("/ocaml/ocaml/")[1].split("/")[0]))
+                if "stdlib/list.mli" not in url:
+                    return None
+                rel = url.split("/ocaml/ocaml/")[1].split("/")[0]
+                return "val is_empty : 'a list -> bool\n" if rel >= "5.1.0" else "val length : 'a list -> int\n"
+
+            def tags(self, url):
+                return tags
+
+            def versions(self, name):
+                return {"ocaml-base-compiler": ["4.14.0", "5.0.0", "5.1.0", "5.2.0"],
+                        "ocaml-compiler": ["5.3.0", "5.4.0"]}.get(name, [])
+
+            def api_history(self, pkg, mods, kind, ident, versions):
+                calls.append(("history", pkg, tuple(mods), kind, ident, tuple(sorted(versions))))
+                st = statuses.get(pkg)
+                return st and {"versions": st, "module": ".".join(mods), "partial": False}
+        r = self.rules.suggest_for_job(Src(), self.JOB, self.LOG, ["x.1"], "a" * 40)
+        return r, calls
+
+    def test_history_answers(self):
+        r, calls = self.suggest({"ocaml-base-compiler": {"4.14.0": "absent", "5.0.0": "absent", "5.1.0": "present",
+                                                         "5.2.0": "present"},
+                                 "ocaml-compiler": {"5.3.0": "present", "5.4.0": "present"}})
+        self.assertEqual((r["rule"], r["new"]), ("stdlib", '"ocaml" {>= "5.1"}'))
+        self.assertEqual(r["source"], "ocaml.org API history")
+        hist = [c for c in calls if c[0] == "history"]
+        self.assertEqual(hist, [
+            ("history", "ocaml-base-compiler", ("Stdlib", "List"), "value", "is_empty",
+             ("4.14.0", "5.0.0", "5.1.0", "5.2.0")),
+            ("history", "ocaml-compiler", ("Stdlib", "List"), "value", "is_empty", ("5.3.0", "5.4.0"))])
+
+    def test_releases_without_docs_read_from_the_mli(self):
+        # 5.1.0 has no docs: its .mli tells; the other releases come from the history.
+        r, calls = self.suggest({"ocaml-base-compiler": {"4.14.0": "absent", "5.0.0": "absent", "5.1.0": "no-docs",
+                                                         "5.2.0": "present"}})
+        self.assertEqual(r["new"], '"ocaml" {>= "5.1"}')
+        self.assertEqual(r["evidence"], {"ocaml 5.1.0": True})          # the only release the search checked
+        self.assertEqual(r["source"], "OCaml's stdlib .mli files")
+        self.assertIn(("mli", "5.1.0"), calls)
+
+    def test_no_history(self):
+        # The tool not deployed, or failing: the .mli of each release, as before.
+        r, _ = self.suggest({})
+        self.assertEqual((r["new"], r["source"]), ('"ocaml" {>= "5.1"}', "OCaml's stdlib .mli files"))
+
+
 class ApiHistoryRuleTest(unittest.TestCase):
     """The library rule with ocaml.org's API history: its answer where it has
     one, the docs and git for the versions it could not check."""

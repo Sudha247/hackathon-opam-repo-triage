@@ -94,6 +94,10 @@ UNBOUND_RES = [
 ]
 
 
+# The standard library's sources, read for the releases ocaml.org's API history cannot tell.
+STDLIB_SOURCES = "OCaml's stdlib .mli files"
+
+
 def find_unbound(lines):
     text = "\n".join(lines)
     for rx, kind in UNBOUND_RES:
@@ -251,8 +255,33 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                                "(git ls-remote failed): the tool could not check which releases have it.")
                 return out
             inner = mods[2:] if top == "Stdlib" else mods[1:]
+            # ocaml.org documents the standard library with the compiler:
+            # ocaml-base-compiler up to 5.2, ocaml-compiler from 5.3 (where the
+            # compiler's sources moved). One API-history call for each, with
+            # the module path in full (Stdlib.List: "List" alone also names
+            # compiler-libs modules there); the .mli of a release for what it
+            # cannot tell (no docs, a failed call).
+            path = ["Stdlib"] if kind == "module" and not mods else ["Stdlib", top_m] + inner
+            split = "5.3.0"
+            # Only the releases ocaml.org lists for each package: the tool rejects a
+            # range that starts at a version it does not know (4.08.0 of
+            # ocaml-base-compiler, say).
+            def listed(pkg, rs):
+                known = set(src.versions(pkg) or [])
+                return [r for r in rs if r in known]
+            older = listed("ocaml-base-compiler", [r for r in rel if opam_vcmp(r, split) < 0])
+            newer = listed("ocaml-compiler", [r for r in rel if opam_vcmp(r, split) >= 0])
+            hists = {"ocaml-base-compiler": older and src.api_history("ocaml-base-compiler", path, kind, ident, older),
+                     "ocaml-compiler": newer and src.api_history("ocaml-compiler", path, kind, ident, newer)}
+            used = set()
 
             def check(r):
+                h = hists["ocaml-base-compiler" if opam_vcmp(r, split) < 0 else "ocaml-compiler"]
+                p = history_presence(h or None, r)
+                if p is True or p is False:
+                    used.add(API_HISTORY)
+                    return p
+                used.add(STDLIB_SOURCES)
                 text = stdlib_mli(r, top_m)
                 if kind == "module" and not mods:
                     return text is not None
@@ -265,6 +294,8 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
             bad_rel = max([r for r in rel if opam_vcmp(r, bad) <= 0] or [rel[0]], key=lambda r: [int(x) for x in r.split(".")])
             res, ev = bisect_presence(check, rel, bad_rel)
             out["evidence"] = {f"ocaml {v}": r for v, r in sorted(ev.items(), key=lambda kv: [int(x) for x in kv[0].split(".")])}
+            if used:
+                out["source"] = ", ".join(sorted(used))
             if res:
                 op, v = res
                 v = ".".join(v.split(".")[:2])
