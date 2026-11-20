@@ -326,9 +326,10 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
                 for c in r["candidates"]:
                     if c.get("changelog"):
                         out.append(changelog_details(c))
-            elif r.get("new"):
-                out.append(diff_block(r))
-                if r.get("alternative"):
+            else:
+                if r.get("new"):
+                    out.append(diff_block(r))
+                if r.get("alternative"):        # also without `new`: a change described in the note
                     alt = re.split(r"\s{2,}(?=\()", r["alternative"], maxsplit=1)
                     out.append(f"Or {md_code(alt[0])}" + (f" {md_text(alt[1])}" if len(alt) > 1 else ""))
             ev = evidence_line(r)
@@ -530,6 +531,8 @@ def render_suggestions(results):
             print(f"    + {r['new']}")
             if r.get("alternative"):
                 print(f"    or {r['alternative']}")
+        elif r.get("alternative"):              # a change described in the note, and an alternative
+            print(f"  alternative     : {r['alternative']}")
         if r.get("candidates"):
             print(f"  {confidence_text(r)}")
         for c in r.get("candidates", []):

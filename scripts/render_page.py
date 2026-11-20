@@ -416,6 +416,8 @@ def suggestion_body(r, sha=None, full=True, year=None):
         if r.get("alternative"):
             diff.append(f'<span class="alt">or {e(r["alternative"])}</span>')
         out.append('<pre class="diff">' + "\n".join(diff) + "</pre>")
+    elif r.get("alternative"):          # a change described in the note, and an alternative
+        out.append(f'<pre class="diff"><span class="alt">or {e(r["alternative"])}</span></pre>')
     if r.get("candidates"):
         m = re.match(r"release date of (\S+) \((\d{4}-\d\d-\d\d)\)$", r.get("compared_with") or "")
         if m:
