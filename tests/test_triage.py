@@ -738,6 +738,78 @@ class NetErrorTest(NetTestBase):
             self.assertEqual(m.call_count, 2)
 
 
+class FailedFetchTest(NetTestBase):
+    """A page, a log or a git listing that could not be fetched is counted in
+    NET["net-errors"] (the analysis is incomplete and is retried); a clean
+    negative answer (404, a missing tag) is not."""
+
+    def test_fetch_counts_failures(self):
+        from unittest import mock
+        url = "https://example.invalid/log"
+        for e, counted in [(ConnectionResetError(104, "reset"), 1), (TimeoutError("timed out"), 1),
+                           (urllib.error.HTTPError(url, 503, "busy", {}, None), 1),
+                           (urllib.error.HTTPError(url, 404, "Not Found", {}, None), 0)]:
+            with mock.patch("urllib.request.urlopen", side_effect=e), mock.patch.object(self.net.time, "sleep"):
+                before = self.errors("net-errors")
+                with self.assertRaises(type(e)):
+                    self.t.fetch(url, self.tmp, refresh=True)
+                self.assertEqual(self.errors("net-errors"), before + counted, e)
+                # Sources.raw() catches it: counted once, not twice.
+                before = self.errors("net-errors")
+                self.assertIsNone(self.t.Sources(self.tmp).raw(url + "2"))
+                self.assertEqual(self.errors("net-errors"), before + counted, e)
+
+    def test_git_failures(self):
+        from unittest import mock
+        cases = [("fatal: unable to access 'https://e.x/r/': Could not resolve host: e.x", 128, 1),
+                 ("error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503", 128, 1),
+                 ("fatal: unable to access 'https://e.x/r/': Failed to connect to e.x port 443", 128, 1),
+                 (None, None, 1),                                           # git killed after GIT_TIMEOUT
+                 ("fatal: couldn't find remote ref refs/tags/v1.0", 128, 0),
+                 ("remote: Repository not found.\nfatal: repository 'https://e.x/r/' not found", 128, 0),
+                 ("fatal: could not read Username for 'https://github.com': terminal prompts disabled", 128, 0)]
+        for stderr, code, counted in cases:
+            def run(cmd, **kw):
+                if stderr is None:
+                    raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+                return subprocess.CompletedProcess(cmd, code, "", stderr)
+            for args in (["ls-remote", "--tags", "--refs", "--", "https://e.x/r"],
+                         ["fetch", "-q", "--depth", "1", "origin", "+refs/tags/v1.0:refs/tags/v1.0"]):
+                with mock.patch.object(self.net.subprocess, "run", run):
+                    before = self.errors("net-errors")
+                    self.assertNotEqual(self.net.git(args, check=False).returncode, 0)
+                    self.assertEqual(self.errors("net-errors"), before + counted, (stderr, args[0]))
+        # Other git commands failing are not network errors.
+        with mock.patch.object(self.net.subprocess, "run",
+                               lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "Connection reset")):
+            before = self.errors("net-errors")
+            self.net.git(["rev-parse", "--verify", "-q", "v1^{tree}"], check=False)
+            self.assertEqual(self.errors("net-errors"), before)
+
+
+class UnreadableLogTest(unittest.TestCase):
+    def test_unreadable_log_makes_the_analysis_incomplete(self):
+        # The log of one job cannot be fetched (connection reset): the analysis
+        # says so (`incomplete`), and the triage page analyses the PR again.
+        out = run_patched("lwt-revdeps", """
+import tempfile, unittest.mock as mock
+import triage.suggest as s, triage.net as n
+_orig = s.fetch
+def fetch(url, cache_dir, **k):
+    if "kinetic-client" not in url:
+        return _orig(url, cache_dir, **k)
+    with mock.patch("urllib.request.urlopen", side_effect=ConnectionResetError(104, "reset")), \\
+            mock.patch.object(n, "OFFLINE", False):
+        return n.fetch(url, tempfile.mkdtemp(), **k)
+s.fetch = fetch
+""")
+        self.assertEqual(out.returncode, 0, out.stderr[-1500:])
+        data = json.loads(out.stdout)
+        self.assertTrue(any(s.get("rule") == "unrecognised" and "kinetic-client" in json.dumps(s.get("jobs"))
+                            for s in data["suggestions"]), data["suggestions"])
+        self.assertEqual((data["incomplete"], data["errors"]), (True, {"net-errors": 1}))
+
+
 class CacheWriteTest(NetTestBase):
     """Cache files are written whole or not at all, and a damaged one is a miss."""
 

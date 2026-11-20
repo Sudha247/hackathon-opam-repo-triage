@@ -80,19 +80,12 @@ class Sources:
 
     def raw(self, url, max_age=None):
         """The body of `url`, or None if it does not exist or could not be
-        fetched (a network error is counted in NET["net-errors"])."""
+        fetched (fetch() counts a network error in NET["net-errors"])."""
         if url in self.mem:
             return self.mem[url]
         try:
             v = fetch(url, self.cache_dir, max_age=max_age)
-        except urllib.error.HTTPError as e:
-            if e.code != 404:
-                NET["net-errors"] = NET.get("net-errors", 0) + 1
-            v = None
-        except NET_ERRORS:
-            NET["net-errors"] = NET.get("net-errors", 0) + 1
-            v = None
-        except RuntimeError:            # offline cache miss, empty answer
+        except NET_ERRORS + (RuntimeError,):     # HTTP or network error, offline cache miss, empty answer
             v = None
         self.mem[url] = v
         return v

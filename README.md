@@ -306,7 +306,10 @@ pages that do not exist and opam files of master are asked again after a day).
 `suggest` prints the number of network requests it actually sent, with
 `mcp-errors`, the ocaml.org MCP calls that failed (after three, ocaml.org is
 not called again in that run), and `net-errors`, the other requests that
-failed; `suggest --json` then says `"incomplete": true`. Such an analysis lacks
+failed (a CI page or job log, an opam file, a GitHub API call, a `git
+ls-remote` or `git fetch` that could not reach the server or timed out; a 404,
+a missing tag or repository is an answer, not counted); `suggest --json` then
+says `"incomplete": true`. Such an analysis lacks
 some versions, docs or health-check results, and states what it could not
 check instead of concluding; the triage page does it again in its next runs
 (three attempts a day at most, as for a failed or timed-out analysis). A rule

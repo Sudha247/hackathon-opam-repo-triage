@@ -49,6 +49,12 @@ NET = _Counts({"http": 0, "mcp": 0, "git": 0, "github-api": 0})
 NET_ERRORS = (OSError, http.client.HTTPException)
 
 
+def net_error():
+    """Count a failed request (NET["net-errors"]): the analysis is incomplete,
+    and the triage page analyses the PR again later."""
+    NET["net-errors"] = NET.get("net-errors", 0) + 1
+
+
 # OPAM_CI_OFFLINE=1 (used by the tests): everything must come from the cache;
 # a cache miss is recorded in OFFLINE_MISSES and behaves like a failed request.
 OFFLINE = os.environ.get("OPAM_CI_OFFLINE") == "1"
@@ -139,19 +145,31 @@ def fetch(url, cache_dir, refresh=False, max_age=None):
         raise RuntimeError(f"offline: {url} is not in the cache")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     NET["http"] += 1
-    for attempt in range(6):
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                body = r.read().decode("utf-8", errors="replace")
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                write_atomic(path + ".404", "")
-            if e.code not in (429, 502, 503) or attempt == 5:
-                raise
-            delay = int(e.headers.get("Retry-After") or 0) or 2 ** (attempt + 1)
-            time.sleep(min(delay, 60))
+    # A request that fails (after the retries) is counted in NET["net-errors"],
+    # whatever the caller does with the exception: a log or a page that could
+    # not be read makes the analysis incomplete. A 404 is an answer, not counted.
+    try:
+        for attempt in range(6):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    body = r.read().decode("utf-8", errors="replace")
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    write_atomic(path + ".404", "")
+                if e.code not in (429, 502, 503) or attempt == 5:
+                    raise
+                delay = int(e.headers.get("Retry-After") or 0) or 2 ** (attempt + 1)
+                time.sleep(min(delay, 60))
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            net_error()
+        raise
+    except NET_ERRORS:
+        net_error()
+        raise
     if not body:
+        net_error()
         raise RuntimeError(f"empty response for {url}")
     write_atomic(path, body)
     return body
@@ -209,10 +227,10 @@ def gh_api(path, cache_dir=".opam-ci-cache", cache=True):
             print("note: GitHub API rate limit reached (60/hour without a token); "
                   "set GITHUB_TOKEN to raise it", file=sys.stderr)
         if e.code != 404:
-            NET["net-errors"] = NET.get("net-errors", 0) + 1
+            net_error()
         return None
     except NET_ERRORS + (ValueError,):         # network error, unreadable answer: transient
-        NET["net-errors"] = NET.get("net-errors", 0) + 1
+        net_error()
         return None
     if cache or os.environ.get("OPAM_CI_RECORD") == "1":     # recording fixtures keeps everything
         write_atomic(disk, json.dumps(v))
@@ -241,6 +259,16 @@ GIT_TIMEOUT = 60
 GIT_FETCH_TIMEOUT = 180          # a shallow blob-less fetch of a large repository
 
 
+# A fetch or ls-remote that failed because of the network or the server (counted
+# in NET["net-errors"]: the tags or files are then unknown, not absent), as
+# opposed to a clean negative answer: a missing tag ("couldn't find remote
+# ref"), repository ("not found", 404) or a private one (credentials asked).
+GIT_NET_FAILURE = re.compile(
+    r"timed out|Could not resolve (host|proxy)|Failed to connect|Connection (refused|reset|timed out)|"
+    r"returned error: (5\d\d|429)|RPC failed|early EOF|unexpected disconnect|hung up unexpectedly|"
+    r"transfer closed|Recv failure|Empty reply|SSL|TLS|gnutls|Couldn't connect", re.I)
+
+
 def safe_git_url(url):
     return bool(url) and SAFE_GIT_URL.fullmatch(url) is not None
 
@@ -264,6 +292,8 @@ def git(args, cwd=None, check=True, git_dir=None):
                              timeout=timeout)
     except subprocess.TimeoutExpired:
         out = subprocess.CompletedProcess(args, 124, "", f"timed out after {timeout} s")
+    if args[0] in ("fetch", "ls-remote") and out.returncode != 0 and GIT_NET_FAILURE.search(out.stderr or ""):
+        net_error()
     if check and out.returncode != 0:
         raise RuntimeError(f"git {' '.join(args[:3])}...: {out.stderr.strip()[:200]}")
     return out
