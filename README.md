@@ -29,9 +29,9 @@ the package for the scripts and tests.
 | Command | What it does |
 |---|---|
 | `summary` | One record per CI job: status, category (build, build-or-test, dependency, network, cancelled, solver, ignored, not-available, lint), job kind, platform; reverse-dependency failures grouped by package. |
-| `logs` | For failed jobs: the first `#=== ERROR while …` block, solver output, the final error, the builder (classic or day10) and the master commit the PR was merged onto. |
+| `logs` | For failed jobs: the first `#=== ERROR while …` block, solver output, the final error, the builder (main or day10) and the master commit the PR was merged onto. |
 | `compare` | Classifies failing reverse dependencies against the CI run of the PR that published the previous version of the package: NEW, pre-existing, builder-specific, no-baseline. |
-| `suggest` | Proposes fixes, with the evidence they are based on (see below). Fixes to the PR come first, then workarounds (platform restrictions), problems in other packages or CI, and explanations without a change. |
+| `suggest` | Proposes fixes, with the evidence they are based on (see below). Fixes to the PR come first, then workarounds (changes that skip platforms or tests), failures whose fix goes elsewhere (another package, upstream, the CI), and other failures without a change. |
 | `review` | The same as a GitHub pull-request review: each fix that can be placed on a line of the PR's diff becomes a line comment with a "suggested change" block (one click to apply); the rest goes in the review text. Needs `--pr N` and CI results for the PR's current head. Printed as JSON by default; `--post` posts it with `gh api` (review it first). |
 | `comment` | A draft PR comment in Markdown from the `suggest` results: diffs for the PR's opam files with their evidence, the rest folded in `<details>`. Printed by default; `--post` posts it with `gh pr comment` (review it first). |
 
@@ -46,7 +46,7 @@ Common options:
 
 - `--json`: machine-readable output.
 - `--match REGEX`: only jobs whose variant matches, e.g. `'revdeps,passage'`,
-  `'lower-bounds'`, `'^compilers,'` (classic builder only), `',5\.5,'` (OCaml 5.5).
+  `'lower-bounds'`, `'^compilers,'` (main builder only), `',5\.5,'` (OCaml 5.5).
   A variant is the last part of a job URL, e.g.
   `compilers,4.14,lwt.5.10.2,revdeps,osc.0.1.4` or
   `day10,debian-13,x86_64,5.5,lwt.5.10.2,tests`.
@@ -64,22 +64,23 @@ Common options:
 
 Each suggestion in the `--json` output has machine fields (`rule`, `variant`, `fix_in`, `jobs`) and fields
 for people: `title` (the rule in words), `job` (the CI job in words, e.g. "frama-clang.0.0.21~beta on
-archlinux x86_64, OCaml 5.5 (day10 builder)") and `where` (where the fix goes). Failures that no rule
-recognises are grouped in one "Not recognised" entry listing their jobs.
+archlinux x86_64, OCaml 5.5 (day10 builder)") and `where` (where the fix goes: "this PR", "pkg (another
+package)", "upstream", "the CI", "rerun" or "nothing to fix"; absent when unknown). Failures that no rule
+recognises are grouped in one "Unexplained failures" entry listing their jobs.
 
 | Failure | Suggestion | Confidence |
 |---|---|---|
 | Unbound value / module / constructor / record field / type from a library | `>=` the version that introduced it, or `<` the version that removed it, found from per-version API docs; `{= version}` when both packages come from the same repository | high |
 | Same, from the OCaml stdlib | `"ocaml" {>= "X"}` / `{< "X"}` from the stdlib `.mli` of each release | high |
 | `string` used where `bytes` is expected | `"ocaml" {< "4.06"}` (safe-string) | high |
-| Test output diff (cram/mdx) | `"dep" {with-test & < "X"}` for dependencies whose version differs from a passing job, or that were released after the failing package | low (candidates) |
+| Test output diff (cram/mdx) | `"dep" {with-test & < "X"}` for dependencies whose version differs from a passing job, or that were released after the failing package | low (possible causes) |
 | `Version X of the dune language is not supported` | `"dune" {>= "X"}` | high |
 | Missing tool (`Program awk not found`, `"gcc": command not found`) | `"conf-tool" {build}`, or a depext gap in the conf package / the failing dependency (Cygwin package name when known, e.g. `gawk`) | medium |
 | Missing library (`Library "x" not found`, ocamlfind `Package 'x' not found`) | add the dependency (`{with-test}` under `test/`), or "internal library, not shipped" | medium |
 | Missing C header | which platform lacks it; add a depext or `x-ci-accept-failures` | low |
 | Job matrix: fails on every older (or newer) OCaml version, passes on the others | `"ocaml" {>= "X"}` / `{< "X"}`, `{with-test & …}` if only tests fail | medium |
 | Job matrix: fails only on Windows / one arch / some distributions | `"@runtest" {with-test & os != "win32"}`, `available: arch != "s390x"`, `x-ci-accept-failures: [...]`; aimed at the failing dependency when it is the one failing | medium |
-| Fails only on the day10 builder while the classic builder passes on the same distribution, architecture and OCaml version (and day10 does not pass on another architecture there) | reported as a CI-environment problem, with the evidence (e.g. a conf package that declares the depext the image didn't install) | high |
+| Fails only on the day10 builder while the main builder passes on the same distribution, architecture and OCaml version (and day10 does not pass on another architecture there) | reported as a CI-environment problem, with the evidence (e.g. a conf package that declares the depext the image didn't install) | high |
 | The PR removes or relaxes the `available` filter of an existing version, and that version (or its reverse dependencies) now fails on platforms the old filter excluded and the new one allows (filters on `os`, `arch`, `os-distribution` and `os-family` are evaluated; medium confidence when another variable decides) | restore the old filter, or narrow it to the platforms that build (read from the PR's diff: one GitHub call) | high/medium |
 | A conf package fails on a platform listed in its `x-ci-accept-failures` | CI should have ignored it: CI-environment problem | high |
 | Lint error already reported in the previous release's CI | noted, with the PR number | high |
@@ -124,7 +125,7 @@ Failures that would happen without the PR are marked "Pre-existing" in the note:
 - jobs that also failed in the CI run of the PR that published the previous release of the package (same platform, same job, and the same failure: category and reason, the version left out; 2 GitHub calls and one page per package, skipped when the old run has been purged). When the release's own build fails at the same step but the reason does not show the error (`The compilation of … failed at "dune build …"`), the note says so, and the triage page does not count the failure as happening without the PR;
 - reverse dependencies that opam-health-check also sees failing on master (from ocaml.org's MCP `ocaml_package_build_information`; same version and OCaml version, build only, as opam-health-check builds the newest version of each package without tests; one request per package, cached for a day).
 
-Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Builds on master, fails here": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready).
+Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Broken by this PR (builds on master)": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready).
 
 The matrix rules use only the job list (no fetch); the others reuse the log
 already downloaded, plus at most one small lookup.
@@ -132,19 +133,22 @@ already downloaded, plus at most one small lookup.
 Example (the earlier, failing commit of PR 30908):
 
 ```
-error           : Unbound value Ortools.Sat.proto_solve
-looked up in    : ocaml.org docs
-evidence        : ortools 9.15.0-1=no, ortools 9.15.0-2=yes, ortools 9.15.0 (installed in failing job)=no
-suggestion (library-api, high):
-  - "ortools"	{>= "9.15"}
-  + "ortools" {>= "9.15.0-2"}
-  or "ortools" {= version}  (same upstream repository and version)
+API change in a dependency: ortools_solvers.9.15.0-3 (lower bounds) on OCaml 4.14
+  same failure on : 3 other jobs: ortools_solvers.9.15.0-3 (lower bounds) on OCaml 5.2, …
+  failing package : ortools_solvers.9.15.0-3   fix in this PR
+  error           : Unbound value Ortools.Sat.proto_solve
+  looked up in    : ocaml.org docs
+  defined in      : ortools 9.15.0 (used by CI) no, 9.15.0-1 no, 9.15.0-2 yes
+  suggested change (high confidence):
+    - "ortools"	{>= "9.15"}
+    + "ortools" {>= "9.15.0-2"}
+    or "ortools" {= version}  (same upstream repository and version)
 ```
 
 ### LLM fallback (optional)
 
-`--llm` (on `suggest` and `comment`) asks Claude about the failures no rule
-explains: one call per distinct failure, at most `--llm-max` (default 5).
+`--llm` (on `suggest` and `comment`) asks Claude about the failures the tool
+cannot explain: one call per distinct failure, at most `--llm-max` (default 5).
 The prompt holds the error excerpt, the failing package's opam file, the
 dependency versions CI installed and the package's results on the other CI
 jobs; the answer is structured JSON (diagnosis, where the fix goes, the opam
@@ -213,17 +217,18 @@ publishes the results on the repository's GitHub Pages site:
    recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most
    `--llm-budget 40` calls per run; answers are cached, so only new failures
    cost anything). Without the secret, or if the API fails, the page is built
-   from the rules alone. On the page, LLM answers are labelled "unchecked",
+   from the rules alone. On the page, LLM diagnoses are labelled "unchecked",
    version bounds and depexts they propose are shown as text to check, and
-   low-confidence answers are folded: in an evaluation on 25 answers, 15 were
+   low-confidence ones are folded, as "LLM diagnosis (low confidence)": in an evaluation on 25 answers, 15 were
    right, 7 plausible, 1 wrong and 2 harmful, all the harmful ones being
    version bounds.
 2. `scripts/render_page.py` turns it into `site/index.html`: one static page,
    no external resources. Each failing PR gets one verdict (not this PR's
    fault, change this PR, blocked elsewhere, CI only, needs a look), used by
    the filters, and a headline saying what the problem is; its details show
-   the suggested changes in full and the other findings folded, one line
-   each, near-duplicates merged. Above the list, the PRs that seem ready;
+   the suggested changes in full and the other failures folded, one line
+   each, near-duplicates merged. Above the list, the PRs that are "Ready as
+   far as CI goes";
    below it, the reverse dependencies that fail on several PRs. PR titles,
    logs and suggestions are HTML-escaped.
 
@@ -265,8 +270,8 @@ To add a case: put its commit and expected suggestions in `CASES`, then
 ## Evaluation on merged PRs
 
 `evaluate_closed_prs.py` runs `suggest` on the initial version (before the
-first force-push, or the first commit) of recently merged PRs whose opam-ci
-failed, and compares the suggestions with what the author changed before the
+first force-push, or the first commit) of recently merged PRs whose opam-repo-ci
+run failed, and compares the suggestions with what the author changed before the
 merge. Needs a logged-in `gh`.
 
 ```sh
