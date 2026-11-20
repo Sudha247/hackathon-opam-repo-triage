@@ -157,10 +157,11 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     pre = preexisting_failures(data, sha, base, cache_dir, src, new_notes)
     if new_notes.get("health_stale"):
         data["health_stale"] = new_notes["health_stale"]     # reported in the JSON output and on the page
+    elsewhere = drop_health_explained_elsewhere(new_notes, results, pr_packages)
     for r in results:
         keys = r.get("_keys") or ([r["_key"]] if r.get("_key") else [])
         hints = {new_notes["new"][k] for k in keys if k in new_notes.get("new", {})}
-        if hints and not any(k in pre for k in keys):
+        if hints and not any(k in pre for k in keys) and id(r) not in elsewhere:
             r["new_on_master"] = sorted(hints)[0]
             r["note"] = sorted(hints)[0] + (" " + r["note"] if r.get("note") else "")
         why = {pre.get(k) for k in keys}
@@ -512,6 +513,27 @@ def readable(results):
 
 # Rules whose explanation does not depend on the platform: reported once.
 PER_PACKAGE_RULES = {"newer-c-compiler", "system-library-version", "opam-same-version-reinstall", "lower-bound"}
+
+
+def drop_health_explained_elsewhere(notes, results, pr_packages):
+    """Drop from `notes` (see preexisting_failures) the opam-health-check
+    comparisons of the jobs whose log points at a dependency that is not a
+    package of this PR: a library-api result bounding it. That dependency
+    changed on master since opam-health-check's run, or is not in it: matrix
+    0.2.0 broke console-eio while opam-health-check still saw it build, and
+    the k7 PR (#31170) was blamed. Returns the ids of those results, whose
+    note must not say that the PR probably causes the failure."""
+    names = {split_pkg(p)[0] for p in pr_packages}
+    hits = [r for r in results if r.get("rule") == "library-api" and r.get("new") and r.get("dep")
+            and r["dep"] not in names]
+    variants = {v for r in hits for v in (r.get("jobs") or [r.get("variant")]) if v}
+    good = (notes.get("health") or {}).get("good") or {}
+    for who in list(good):
+        good[who] = {(o, v) for o, v in good[who] if v not in variants}
+        if not good[who]:
+            del good[who]
+            (notes.get("via") or {}).pop(who, None)
+    return {id(r) for r in hits}
 
 
 WORKAROUND_RULES = {"platform-matrix", "missing-system-package"}

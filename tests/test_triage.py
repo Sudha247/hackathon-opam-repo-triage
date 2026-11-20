@@ -376,6 +376,24 @@ class WhereTest(unittest.TestCase):
                          "the dependency that declares these depexts (another package)")
 
 
+class HealthExplainedElsewhereTest(unittest.TestCase):
+    """opam-health-check saw a reverse dependency build on master, but its log
+    points at another dependency (#31170: matrix 0.2.0, not the PR's k7)."""
+
+    def test_drop(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage.suggest import drop_health_explained_elsewhere as drop
+        a, b = "day10,5.5,k7.0.10.0,revdeps,console-eio.0.9.0", "day10,5.5,k7.0.10.0,revdeps,other.1.0"
+        notes = {"health": {"good": {"console-eio.0.9.0": {("5.5", a)}, "other.1.0": {("5.5", b)}}},
+                 "via": {"console-eio.0.9.0": {"x.1"}}}
+        matrix = {"rule": "library-api", "new": '"matrix" {< "0.2.0"}', "dep": "matrix", "jobs": [a]}
+        on_pr = {"rule": "library-api", "new": '"k7" {< "0.10.0"}', "dep": "k7", "variant": b}
+        ids = drop(notes, [matrix, on_pr, {"rule": "lint", "new": "x"}], ["k7.0.10.0"])
+        # The job explained by matrix loses its comparison; a bound on the PR's own package agrees with it.
+        self.assertEqual(notes, {"health": {"good": {"other.1.0": {("5.5", b)}}}, "via": {}})
+        self.assertEqual(ids, {id(matrix)})
+
+
 class LintTest(unittest.TestCase):
     """The messages of a failed lint job: findings of this PR, or a CI error."""
 
