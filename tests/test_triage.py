@@ -1401,6 +1401,13 @@ class PageTest(unittest.TestCase):
         self.assertFalse(self.r.seems_ready(running))
         self.assertIn("CI running, 3 jobs left", self.r.render_pr(running))
 
+    def test_kept_result_after_a_failed_analysis(self):
+        pr = self.pr([self.day10], last_error="timeout after 600s <b>", last_error_at="2026-11-20T10:00:00+00:00")
+        html = self.r.render_pr(pr)
+        self.assertIn("a newer analysis failed 2026-11-20 10:00 UTC; this result may be out of date", html)
+        self.assertIn('title="timeout after 600s &lt;b&gt;"', html)
+        self.assertNotIn("newer analysis failed", self.r.render_pr(self.pr([self.day10])))
+
     def test_shared_failures(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
         import triage_open_prs as T

@@ -237,8 +237,8 @@ publishes the results on the repository's GitHub Pages site:
    A PR left for the next run (`--time-budget`) keeps showing its previous
    result when it is for the same commit. When analysing a commit again fails
    (a timeout, a server down), the previous result is kept, with the error
-   beside it (`last_error` in the state), and tried again three times a day
-   at most.
+   beside it (`last_error` in the state; the page says the result may be out
+   of date), and tried again three times a day at most.
 
    With an `ANTHROPIC_API_KEY` repository secret, failures that no rule
    recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most

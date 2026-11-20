@@ -616,6 +616,11 @@ def render_pr(pr, year=None, max_failures=None):
         bar.append(copy_block(pr))
     bar.append(f'<span>commit {e((sha or "")[:12])} · analysed '
                f'{e((pr.get("analysed_at") or "never")[:16].replace("T", " "))} UTC</span>')
+    if pr.get("last_error") and pr.get("result") is not None:
+        # A newer analysis of the same commit failed: this result is the previous one.
+        bar.append(f'<span title="{e(pr["last_error"])}">a newer analysis failed '
+                   f'{e((pr.get("last_error_at") or "")[:16].replace("T", " "))} UTC; '
+                   f'this result may be out of date</span>')
     body = ['<div class="body">', f'<div class="bar">{"".join(bar)}</div>']
     since = pr.get("since_last_push")
     if since and (since.get("fixed") or since.get("new")):
