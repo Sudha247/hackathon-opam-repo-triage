@@ -387,6 +387,8 @@ def rerun_rules(data, results, match=None):
     entry = {"variant": counted(len(variants), "job"), "rule": "rerun", **fix_where("rerun", "CI (rerun)"),
              "error": ", ".join(what(k, n) for k, n in counts.most_common()),
              "confidence": "high", "jobs": variants,
+             # Only experimental jobs to rerun do not hold the PR back.
+             "experimental": exp == len(jobs) and all(r.get("experimental") for r in transient),
              "note": "These jobs failed because of the CI, not the packages. An opam-repository maintainer can "
                      "rerun them with \"Rebuild failed\" on the CI page."
                      + ((" One of them is on an experimental platform." if exp == 1 else

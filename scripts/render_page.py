@@ -27,15 +27,18 @@ from opam_repo_ci_triage import title_of as rule_title  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
 # One verdict per PR: the first that applies, in this order (see `verdict`).
 VERDICTS = [("ready", "Not this PR's fault"), ("change", "Change this PR"), ("blocked", "Blocked elsewhere"),
-            ("ci", "CI only"), ("other", "Needs a look"), ("error", "Not analysed")]
+            ("ci", "CI only"), ("rerun", "Needs a rerun"), ("other", "Needs a look"), ("error", "Not analysed")]
 VERDICT_LABEL = dict(VERDICTS)
 VERDICT_HELP = {
     "ready": "CI fails, but none of the failures is this PR's fault: each one also fails without this PR, comes "
-             "from the CI, or is on an experimental platform",
+             "from the CI's setup, or is on an experimental platform; every job ran",
     "change": "A change to this PR's opam files is suggested: a fix, or a workaround that skips platforms or "
               "tests",
     "blocked": "At least one failure must be fixed in another package",
-    "ci": "Every failure comes from the CI: the day10 builder, network errors, cancelled jobs",
+    "ci": "Every failure comes from the CI's setup (the day10 builder, the CI's opam), but the PR is a draft, has "
+          "a label that keeps it out of the ready list, or its CI is still running",
+    "rerun": "Some jobs did not run to the end because of the CI (network errors, cancelled jobs, a crash of the "
+             "CI's tools), and nothing else points at this PR: rerun them before merging",
     "other": "Failures of this PR's packages without a suggested change, failures whose cause is not known, or "
              "failures the tool cannot explain",
     "error": "The analysis is pending or failed"}
@@ -46,11 +49,9 @@ CHANGE_CLASSES = ("fix", "workaround")
 MERGE_LABEL, NO_MERGE_LABEL = "consider for merge", "do not merge"
 NOT_READY_LABELS = {NO_MERGE_LABEL, "needs reporter action"}
 # Where the fix goes (`where_kind`, see triage/where.py) for failures that
-# do not come from the PR: the CI (or its opam), jobs to rerun, nothing to fix
-# (a bound the PR adds on purpose).
-CI_SIDE = {"ci", "rerun", "none"}
-# The places that make a PR "CI only".
-CI_ONLY = {"ci", "rerun"}
+# do not come from the PR: the CI's setup (or its opam), nothing to fix (a
+# bound the PR adds on purpose). Not "rerun": CI did not test those jobs.
+CI_SIDE = {"ci", "none"}
 # Rules whose failures also happen on master (opam-health-check).
 PREEXISTING_RULES = {"health-check-preexisting"}
 # Job categories (from `summary`), in words.
@@ -138,8 +139,9 @@ def verdict(pr):
     """The one verdict of a failing PR (a key of VERDICTS), the first that
     applies: not this PR's fault (`seems_ready`), a change to this PR is
     suggested, another package must be fixed, every failure comes from the
-    CI (CI only), or anything else (needs a look): failures of this PR without
-    a suggestion, of unknown cause, or not explained at all."""
+    CI's setup (CI only), jobs to rerun and nothing else of this PR (needs a
+    rerun), or anything else (needs a look): failures of this PR without a
+    suggestion, of unknown cause, or not explained at all."""
     if pr.get("pending") or pr.get("result") is None:
         return "error"
     if seems_ready(pr):
@@ -150,8 +152,13 @@ def verdict(pr):
     # A failure that is not the PR's (it happens on master too, say) does not block it.
     if any(other_package(r) and not not_this_pr(r) for r in sugg):
         return "blocked"
-    if sugg and not pr["result"].get("unanalysed") and all(where_kind(r) in CI_ONLY for r in sugg):
+    if not sugg or pr["result"].get("unanalysed"):
+        return "other"
+    if all(where_kind(r) == "ci" for r in sugg):
         return "ci"
+    reruns = [r for r in sugg if where_kind(r) == "rerun" and not not_this_pr(r)]
+    if reruns and all(where_kind(r) in ("ci", "rerun") or not_this_pr(r) for r in sugg):
+        return "rerun"
     return "other"
 
 
@@ -324,6 +331,9 @@ def headline(pr, v=None, as_html=True):
         r = merge_similar([r for r in sugg if other_package(r)] or sugg)[0]
         pkgs = packages_text(r)
         parts.append(t(title_of(r) + (f" ({pkgs})" if pkgs else "")))
+    elif v == "rerun":
+        r = next(r for r in sugg if where_kind(r) == "rerun" and not not_this_pr(r))
+        parts.append(t(title_of(r) + (f" ({shorten(r['error'], 60)})" if r.get("error") else "")))
     else:
         pool = [r for r in sugg if where_kind(r) == "pr"] if v == "other" else sugg
         pool = [r for r in pool if r.get("rule") != "llm"] or pool or sugg
@@ -737,10 +747,10 @@ def chronic(prs, min_prs=2):
 CSS = """
 :root{--bg:#fbfbfa;--fg:#1d1f21;--mut:#5f6368;--card:#fff;--bd:#dadce0;--code:#f3f3f1;--acc:#0b57d0;
 --add:#116329;--addbg:#dafbe1;--del:#82071e;--delbg:#ffebe9;--err:#b3261e;
---ok:#116329;--chg:#b45309;--blk:#6639ba;--ci:#5f6368;--look:#b3261e;--na:#80868b}
+--ok:#116329;--chg:#b45309;--blk:#6639ba;--ci:#5f6368;--rerun:#0b7285;--look:#b3261e;--na:#80868b}
 @media (prefers-color-scheme:dark){:root{--bg:#121416;--fg:#e3e3e3;--mut:#9aa0a6;--card:#1c1f23;--bd:#3c4043;
 --code:#25292e;--acc:#8ab4f8;--add:#7ee2a8;--addbg:#12361f;--del:#ffa198;--delbg:#3d1416;--err:#f28b82;
---ok:#7ee2a8;--chg:#f2b56b;--blk:#d2a8ff;--ci:#9aa0a6;--look:#f28b82;--na:#6f757b}}
+--ok:#7ee2a8;--chg:#f2b56b;--blk:#d2a8ff;--ci:#9aa0a6;--rerun:#66d9e8;--look:#f28b82;--na:#6f757b}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 main{max-width:1000px;margin:0 auto;padding:16px}
@@ -788,7 +798,7 @@ details.pr[open]>summary::before{content:"\\25BE"}
 .lbl{font-size:.75rem;color:var(--mut);border:1px solid var(--bd);border-radius:4px;padding:0 4px;white-space:nowrap}
 .lbl.merge{color:var(--acc);border-color:var(--acc)}.lbl.nomerge{color:var(--err);border-color:var(--err)}
 .lbl.stale{border-style:dashed}
-.v-ready{--v:var(--ok)}.v-change{--v:var(--chg)}.v-blocked{--v:var(--blk)}.v-ci{--v:var(--ci)}
+.v-ready{--v:var(--ok)}.v-change{--v:var(--chg)}.v-blocked{--v:var(--blk)}.v-ci{--v:var(--ci)}.v-rerun{--v:var(--rerun)}
 .v-other{--v:var(--look)}.v-error{--v:var(--na)}.v-all{--v:transparent}
 details.pr.v-error{border-left-style:dashed}
 @media (max-width:600px){details.pr>summary{grid-template-columns:1em auto 1fr}
@@ -900,6 +910,8 @@ def help_section(data):
                                      'asked for changes.',
                             "change": ' Other failures may also need a fix elsewhere ("also blocked by").',
                             "blocked": " The fix goes in a dependency or a reverse dependency of the PR's packages.",
+                            "rerun": ' Opam-repository maintainers can rerun them with "Rebuild failed" on the CI '
+                                     'page. These PRs are not listed as ready: CI did not test those jobs.',
                             "error": " A PR not analysed yet is covered by the next page update."
                             }.get(k, "") + "</dd>" for k, label in VERDICTS)
     return f'''<section id="help"><h2>How to read this page</h2>

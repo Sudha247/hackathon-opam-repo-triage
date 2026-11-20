@@ -442,6 +442,14 @@ class RulesTest(unittest.TestCase):
         import opam_repo_ci_triage as t
         self.t = t
 
+    def test_rerun_experimental(self):
+        # An entry listing only experimental jobs to rerun says so (it does not hold the PR back).
+        exp = job("macos-homebrew,4.14,x.1", "cancelled", "Cancelled", experimental=True)
+        [r] = self.t.rerun_rules({"jobs": [exp]}, [])
+        self.assertEqual((r["where_kind"], r["experimental"]), ("rerun", True))
+        [r] = self.t.rerun_rules({"jobs": [exp, job("compilers,4.14,x.1", "network", "curl failed")]}, [])
+        self.assertFalse(r["experimental"])
+
     def test_unanalysed_order(self):
         # The PR's own failures are analysed before those of its reverse
         # dependencies, experimental platforms last; classic builder first.
@@ -1154,8 +1162,9 @@ class PageTest(unittest.TestCase):
         self.assertFalse(self.r.seems_ready(self.pr([dict(new, also_failing_in=[2, 3, 4])])))
         self.assertFalse(self.r.seems_ready(self.pr([dict(self.lint, also_failing_in=[2, 3, 4])])))
         self.assertTrue(self.r.seems_ready(self.pr([dict(self.lint, experimental=True)])))
-        self.assertTrue(self.r.seems_ready(self.pr([{"class": "elsewhere", "rule": "lint-ci-error",
-                                                      "fix_in": "CI (rerun)", "variant": "(lint)"}])))
+        # A lint job that failed before linting did not check anything: not ready, to rerun.
+        self.assertFalse(self.r.seems_ready(self.pr([{"class": "elsewhere", "rule": "lint-ci-error",
+                                                       "fix_in": "CI (rerun)", "variant": "(lint)"}])))
         self.assertFalse(self.r.seems_ready(self.pr([self.lint])))
         # Unexplained failures (only skipped jobs), CI not finished, drafts, labels.
         self.assertFalse(self.r.seems_ready(self.pr([])))
@@ -1306,6 +1315,32 @@ class PageTest(unittest.TestCase):
         unanalysed = self.pr([self.day10], **draft)
         unanalysed["result"]["unanalysed"] = 2
         self.assertEqual(v(unanalysed), "other")
+
+    def test_needs_a_rerun(self):
+        # Jobs that failed because of the CI were not tested: such a PR is not ready, even when nothing
+        # else points at it.
+        v = self.r.verdict
+        rerun = {"class": "elsewhere", "rule": "rerun", "fix_in": "CI (rerun)", "variant": "7 jobs",
+                 "error": "4 cancelled, 3 network errors (curl failed)"}
+        for sugg in ([rerun], [self.day10, rerun], [dict(self.revdep, preexisting="on master"), rerun]):
+            pr = self.pr(sugg)
+            self.assertFalse(self.r.seems_ready(pr))
+            self.assertEqual(v(pr), "rerun")
+        self.assertEqual(self.r.headline(self.pr([self.day10, rerun]), as_html=False),
+                         "Jobs to rerun (4 cancelled, 3 network errors (curl failed))")
+        lint_ci = {"class": "elsewhere", "rule": "lint-ci-error", "fix_in": "CI (rerun)", "variant": "(lint)"}
+        self.assertEqual(v(self.pr([lint_ci])), "rerun")
+        # Reruns of experimental jobs only do not hold a PR back.
+        self.assertEqual(v(self.pr([dict(rerun, experimental=True)])), "ready")
+        # Anything else of the PR comes first.
+        self.assertEqual(v(self.pr([self.lint, rerun])), "change")
+        self.assertEqual(v(self.pr([self.revdep, rerun])), "blocked")
+        self.assertEqual(v(self.pr([dict(self.lint, new=None, **{"class": "explanation"}), rerun])), "other")
+        page = self.r.render({"prs": [self.pr([rerun])], "generated": "2026-11-20T10:00:00+00:00"})
+        self.assertIn('data-f="rerun"', page)
+        self.assertIn('.v-rerun{', page)
+        self.assertNotIn('<section id="ready">', page)
+        self.assertIn("Needs a rerun", self.r.help_section({}))
 
     def test_unknown_is_an_explanation(self):
         sys.path.insert(0, os.path.join(HERE, ".."))
