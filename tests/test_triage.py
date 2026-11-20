@@ -369,6 +369,23 @@ class RulesTest(unittest.TestCase):
                           ["compilers,5.4,a.1,revdeps,r.1"],
                           ["freebsd,freebsd-15.1-ocaml-5.5-amd64,a.1"]])
 
+    def test_builder_specific_same_arch(self):
+        def rules(*jobs):
+            return [r["rule"] for r in self.t.matrix_rules(list(jobs), [], None, {"x.1"})]
+        classic = job("compilers,5.3,x.1", category="passed")             # debian-13, x86_64
+        self.assertIn("builder-specific", rules(job("day10,debian-13,x86_64,5.3,x.1"), classic))
+        # day10 fails on arm64 only: the classic builder passing on x86_64 says nothing about the builder.
+        self.assertNotIn("builder-specific", rules(job("day10,debian-13,arm64,5.3,x.1"), classic,
+                                                   job("day10,debian-13,x86_64,5.3,x.1", category="passed")))
+        self.assertNotIn("builder-specific", rules(job("day10,debian-13,arm64,5.3,x.1"), classic))
+        # FreeBSD's classic jobs say amd64.
+        self.assertIn("builder-specific", rules(job("day10,freebsd-15.1,x86_64,5.5,x.1"),
+                                                job("freebsd,freebsd-15.1-ocaml-5.5-amd64,x.1", category="passed")))
+        # A classic pass on the same arch, but day10 passes on another arch: the arch matters.
+        self.assertNotIn("builder-specific", rules(
+            job("day10,macos-homebrew,arm64,5.5,x.1"), job("macos,macos-homebrew-ocaml-5.5-arm64,x.1", category="passed"),
+            job("day10,macos-homebrew,x86_64,5.5,x.1", category="passed")))
+
     def test_unanalysed_count(self):
         # Failures beyond --max are counted in the JSON output.
         env = {**os.environ, "OPAM_CI_OFFLINE": "1", "OPAM_CI_RECORD": "0"}

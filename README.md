@@ -79,7 +79,7 @@ recognises are grouped in one "Not recognised" entry listing their jobs.
 | Missing C header | which platform lacks it; add a depext or `x-ci-accept-failures` | low |
 | Job matrix: fails on every older (or newer) OCaml version, passes on the others | `"ocaml" {>= "X"}` / `{< "X"}`, `{with-test & …}` if only tests fail | medium |
 | Job matrix: fails only on Windows / one arch / some distributions | `"@runtest" {with-test & os != "win32"}`, `available: arch != "s390x"`, `x-ci-accept-failures: [...]`; aimed at the failing dependency when it is the one failing | medium |
-| Fails only on the day10 builder while the classic builder passes on the same distribution and OCaml version | reported as a CI-environment problem, with the evidence (e.g. a conf package that declares the depext the image didn't install) | high |
+| Fails only on the day10 builder while the classic builder passes on the same distribution, architecture and OCaml version (and day10 does not pass on another architecture there) | reported as a CI-environment problem, with the evidence (e.g. a conf package that declares the depext the image didn't install) | high |
 | The PR removes or relaxes the `available` filter of an existing version, and its packages now fail on platforms the old filter excluded | restore the old filter, or narrow it to the platforms that build (read from the PR's diff: one GitHub call) | high/medium |
 | A conf package fails on a platform listed in its `x-ci-accept-failures` | CI should have ignored it: CI-environment problem | high |
 | Lint error already reported in the previous release's CI | noted, with the PR number | high |
