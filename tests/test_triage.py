@@ -1149,6 +1149,10 @@ class PageTest(unittest.TestCase):
         self.assertFalse(self.r.seems_ready(self.pr([self.day10, self.revdep])))
         self.assertTrue(self.r.seems_ready(self.pr([self.day10, dict(self.revdep, preexisting="on master")])))
         self.assertTrue(self.r.seems_ready(self.pr([dict(self.revdep, also_failing_in=[2, 3])])))
+        # ... but not against evidence that it is this PR's (stored before mark_shared_failures skipped them).
+        new = {"class": "fix", "rule": "health-check-new", "fix_in": "this PR", "failing": "y.1", "variant": "v"}
+        self.assertFalse(self.r.seems_ready(self.pr([dict(new, also_failing_in=[2, 3, 4])])))
+        self.assertFalse(self.r.seems_ready(self.pr([dict(self.lint, also_failing_in=[2, 3, 4])])))
         self.assertTrue(self.r.seems_ready(self.pr([dict(self.lint, experimental=True)])))
         self.assertTrue(self.r.seems_ready(self.pr([{"class": "elsewhere", "rule": "lint-ci-error",
                                                       "fix_in": "CI (rerun)", "variant": "(lint)"}])))
@@ -1176,18 +1180,41 @@ class PageTest(unittest.TestCase):
         import triage_open_prs as T
         rd = "compilers,5.4,x.1,revdeps,{}"
 
-        def entry(n, failing, *suggestions):
-            return {"number": n, "jobs": {"failing_revdeps": {r: [] for r in failing}},
+        def entry(n, failing, *suggestions, target="x.1", category="build"):
+            # The failing reverse dependencies of a PR testing `target`, as jobs_overview stores them.
+            return {"number": n,
+                    "jobs": {"failing_revdeps": {r: [{"variant": f"compilers,5.4,{target},revdeps,{r}",
+                                                      "category": category, "target": target}]
+                                                 for r in failing}},
                     "result": {"suggestions": [{"variant": "v", "jobs": js} for js in suggestions]}}
         prs = {"1": entry(1, ["a.1", "b.1", "c.1", "d.1"],
                           [rd.format("a.1"), rd.format("b.1"), rd.format("c.1")],   # each in one other PR
                           [rd.format("d.1")],                                         # in 3 other PRs
                           [rd.format("d.1"), "compilers,5.4,x.1"],                    # and a non-revdep job
                           [rd.format("a.1"), rd.format("d.1")]),
-               "2": entry(2, ["a.1", "d.1"]), "3": entry(3, ["b.1", "d.1"]), "4": entry(4, ["c.1", "d.1"])}
+               "2": entry(2, ["a.1", "d.1"], target="y.1"), "3": entry(3, ["b.1", "d.1"], target="z.2"),
+               "4": entry(4, ["c.1", "d.1"], target="w.1")}
         T.mark_shared_failures(prs)
         got = [s.get("also_failing_in") for s in prs["1"]["result"]["suggestions"]]
         self.assertEqual(got, [None, [2, 3, 4], None, None])
+
+        # Other releases of the same package do not vouch for each other (two lwt releases break the
+        # same reverse dependencies), nor do other PRs where the reverse dependency fails another way.
+        def shared(*others, suggestion=None):
+            prs = {"1": entry(1, ["d.1"], [rd.format("d.1")])}
+            prs["1"]["result"]["suggestions"] = [dict(suggestion or {}, variant="v", jobs=[rd.format("d.1")])]
+            for k, (target, category) in enumerate(others, 2):
+                prs[str(k)] = entry(k, ["d.1"], target=target, category=category)
+            T.mark_shared_failures(prs)
+            return prs["1"]["result"]["suggestions"][0].get("also_failing_in")
+        self.assertEqual(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build")), [2, 3, 4])
+        self.assertIsNone(shared(("x.2", "build"), ("x.3", "build"), ("w.1", "build")))
+        self.assertIsNone(shared(("y.1", "dependency"), ("z.1", "build"), ("w.1", "build")))
+        # Never on a failure the evidence puts on this PR: it builds on master.
+        self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
+                                 suggestion={"rule": "health-check-new", "fix_in": "this PR"}))
+        self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
+                                 suggestion={"rule": "library-api", "fix_in": "this PR", "where_kind": "pr"}))
 
     def test_stale_labels(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))

@@ -34,7 +34,7 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(ROOT, "opam_repo_ci_triage.py")
 sys.path.insert(0, ROOT)
-from opam_repo_ci_triage import BASE, USER_AGENT, github_token  # noqa: E402
+from opam_repo_ci_triage import BASE, USER_AGENT, github_token, split_pkg, where_kind  # noqa: E402
 
 OWNER, NAME = "ocaml", "opam-repository"
 CONTEXT = "opam-ci"
@@ -284,28 +284,48 @@ def save_state(path, prs):
 SHARED_MIN = 3   # other open PRs a failure must also appear in to be marked
 
 
+REVDEP_JOB = re.compile(r"(?:^|,)([^,]+),revdeps,([^,]+)")
+
+
 def mark_shared_failures(prs):
     """Mark the suggestions about reverse dependencies that also fail in at
     least SHARED_MIN other open PRs: such a failure is not caused by this PR.
     Uses the failing reverse dependencies of every PR (from `summary`). Every
     job of the suggestion must be a reverse-dependency job, and the same other
     PRs must fail on each of its reverse dependencies: three revdeps each
-    failing in one other PR do not make a failure shared by three PRs."""
-    where = collections.defaultdict(set)
+    failing in one other PR do not make a failure shared by three PRs.
+
+    Another PR counts only when its failing job tests another package (two
+    releases of lwt break the same reverse dependencies: they do not vouch for
+    each other) and fails the same way (its category, when known). Never for a
+    failure the analysis puts on this PR (health-check-new, where_kind "pr"):
+    the evidence says it is this PR's."""
+    where = collections.defaultdict(dict)       # revdep -> PR -> [(tested package name, category)]
     for e in prs.values():
-        for rd in ((e.get("jobs") or {}).get("failing_revdeps") or {}):
-            where[rd].add(int(e["number"]))
+        for rd, js in ((e.get("jobs") or {}).get("failing_revdeps") or {}).items():
+            where[rd][int(e["number"])] = [(split_pkg(j.get("target") or "")[0], j.get("category"))
+                                           for j in js or [] if isinstance(j, dict)]
     for e in prs.values():
         n = int(e["number"])
+        mine = (e.get("jobs") or {}).get("failing_revdeps") or {}
         for r in (e.get("result") or {}).get("suggestions", []):
-            found = [re.search(r"revdeps,([^,]+)", v or "") for v in (r.get("jobs") or [r.get("variant") or ""])]
-            others = []
-            if found and all(found):
-                others = sorted(set.intersection(*(where[m.group(1)] for m in found)) - {n})
-            if len(others) >= SHARED_MIN:
-                r["also_failing_in"] = others
-            else:
-                r.pop("also_failing_in", None)
+            r.pop("also_failing_in", None)
+            if r.get("rule") == "health-check-new" or where_kind(r) == "pr":
+                continue
+            others = None
+            for v in (r.get("jobs") or [r.get("variant") or ""]):
+                m = REVDEP_JOB.search(v or "")
+                if not m:
+                    others = set()
+                    break
+                name, rd = split_pkg(m.group(1))[0], m.group(2)
+                cats = {j.get("category") for j in mine.get(rd) or [] if isinstance(j, dict)
+                        and j.get("variant") == v} - {None}
+                same = {p for p, js in where[rd].items()
+                        if p != n and any(t and t != name and (not cats or c in cats) for t, c in js)}
+                others = same if others is None else others & same
+            if others and len(others) >= SHARED_MIN:
+                r["also_failing_in"] = sorted(others)
 
 
 def since_last_push(prev, result):

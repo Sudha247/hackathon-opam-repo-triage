@@ -111,8 +111,11 @@ def groups(pr):
 def not_this_pr(r):
     """Whether a failure is not the PR's: it happens without the PR (pre-existing,
     or also failing in other open PRs), comes from the CI, or is on an
-    experimental platform, whose failures do not block a PR."""
-    return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or r.get("also_failing_in")
+    experimental platform, whose failures do not block a PR. Failing in other
+    PRs does not outweigh evidence that the failure is this PR's (it builds
+    on master, say: see mark_shared_failures)."""
+    shared = r.get("also_failing_in") and where_kind(r) != "pr" and r.get("rule") != "health-check-new"
+    return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or shared
                 or r.get("experimental") or where_kind(r) in CI_SIDE or r.get("rule") in PREEXISTING_RULES)
 
 
