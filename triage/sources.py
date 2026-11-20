@@ -291,11 +291,11 @@ class Sources:
 
     # Tools whose callers need to know more than "no answer" (see _mcp): their
     # errors are answers kept as {"tool_error": message}; a partial answer
-    # (docs-ci could not be read for some versions, or the call ran out of
-    # time) is returned but neither cached nor counted as answered; a server
+    # (docs-ci could not be read for some versions or candidates, or the call
+    # ran out of time) is returned but neither cached nor counted as answered; a server
     # that does not have the tool yet makes it unavailable (MCP_UNAVAILABLE),
     # which is not a failure: the callers have another way.
-    MCP_STRICT_TOOLS = ("ocaml_module_changes",)
+    MCP_STRICT_TOOLS = ("ocaml_module_changes", "ocaml_module_find")
 
     def _mcp(self, tool, max_age, args):
         """mcp(): (value, answered), `answered` False when the call failed
@@ -510,6 +510,63 @@ class Sources:
         self.mem[key] = out
         return out
 
+    # Which candidates document a module changes when a release is published
+    # or its docs are built.
+    MODULE_FIND_MAX_AGE = 24 * 3600
+    # The most candidates ocaml_module_find searches in one call.
+    MODULE_FIND_MAX_PACKAGES = 40
+    MODULE_NAME = re.compile(r"[A-Z][\w']*")
+
+    def module_providers(self, name, packages):
+        """Which of `packages` (and of the packages named after the module)
+        document a module `name` (a module path as written in the code), from
+        ocaml.org's ocaml_module_find (one call; each candidate is searched in
+        its latest documented version among its 5 newest, the module at any
+        depth: "Term" finds why3's Why3.Term):
+        {"matches": [{"package", "version", "library", "module": full path as
+        a list}], in the tool's order (the packages given first, in their
+        order), modules only; "checked": {package: status} ("match",
+        "no-match", "no-docs", or a failure: "docs-unavailable", "error",
+        "skipped"); "no_docs": the candidates without docs in their newest
+        versions; "distribution": True when the tool says the module comes
+        with the OCaml compiler (Unix, Str...); "partial": bool (some
+        candidates could not be searched: counted in NET["mcp-errors"], not
+        cached)}. None when the tool gives no answer: not deployed, a failed
+        call (counted in NET["mcp-errors"]), or its error (no known package
+        among the candidates, a name that is not a module path)."""
+        packages = list(dict.fromkeys(packages))[:self.MODULE_FIND_MAX_PACKAGES]
+        if not name or not packages:
+            return None
+        key = ("module-find", name, tuple(packages))
+        if key in self.mem:
+            return self.mem[key]
+        out = None
+        d, answered = self._mcp("ocaml_module_find", self.MODULE_FIND_MAX_AGE,
+                                {"name": name, "kind": "module", "packages": packages})
+        if isinstance(d, dict) and "tool_error" not in d and isinstance(d.get("matches"), list):
+            matches = []
+
+            def field(m, k, rx):
+                return m[k] if isinstance(m.get(k), str) and re.fullmatch(rx, m[k]) else None
+            for m in d["matches"]:
+                if not isinstance(m, dict) or m.get("kind") != "module":
+                    continue            # a library, a module type
+                path = (field(m, "module", r"[\w'.]+") or "").split(".")
+                if not field(m, "package", r"[\w+-]+") or not all(self.MODULE_NAME.fullmatch(c) for c in path):
+                    continue
+                matches.append({"package": m["package"], "module": path,
+                                "version": field(m, "version", r"[\w+.~-]+"),
+                                "library": field(m, "library", r"[\w+.-]+")})
+            checked = {c["package"]: c["status"] for c in d.get("checked") or []
+                       if isinstance(c, dict) and isinstance(c.get("package"), str)
+                       and isinstance(c.get("status"), str)}
+            out = {"matches": matches, "checked": checked,
+                   "no_docs": [p for p, s in checked.items() if s == "no-docs"],
+                   "distribution": isinstance(d.get("note"), str),
+                   "partial": not answered}
+        self.mem[key] = out
+        return out
+
     def published(self, pkg, version):
         """Release date (YYYY-MM-DD) of pkg.version, from ocaml_package_versions,
         or None."""
@@ -638,6 +695,9 @@ BISECT_CAP = 10
 
 # The `source` of a lookup answered by ocaml.org's ocaml_module_changes.
 API_HISTORY = "ocaml.org API history"
+
+# The `source` of a lookup whose package ocaml.org's ocaml_module_find chose.
+MODULE_FIND = "ocaml.org module search"
 
 
 def bisect_presence(check, versions, bad, allowed=lambda v: True, cap=BISECT_CAP):

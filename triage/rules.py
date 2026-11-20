@@ -32,6 +32,7 @@ from .where import fix_where, pr_or_other
 from .sources import (  # noqa: F401
     API_HISTORY,
     BISECT_CAP,
+    MODULE_FIND,
     bisect_presence,
     constraint_edit,
     defines,
@@ -96,6 +97,48 @@ UNBOUND_RES = [
 
 # The standard library's sources, read for the releases ocaml.org's API history cannot tell.
 STDLIB_SOURCES = "OCaml's stdlib .mli files"
+
+# Dependencies not searched for the module of an unbound identifier (as in the
+# guess from the dependencies), besides the conf-* packages: no OCaml module.
+NOT_SEARCHED = ("ocaml", "dune", "ocamlfind")
+
+
+def dep_names(opam_text, field):
+    """The package names of an opam file's `depends` or `depopts` field, in order."""
+    m = re.search(rf"(?m)^{field}:\s*\[([^\]]*)\]", opam_text or "")
+    return re.findall(r'"([\w+-]+)"', re.sub(r"\{[^}]*\}", "", m.group(1))) if m else []
+
+
+def module_find_note(found, top, installed, opam_text, fname):
+    """What ocaml.org's module search (Sources.module_providers) said about
+    module `top`, for the note of an unbound identifier that no dependency's
+    history explains: "" when it gave no answer, or a partial one without a
+    match."""
+    if not found or (found["partial"] and not found["matches"]):
+        return ""
+    if found["matches"]:
+        deps = set(dep_names(opam_text, "depends") + dep_names(opam_text, "depopts"))
+        descs = []
+        for m in found["matches"][:3]:
+            p, what = m["package"], []
+            if m["module"] != [top]:
+                what.append("as " + ".".join(m["module"]))
+            if m["library"]:
+                what.append(f"library {m['library']}")
+            if p == fname:
+                what.append("the failing package")
+            elif p not in installed:
+                what.append("not installed in this job" if p in deps else f"not a dependency of {fname}")
+            descs.append((f"{p} {m['version']}" if m["version"] else p) + (f" ({', '.join(what)})" if what else ""))
+        more = len(found["matches"]) - len(descs)
+        return (f"ocaml.org's docs have module {top} in " + "; ".join(descs)
+                + (f"; and {more} more" if more > 0 else "") + ".")
+    if found["distribution"]:
+        return f"ocaml.org: {top} comes with the OCaml compiler, not with an opam package."
+    no_docs = [p for p in found["no_docs"] if p in installed]
+    return (f"ocaml.org's docs have no module {top} in the latest documented version of the dependencies"
+            + (f" (without docs: {', '.join(no_docs[:5])}{', ...' if len(no_docs) > 5 else ''})" if no_docs else "")
+            + ".")
 
 
 def find_unbound(lines):
@@ -315,13 +358,34 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
             deps = [d for d in deps if d in info["installed"] and d not in ("ocaml", "dune", "ocamlfind")]
             mentioned = {norm(w) for w in re.findall(r"\b([A-Z]\w+)\.", "\n".join(err))}
             cands = sorted(deps, key=lambda d: not any(m.startswith(norm(d)) for m in mentioned))
+        # ocaml.org's module search: which of these packages and of the other
+        # direct (and optional) dependencies installed document module `top`,
+        # at any depth (Term in why3 is Why3.Term), in their latest documented
+        # version. Those come first, with the module's full path, and need not
+        # have it in the version installed (it may have appeared later);
+        # the guesses above follow, for when the search does not answer or
+        # its packages are not the cause.
+        searched = [d for d in dict.fromkeys(cands + dep_names(opam_text, "depends") + dep_names(opam_text, "depopts"))
+                    if d in info["installed"] and d not in NOT_SEARCHED and not d.startswith("conf-")]
+        found = src.module_providers(top, searched) if searched else None
+        chosen = {}                                  # package -> full path of `top` in it (None: several)
+        for m in (found or {}).get("matches", []):
+            if m["package"] in info["installed"]:
+                chosen[m["package"]] = None if m["package"] in chosen else m["module"]
+        cands = list(chosen) + [p for p in cands if p not in chosen]
         for pkg in cands[:5]:
             bad = info["installed"].get(pkg)
             if not bad:
                 continue
-            doc_mods = mods if mods else []          # full path, e.g. ['Ortools', 'Sat']
+            path = chosen.get(pkg)
+            if path and mods:
+                doc_mods = path + mods[1:]           # Term.t_loc in why3: ['Why3', 'Term']
+            elif path:
+                doc_mods = path[:-1]                 # a top-level module found in a wrapper: ['Why3']
+            else:
+                doc_mods = mods if mods else []      # full path, e.g. ['Ortools', 'Sat']
             git_path = mods[1:] if mods and norm(mods[0]).startswith(norm(pkg)) and len(mods) > 1 else mods
-            used = set()
+            used = {MODULE_FIND} if pkg in chosen else set()
             bounds = existing_bounds(opam_text, pkg)
 
             def allowed(v, b=bounds):
@@ -360,7 +424,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                     return bool(module_files(src.tree(repo, t), ident))
                 return present(src, repo, t, git_path or [top], kind, ident)
 
-            if not by_name:
+            if not by_name and pkg not in chosen:
                 # Accept a dependency only if it actually provides that module.
                 # (The history tells about the module path of the call: `top`
                 # only when that path is `top` alone.)
@@ -395,6 +459,9 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         if "note" not in out:
             out.update(note="The identifier was not found in the history of any dependency the tool checked.",
                        _unexplained=True)
+        extra = module_find_note(found, top, info["installed"], opam_text, fname)
+        if extra:
+            out["note"] += " " + extra
         return out
 
     if info["test_diff"]:

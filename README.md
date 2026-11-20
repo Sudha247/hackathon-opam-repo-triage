@@ -74,7 +74,7 @@ failures" entry listing their jobs.
 
 | Failure | Suggestion | Confidence |
 |---|---|---|
-| Unbound value / module / constructor / record field / type / module type / class from a library | `>=` the version that introduced it, or `<` the version that removed it, found from ocaml.org's API history of the item (per-version docs, upstream sources for versions without docs); `{= version}` when both packages come from the same repository | high |
+| Unbound value / module / constructor / record field / type / module type / class from a library | `>=` the version that introduced it, or `<` the version that removed it, found from ocaml.org's API history of the item (per-version docs, upstream sources for versions without docs), in the dependency whose docs have the module (ocaml.org's module search; else guessed from the package names and the dependencies); `{= version}` when both packages come from the same repository | high |
 | Same, from the OCaml stdlib | `"ocaml" {>= "X"}` / `{< "X"}` from ocaml.org's API history of the compiler packages, else the stdlib `.mli` of each release | high |
 | `string` used where `bytes` is expected | `"ocaml" {< "4.06"}` (safe-string) | high |
 | Test output diff (cram/mdx) | `"dep" {with-test & < "X"}` for dependencies whose version differs from a passing job, or that were released after the failing package | low (possible causes) |
@@ -143,7 +143,7 @@ API change in a dependency: ortools_solvers.9.15.0-3 (lower bounds) on OCaml 4.1
   same failure on : 3 other jobs: ortools_solvers.9.15.0-3 (lower bounds) on OCaml 5.2, …
   failing package : ortools_solvers.9.15.0-3   fix in this PR
   error           : Unbound value Ortools.Sat.proto_solve
-  looked up in    : ocaml.org API history
+  looked up in    : ocaml.org API history, ocaml.org module search
   defined in      : ortools 9.15.0 (used by CI) no, 9.15.0-1 no, 9.15.0-2 yes
   suggested change (high confidence):
     - "ortools"	{>= "9.15"}
@@ -382,9 +382,24 @@ job's summary.
 ## Data sources, cheapest first
 
 1. The CI commit page and job logs (opam.ci.ocaml.org).
-2. The ocaml.org MCP endpoint (`https://ocaml.org/mcp`, JSON-RPC, no session, no token): for an unbound identifier of a library, its API history (`ocaml_module_changes`: in one call, whether each version in a range of up to 60 has the item, from the HTML odoc generates for it, not from matching the text of signatures; kept a day in the cache); module lists and plain-text signatures for every documented package version (`ocaml_package_documentation`, `ocaml_module_documentation`), read version by version only for what the API history could not tell (see below); the versions of a package with their release dates (`ocaml_package_versions`, kept a day in the cache); and, for a test-output failure, the changelog sections of each suspect dependency between the passing version and the first release after it (`ocaml_package_changelog`).
+2. The ocaml.org MCP endpoint (`https://ocaml.org/mcp`, JSON-RPC, no session, no token): for an unbound identifier of a library, which dependency documents its module (`ocaml_module_find`, one call, kept a day in the cache) and the item's API history (`ocaml_module_changes`: in one call, whether each version in a range of up to 60 has the item, from the HTML odoc generates for it, not from matching the text of signatures; kept a day in the cache); module lists and plain-text signatures for every documented package version (`ocaml_package_documentation`, `ocaml_module_documentation`), read version by version only for what the API history could not tell (see below); the versions of a package with their release dates (`ocaml_package_versions`, kept a day in the cache); and, for a test-output failure, the changelog sections of each suspect dependency between the passing version and the first release after it (`ocaml_package_changelog`).
 3. Raw files: opam files of opam-repository, `stdlib/*.mli` of each OCaml release.
 4. A shallow, blob-less `git fetch` of one upstream tag, only when ocaml.org has no docs for a version.
+
+Which dependency the module `M` of an unbound `M.x` (or of `Unbound module M`) comes from: the tool asks
+`ocaml_module_find` once, with as candidates the installed packages named after `M`, then the failing
+package's direct and optional dependencies installed in the job (not `ocaml`, `dune`, `ocamlfind`, `conf-*`),
+from the opam file CI used (not the tool's `dependencies_of`: ocaml.org may not know the PR's version yet, and
+the PR may change its dependencies); the tool adds the packages named after the module. Each candidate is
+searched in its latest documented version, the module at any depth (`Term` is why3's `Why3.Term`, `EzLwtSys`
+is in `ez_api`). The installed packages that have it are looked up first, through the module's full path,
+whether or not the version installed has the module (it may have appeared later: a lower bound); the guess
+from the package names and the dependencies follows, as before. When no bound is found, the note says what
+the search found: the module in a package (and in which library and module path), in a package not
+installed (named after the module, or an optional dependency), in the OCaml distribution (`Unix`, `Str`), or
+in no dependency's docs. The answer is kept a day; a partial one (some candidates could not be read, or the
+call ran out of time) is used for the matches it has, not cached, and counted in `mcp-errors`; the tool's
+error (no known candidate) or its absence (`unknown tool`) leaves the guess alone, without counting a failure.
 
 For an unbound identifier `M.x` of a dependency, the tool asks `ocaml_module_changes` once for the versions
 around the one the failing job used (10 on each side, within the package's existing bounds), as the module
@@ -397,7 +412,8 @@ is looked up one by one as before (the item may be in versions without docs, a r
 built yet). A partial answer (docs-ci failed for some versions, or the call ran out of time) is used for the
 versions it has, not cached, and counted in `mcp-errors`. When ocaml.org does not have the tool (`unknown
 tool`), the version-by-version lookup is used, without counting a failure. An unbound top-level module
-(`Unbound module Foo`) keeps its own lookup. For the standard library, ocaml.org documents the stdlib
+(`Unbound module Foo`) is looked up in each version's module list, or, when the module search found it in a
+wrapper (`Why3.Term`), in the wrapper's API history. For the standard library, ocaml.org documents the stdlib
 with the compiler: `ocaml-base-compiler` up to OCaml 5.2, `ocaml-compiler` from 5.3 (where the compiler's
 sources moved). The tool makes one call for each, with the module path in full (`Stdlib.List`: in those
 packages, `List` alone also names compiler-libs modules), restricted to the releases ocaml.org lists; the

@@ -1164,6 +1164,9 @@ class ApiHistoryRuleTest(unittest.TestCase):
                 calls.append(("history", pkg, tuple(mods), kind, ident, tuple(sorted(versions))))
                 return statuses and {"versions": statuses, "module": "Foo", "partial": False}
 
+            def module_providers(self, name, packages):
+                return None                             # not deployed, or no answer
+
             def doc_present(self, pkg, v, mods, kind, ident):
                 calls.append(("docs", v))
                 return (docs or {}).get(v)
@@ -1239,6 +1242,303 @@ class ApiHistoryRuleTest(unittest.TestCase):
         self.assertFalse(defines("module S : sig end", "module-type", "S"))
         self.assertTrue(defines("class virtual ['a] c : object end", "class", "c"))
         self.assertTrue(defines("exception E of int", "exception", "E"))
+
+
+def find_answer(matches, checked, partial=False, **extra):
+    """An ocaml_module_find answer: `matches` [(package, version, module path,
+    library, kind)], `checked` {package: status}."""
+    return {"name": "Term", "kind": "module", "searched_as": {"library": None, "module": "Term"},
+            "matches": [{"package": p, "version": v, "kind": k, "library": lib, "module": m,
+                         "path": f"{lib}/{(m or '').replace('.', '/')}/index.html"} for p, v, m, lib, k in matches],
+            "matches_truncated": False,
+            "checked": [dict({"package": p, "version": "1.0", "status": s},
+                             **({"versions_probed": 5} if s == "no-docs" else {})) for p, s in checked.items()],
+            "unknown_packages": [], "candidates_truncated": False, "partial": partial,
+            "deadline_reached": False, **extra}
+
+
+class ModuleFindTest(NetTestBase):
+    """Sources.module_providers: ocaml_module_find's answer as the modules each
+    candidate documents; its errors are answers, its failures are counted."""
+
+    def serve(self, answer):
+        srv = Serve(lambda body: answer(json.loads(body)["params"]))
+        self.addCleanup(srv.close)
+        return srv
+
+    def src(self, srv):
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = srv.url
+        return src
+
+    def test_match_through_a_wrapper_and_cache(self):
+        srv = self.serve(lambda p: mcp_answer(find_answer(
+            [("why3", "1.9.0", "Why3.Term", "why3", "module")],
+            {"why3": "match", "cmdliner": "no-match", "nodoc": "no-docs"})))
+        before = self.errors()
+        f = self.src(srv).module_providers("Term", ["why3", "cmdliner", "nodoc", "why3"])
+        self.assertEqual(json.loads(srv.requests[0])["params"], {"name": "ocaml_module_find", "arguments": {
+            "name": "Term", "kind": "module", "packages": ["why3", "cmdliner", "nodoc"]}})
+        self.assertEqual(f, {"matches": [{"package": "why3", "module": ["Why3", "Term"], "version": "1.9.0",
+                                          "library": "why3"}],
+                             "checked": {"why3": "match", "cmdliner": "no-match", "nodoc": "no-docs"},
+                             "no_docs": ["nodoc"], "distribution": False, "partial": False})
+        self.assertEqual(self.errors(), before)
+        # Cached on disk, for a day (new releases, docs built since).
+        self.assertEqual(self.src(srv).module_providers("Term", ["why3", "cmdliner", "nodoc"]), f)
+        self.assertEqual(len(srv.requests), 1)
+        for name in os.listdir(self.tmp):
+            self.age(os.path.join(self.tmp, name), 2)
+        self.src(srv).module_providers("Term", ["why3", "cmdliner", "nodoc"])
+        self.assertEqual(len(srv.requests), 2)
+        # No candidate, no call.
+        self.assertIsNone(self.src(srv).module_providers("Term", []))
+        self.assertEqual(len(srv.requests), 2)
+
+    def test_several_matches(self):
+        # Modules only, in the tool's order; not a library, a module type, or an odd path.
+        srv = self.serve(lambda p: mcp_answer(find_answer(
+            [("lwt", "5.9.0", "Lwt.Infix", "lwt", "module"), ("lwt", "5.9.0", "Lwt_result.Infix", "lwt", "module"),
+             ("sigs", "1.0", "Sigs.Infix", "sigs", "module-type"), ("lib", "1.0", None, "infix", "library"),
+             ("odd", "1.0", "Odd.<b>Infix</b>", "odd", "module"), ("base", "v0.17", "Base.Infix", None, "module"),
+             ("@evil", "1.0", "Evil.Infix", "evil", "module"), ("ok", "1.0 [x](y)", "Ok.Infix", "<i>", "module")],
+            {"lwt": "match", "sigs": "match", "lib": "match", "odd": "match", "base": "match"})))
+        f = self.src(srv).module_providers("Infix", ["lwt", "sigs", "lib", "odd", "base"])
+        self.assertEqual([(m["package"], m["module"], m["version"], m["library"]) for m in f["matches"]],
+                         [("lwt", ["Lwt", "Infix"], "5.9.0", "lwt"), ("lwt", ["Lwt_result", "Infix"], "5.9.0", "lwt"),
+                          ("base", ["Base", "Infix"], "v0.17", None), ("ok", ["Ok", "Infix"], None, None)])
+
+    def test_no_match_and_distribution(self):
+        srv = self.serve(lambda p: mcp_answer(find_answer(
+            [], {"foo": "no-match", "nodoc": "no-docs"},
+            **({"note": "Unix comes with the OCaml compiler, not with an opam package: see https://ocaml.org/api/"}
+               if p["arguments"]["name"] == "Unix" else {}))))
+        f = self.src(srv).module_providers("Bar", ["foo", "nodoc"])
+        self.assertEqual((f["matches"], f["no_docs"], f["distribution"], f["partial"]), ([], ["nodoc"], False, False))
+        self.assertTrue(self.src(srv).module_providers("Unix", ["foo"])["distribution"])
+
+    def test_partial_is_a_failure(self):
+        # A candidate's docs could not be read, or the call ran out of time:
+        # what was found is used, the call counts as failed and is not cached.
+        srv = self.serve(lambda p: mcp_answer(find_answer(
+            [("why3", "1.9.0", "Why3.Term", "why3", "module")],
+            {"why3": "match", "flaky": "error", "slow": "skipped"}, partial=True, deadline_reached=True)))
+        before = self.errors()
+        src = self.src(srv)
+        f = src.module_providers("Term", ["why3", "flaky", "slow"])
+        self.assertTrue(f["partial"])
+        self.assertEqual([m["package"] for m in f["matches"]], ["why3"])
+        self.assertEqual(self.errors(), before + 1)
+        self.assertEqual(os.listdir(self.tmp), [])
+        self.assertEqual(src.module_providers("Term", ["why3", "flaky", "slow"]), f)
+        self.assertEqual((len(srv.requests), self.errors()), (1, before + 1))     # once per process
+
+    def test_tool_error_vs_failure(self):
+        # The tool's error (no known package among the candidates): no answer,
+        # cached a day, not a failure.
+        srv = self.serve(lambda p: tool_error('no package to search for "Xyz": none is named after it, and no '
+                                               'known package was given in "packages" (unknown packages: "nope")'))
+        before = self.errors()
+        self.assertIsNone(self.src(srv).module_providers("Xyz", ["nope"]))
+        self.assertIsNone(self.src(srv).module_providers("Xyz", ["nope"]))
+        self.assertEqual((len(srv.requests), self.errors()), (1, before))
+        # A failed call: no answer, counted, not cached.
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = "http://127.0.0.1:9/mcp"                   # nothing listens there
+        self.assertIsNone(src.module_providers("Term", ["why3"]))
+        self.assertEqual(self.errors(), before + 1)
+        self.assertEqual(len(os.listdir(self.tmp)), 1)          # the tool's error only
+
+    def test_tool_not_deployed(self):
+        # A server without the tool: no answer, not a failure, not asked again.
+        self.addCleanup(self.sources.MCP_UNAVAILABLE.discard, "ocaml_module_find")
+        srv = Serve(lambda body: http_json({"jsonrpc": "2.0", "id": 1, "error": {
+            "code": -32602, "message": "unknown tool: ocaml_module_find"}}))
+        self.addCleanup(srv.close)
+        before = self.errors()
+        src = self.src(srv)
+        self.assertIsNone(src.module_providers("Term", ["why3"]))
+        self.assertIsNone(src.module_providers("Ez", ["ez_api"]))
+        self.assertEqual((len(srv.requests), self.errors(), self.sources.MCP_FAILURES["n"]), (1, before, 0))
+
+
+def found(*matches, checked=None, partial=False, distribution=False):
+    """A Sources.module_providers answer: `matches` (package, module path)."""
+    checked = checked or {}
+    return {"matches": [{"package": p, "module": m.split("."), "version": "2.0", "library": p} for p, m in matches],
+            "checked": checked, "no_docs": [p for p, s in checked.items() if s == "no-docs"],
+            "distribution": distribution, "partial": partial}
+
+
+class ModuleFindRuleTest(unittest.TestCase):
+    """The library rule with ocaml.org's module search: the packages that
+    document the module come first, with its full path; without an answer,
+    the guess from the package names and the dependencies, as before."""
+
+    JOB = {"variant": "compilers,5.3,x.1", "url": "u", "kind": "build", "experimental": False,
+           "platform": ["compilers", "5.3"], "target": "x.1", "revdep": None}
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import rules
+        self.rules = rules
+
+    def suggest(self, error, installed, depends, providers, history=None, docs=None, depopts=()):
+        """The rule's result and the lookups it made: `providers` is
+        module_providers's answer, `history` {(package, module path): {version:
+        status}} ocaml_module_changes's, `docs` {(package, version): presence}
+        ocaml.org's docs (no git)."""
+        calls = []
+        log = ("".join(f"-> installed {p}.{v}\n" for p, v in installed.items())
+               + "#=== ERROR while compiling x.1 ===#\n# exit-code 1\n### output ###\n"
+               + f"# File \"x.ml\", line 1, characters 0-7:\n# Error: {error}\n")
+        opam = ('opam-version: "2.0"\ndepends: [\n' + "".join(f'  "{d}"\n' for d in depends) + "]\n"
+                + (f"depopts: [ {' '.join(chr(34) + d + chr(34) for d in depopts)} ]\n" if depopts else ""))
+
+        class Src:
+            def opam_file(self, *a):
+                return opam
+
+            def raw(self, url, max_age=None):
+                return None                             # not the stdlib
+
+            def tags(self, url):
+                return []
+
+            def versions(self, name):
+                return ["0.9", "1.0", "1.1", "1.2"]
+
+            def module_providers(self, name, packages):
+                calls.append(("find", name, tuple(packages)))
+                return providers
+
+            def api_history(self, pkg, mods, kind, ident, versions):
+                calls.append(("history", pkg, tuple(mods), kind, ident))
+                st = (history or {}).get((pkg, ".".join(mods)))
+                return st and {"versions": st, "module": ".".join(mods), "partial": False}
+
+            def doc_present(self, pkg, v, mods, kind, ident):
+                calls.append(("docs", pkg, v, tuple(mods), ident))
+                return (docs or {}).get((pkg, v))
+
+            def upstream(self, name, version, ref="master"):
+                return None                             # no git
+        r = self.rules.suggest_for_job(Src(), self.JOB, log, ["x.1"], "a" * 40)
+        return r, calls
+
+    def test_candidates(self):
+        # The packages named after the module, then the direct and optional
+        # dependencies installed, but not the compiler, dune, conf-* packages.
+        _, calls = self.suggest("Unbound value Foo_bar.x", {"foo": "1.0", "why": "1.0", "conf-gmp": "4", "dune": "3.0",
+                                                            "zmq": "5.0", "tr": "1.0"},
+                                ["ocaml", "dune", "conf-gmp", "why", "absent", "foo"], None, depopts=["zmq", "nope"])
+        self.assertEqual(calls[0], ("find", "Foo_bar", ("foo", "why", "zmq")))
+        from triage.rules import dep_names
+        self.assertEqual(dep_names('depends: [\n  "a" {>= "1.0" & < "2.0"}\n  "b-c+d"\n  ("e" | "f")\n]\n'
+                                   'depopts: ["g" {>= "1"} "h"]\n', "depends"), ["a", "b-c+d", "e", "f"])
+        self.assertEqual(dep_names('depopts: ["g" {>= "1"} "h"]\n', "depopts"), ["g", "h"])
+        self.assertEqual(dep_names('build: [["dune" "build"]]\n', "depends"), [])
+
+    def test_module_through_a_wrapper(self):
+        # Term is why's Why.Term (opened): the history is asked for the full path,
+        # and the package need not have the module in the version used.
+        r, calls = self.suggest("Unbound value Term.bar", {"why": "1.0", "cmdliner": "1.0"}, ["why", "cmdliner"],
+                                found(("why", "Why.Term")),
+                                history={("why", "Why.Term"): {"1.0": "module-not-found", "1.1": "present"}})
+        self.assertEqual((r["rule"], r["new"]), ("library-api", '"why" {>= "1.1"}'))
+        self.assertEqual(r["evidence"], {"why 1.1": True, "why 1.0 (installed in failing job)": False})
+        self.assertEqual(r["source"], "ocaml.org API history, ocaml.org module search")
+        self.assertEqual(calls[1:], [("history", "why", ("Why", "Term"), "value", "bar")])
+        # Without the search (not deployed, a failure), the guess: why.1.0 has
+        # no module Term, so it is not a candidate.
+        r, _ = self.suggest("Unbound value Term.bar", {"why": "1.0", "cmdliner": "1.0"}, ["why", "cmdliner"], None,
+                            history={("why", "Term"): {"1.0": "module-not-found", "1.1": "present"}})
+        self.assertNotIn("new", r)
+
+    def test_top_level_module_appeared_later(self):
+        # EzLwtSys is in ez_api (not named after it) from 1.1: a lower bound.
+        args = ("Unbound module EzLwtSys", {"ez_api": "1.0"}, ["ocaml", "ez_api"])
+        docs = {("ez_api", "1.0"): False, ("ez_api", "1.1"): True}
+        r, calls = self.suggest(*args, found(("ez_api", "EzLwtSys")), docs=docs)
+        self.assertEqual((r["rule"], r["new"], r["error"]), ("library-api", '"ez_api" {>= "1.1"}',
+                                                             "Unbound module EzLwtSys"))
+        self.assertEqual(r["source"], "ocaml.org docs, ocaml.org module search")
+        self.assertEqual([c for c in calls if c[0] == "docs"], [("docs", "ez_api", "1.0", (), "EzLwtSys"),
+                                                                ("docs", "ez_api", "1.1", (), "EzLwtSys")])
+        # Before: ez_api.1.0 has no module EzLwtSys, so it was not a candidate.
+        r, _ = self.suggest(*args, None, docs=docs)
+        self.assertNotIn("new", r)
+        self.assertEqual(r["note"], "The identifier was not found in the history of any dependency the tool checked.")
+
+    def test_top_level_module_in_a_wrapper(self):
+        # `Unbound module Term` (Why opened): the history of item Term of Why.
+        r, calls = self.suggest("Unbound module Term", {"why": "1.0"}, ["why"], found(("why", "Why.Term")),
+                                history={("why", "Why"): {"1.0": "absent", "1.1": "present"}})
+        self.assertEqual(r["new"], '"why" {>= "1.1"}')
+        self.assertIn(("history", "why", ("Why",), "module", "Term"), calls)
+
+    def test_defined_in_the_version_used(self):
+        # The package found has the module and the item in the version used:
+        # not a version problem; the note says where the module is.
+        r, _ = self.suggest("Unbound module Bar", {"foo": "1.0"}, ["foo"], found(("foo", "Foo.Bar")),
+                            history={("foo", "Foo"): {"1.0": "present"}})
+        self.assertNotIn("new", r)
+        self.assertEqual(r["tried"], ["foo.1.0 defines it (ocaml.org API history, ocaml.org module search): "
+                                      "not a version problem of foo"])
+        self.assertTrue(r["note"].endswith(" ocaml.org's docs have module Bar in foo 2.0 (as Foo.Bar, library foo)."),
+                        r["note"])
+        self.assertTrue(r["_unexplained"])
+
+    def test_several_matches(self):
+        # In the tool's order: the first package giving a bound; a package with
+        # two modules of that name is looked up through the path as written.
+        r, calls = self.suggest("Unbound value Infix.bar", {"a": "1.0", "b": "1.0"}, ["a", "b"],
+                                found(("a", "A.Infix"), ("a", "A_result.Infix"), ("b", "B.Infix")),
+                                history={("a", "Infix"): {"1.0": "absent", "1.1": "absent", "1.2": "absent",
+                                                          "0.9": "absent"},
+                                         ("b", "B.Infix"): {"1.0": "absent", "1.2": "present", "1.1": "absent"}})
+        self.assertEqual(r["new"], '"b" {>= "1.2"}')
+        self.assertEqual([c[1:3] for c in calls if c[0] == "history"], [("a", ("Infix",)), ("b", ("B", "Infix"))])
+
+    def test_no_match(self):
+        # Nothing among the dependencies' docs: the guess, and the note says so.
+        r, calls = self.suggest("Unbound module Bar", {"foo": "1.0", "nodoc": "1.0"}, ["foo", "nodoc"],
+                                found(checked={"foo": "no-match", "nodoc": "no-docs", "bar": "no-docs"}),
+                                docs={("foo", "1.0"): False})
+        self.assertNotIn("new", r)
+        self.assertIn(("docs", "foo", "1.0", (), "Bar"), calls)        # the guess, as before
+        self.assertEqual(r["note"], "The identifier was not found in the history of any dependency the tool "
+                                    "checked. ocaml.org's docs have no module Bar in the latest documented version "
+                                    "of the dependencies (without docs: nodoc).")
+        # A module of the OCaml distribution (Unix, Str...).
+        r, _ = self.suggest("Unbound module Unix", {"foo": "1.0"}, ["foo"], found(distribution=True))
+        self.assertTrue(r["note"].endswith(" ocaml.org: Unix comes with the OCaml compiler, not with an opam "
+                                           "package."), r["note"])
+
+    def test_match_outside_the_installed_packages(self):
+        # In a package named after the module (searched by the tool), or an
+        # optional dependency not installed: a note, no bound.
+        r, _ = self.suggest("Unbound module Bar", {"foo": "1.0"}, ["foo"], found(("bar", "Bar"), ("zmq", "Zmq.Bar")),
+                            depopts=["zmq"])
+        self.assertNotIn("new", r)
+        self.assertTrue(r["note"].endswith(" ocaml.org's docs have module Bar in bar 2.0 (library bar, not a "
+                                           "dependency of x); zmq 2.0 (as Zmq.Bar, library zmq, not installed in "
+                                           "this job)."), r["note"])
+        # The failing package's own module (its latest docs have it): said so.
+        r, _ = self.suggest("Unbound module X_lexer", {"foo": "1.0"}, ["foo"], found(("x", "X_lexer")))
+        self.assertTrue(r["note"].endswith(" ocaml.org's docs have module X_lexer in x 2.0 (library x, the failing "
+                                           "package)."), r["note"])
+
+    def test_partial(self):
+        # Partial without a match: no answer (the guess, no note); with a
+        # match, the match is used.
+        r, _ = self.suggest("Unbound module Bar", {"foo": "1.0"}, ["foo"],
+                            found(checked={"foo": "error"}, partial=True))
+        self.assertEqual(r["note"], "The identifier was not found in the history of any dependency the tool checked.")
+        r, _ = self.suggest("Unbound value Term.bar", {"why": "1.0"}, ["why"],
+                            found(("why", "Why.Term"), checked={"why": "match", "foo": "skipped"}, partial=True),
+                            history={("why", "Why.Term"): {"1.0": "absent", "1.1": "present"}})
+        self.assertEqual(r["new"], '"why" {>= "1.1"}')
 
 
 class NetErrorTest(NetTestBase):
@@ -3226,6 +3526,14 @@ class EscapingTest(unittest.TestCase):
         self.assertInert(review["body"])
         self.assertFalse(llm.get("_placed"))
         self.assertIn('+ depends: "c"', review["body"])   # the LLM change stays in the summary, as a diff
+
+    def test_module_find_note(self):
+        # Names from ocaml.org's module search (checked by Sources.module_providers) in a note.
+        from triage.rules import module_find_note
+        note = module_find_note(found(("x_y", "Foo__bar.T"), ("a+b", "A_b"), checked={"z_z": "no-docs"}), "T",
+                                {"x_y": "1"}, 'depends: ["x_y"]\n', "pkg_x")
+        self.assertIn("x_y 2.0 (as Foo__bar.T, library x_y)", note)
+        self.assertInert(self.t.render_comment("c" * 40, {"jobs": []}, [self.hostile(note=note)]))
 
     def test_llm_change_is_code(self):
         from unittest import mock
