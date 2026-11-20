@@ -36,8 +36,11 @@ def rates(t):
 
 
 def hits(row):
-    """The suggestions of a PR that matched the author's fix, as comparable keys."""
-    return {(s["package"], s["rule"], tuple(s["tokens"])) for s in row.get("suggestions", []) if s.get("hit")}
+    """The suggestions of a PR that matched the author's fix, as comparable keys:
+    the ones counted in the totals and the ones counted apart (opam-health-check),
+    so that a suggestion moving from one to the other is not a regression."""
+    return {(s["package"], s["rule"], tuple(s["tokens"]))
+            for s in row.get("suggestions", []) + row.get("health_suggestions", []) if s.get("hit")}
 
 
 def pct(x):
@@ -79,6 +82,17 @@ def main():
     out.append(f"| Author's changes anticipated (recall) | {t['fix_covered']}/{t['fix_tokens']} ({pct(r)}) | "
                + (f"{prev['totals']['fix_covered']}/{prev['totals']['fix_tokens']} ({pct(pr_)})"
                   if prev else "none") + " |")
+    if "health_scored" in t:
+        out.append(f"| Suggestions from today's opam-health-check (not counted above) | {t['health_hit']}/"
+                   f"{t['health_scored']} | "
+                   + (f"{prev['totals']['health_hit']}/{prev['totals']['health_scored']}"
+                      if prev and "health_scored" in prev["totals"] else "none") + " |")
+    if prev and "health_scored" in t and "health_scored" not in prev["totals"]:
+        # evaluate_closed_prs.py changed on 2026-11-20: each file of the PR compared
+        # between its two versions (rebased PRs), new archives and opam-health-check
+        # counted apart.
+        out += ["", "The previous run was scored the old way (before 20 November 2026): the totals are not "
+                    "comparable."]
 
     failed = []
     if prev:
