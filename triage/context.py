@@ -362,33 +362,151 @@ def pr_opam_changes(base, sha, cache_dir):
     return out
 
 
+# opam's os-distribution and os-family of the CI distributions (those known for sure).
+OS_DISTRIBUTION = {"debian": "debian", "ubuntu": "ubuntu", "fedora": "fedora", "centos": "centos",
+                   "alpine": "alpine", "archlinux": "arch", "cygwin": "cygwin", "msys2": "msys2",
+                   "macos-homebrew": "homebrew", "freebsd": "freebsd"}
+OS_FAMILY = {"debian": "debian", "ubuntu": "debian", "alpine": "alpine", "archlinux": "arch",
+             "cygwin": "windows", "msys2": "windows", "freebsd": "bsd"}
+
+
+def platform_vars(job):
+    """The opam variables of a job's platform that `available` filters use."""
+    d = job_dims(job)
+    dist = re.sub(r"-[\d.]+$|-(unstable|testing)$", "", d["distro"] or "")
+    v = {"os": d["os"], "arch": {"amd64": "x86_64", "aarch64": "arm64"}.get(d["arch"], d["arch"])}
+    if dist in OS_DISTRIBUTION:
+        v["os-distribution"] = OS_DISTRIBUTION[dist]
+    if dist in OS_FAMILY:
+        v["os-family"] = OS_FAMILY[dist]
+    return v
+
+
+FILTER_TOKEN = re.compile(r'\s*("(?:[^"\\]|\\.)*"|<=|>=|!=|[=<>&|!()]|[A-Za-z_][\w:+.-]*)')
+
+
+def eval_filter(text, env):
+    """An opam filter (e.g. an `available` field) on the variables `env`:
+    True, False, or None when a variable not in `env` decides the result (or
+    the filter is not understood). An empty filter is true."""
+    text = (text or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    toks, pos = [], 0
+    while text[pos:].strip():
+        m = FILTER_TOKEN.match(text, pos)
+        if not m:
+            return None
+        toks.append(m.group(1))
+        pos = m.end()
+    i = 0
+
+    def peek():
+        return toks[i] if i < len(toks) else None
+
+    def value():
+        nonlocal i
+        t = peek()
+        if t is None or t in ("=", "!=", "<", "<=", ">", ">=", "&", "|", "!", "(", ")"):
+            raise ValueError(t)
+        i += 1
+        if t.startswith('"'):
+            return t[1:-1]
+        return t if t in ("true", "false") else env.get(t)
+
+    def atom():
+        nonlocal i
+        if peek() == "!":
+            i += 1
+            v = atom()
+            return None if v is None else not v
+        if peek() == "(":
+            i += 1
+            v = disj()
+            if peek() != ")":
+                raise ValueError(")")
+            i += 1
+            return v
+        a = value()
+        op = peek()
+        if op in ("=", "!=", "<", "<=", ">", ">="):
+            i += 1
+            b = value()
+            if a is None or b is None:
+                return None
+            c = (0 if a == b else 1) if op in ("=", "!=") else opam_vcmp(a, b)
+            return {"=": c == 0, "!=": c != 0, "<": c < 0, "<=": c <= 0, ">": c > 0, ">=": c >= 0}[op]
+        return {"true": True, "false": False}.get(a)
+
+    def conj():
+        nonlocal i
+        vs = [atom()]
+        while peek() == "&":
+            i += 1
+            vs.append(atom())
+        return False if False in vs else None if None in vs else True
+
+    def disj():
+        nonlocal i
+        vs = [conj()]
+        while peek() == "|":
+            i += 1
+            vs.append(conj())
+        return True if True in vs else None if None in vs else False
+    if not toks:
+        return True
+    try:
+        v = disj()
+    except ValueError:
+        return None
+    return v if i == len(toks) else None
+
+
 def relaxed_available_rules(data, sha, base, cache_dir, pr_packages):
     """A PR that removes or relaxes the `available` filter of an existing
     version makes CI try it on platforms where it never ran: failures there
-    are most likely caused by that change."""
+    are most likely caused by that change. Only the failures of that package
+    (its own jobs, and those of its reverse dependencies) on platforms the old
+    filter excluded and the new one allows count."""
     changes = pr_opam_changes(base, sha, cache_dir)
     out = []
+
+    def uses(f, names):
+        return any(re.search(rf"(?<![\w-]){n}(?![\w-])", f or "") for n in names)
     for pkg, ch in sorted(changes.items()):
         old, new = ch["available"]
         if not old:
             continue                     # a filter was added: not a relaxation
-        others = {j["target"] for j in data["jobs"] if j["target"]}
-        failing = [j for j in data["jobs"] if j["target"] in others and j["category"] in FAILING_CATS
-                   and j["kind"] in ("build", "tests") and job_dims(j)["os"] != "linux"]
+        failing, exact = [], True
+        for j in data["jobs"]:
+            if j["category"] not in FAILING_CATS or pkg not in (j["target"], j["revdep"]):
+                continue
+            env = platform_vars(j)
+            was, now = eval_filter(old, env), eval_filter(new, env)
+            if was is None or now is None:
+                # Not evaluated: at least, the old filter restricts the
+                # platform's os (or arch, on Linux) and the new one no longer does.
+                names = ("os", "os-distribution", "os-family") if env["os"] != "linux" else ("arch",)
+                if not (uses(old, names) and not uses(new, names)):
+                    continue
+                exact = False
+            elif was or not now:
+                continue
+            failing.append(j)
         if not failing:
             continue
         plats = sorted({(job_dims(j)["distro"] or job_dims(j)["os"]) + (" (experimental)" if j["experimental"] else "")
                         for j in failing})
-        linux_only = 'os = "linux"' in old
         out.append({"variant": f"{pkg} [available changed by this PR]", "failing": pkg, "fix_in": "this PR",
                     "rule": "pr-relaxed-available",
                     "error": f"this PR changes `available` of {pkg} from `{old}` to "
-                             f"`{new or '(removed)'}`; PR packages now fail on {', '.join(plats)}",
+                             f"`{new or '(removed)'}`; {pkg} now fails on {', '.join(plats)}",
                     "old": f"available: {new}" if new else None,
                     "new": f"available: {old}   (restore it, or narrow it to the platforms that build)",
-                    "confidence": "high" if linux_only else "medium",
-                    "note": "The previous filter excluded every failing platform."
-                            if linux_only else "Check which of these platforms the previous filter excluded."})
+                    "confidence": "high" if exact else "medium",
+                    "jobs": [j["variant"] for j in failing],
+                    "note": "The previous filter excluded each of these platforms." if exact else
+                            "Check that the previous filter excluded these platforms."})
     return out
 
 

@@ -386,6 +386,38 @@ class RulesTest(unittest.TestCase):
             job("day10,macos-homebrew,arm64,5.5,x.1"), job("macos,macos-homebrew-ocaml-5.5-arm64,x.1", category="passed"),
             job("day10,macos-homebrew,x86_64,5.5,x.1", category="passed")))
 
+    def test_eval_filter(self):
+        f = self.t.eval_filter
+        linux = self.t.platform_vars(job("compilers,5.4,x.1"))
+        cygwin = self.t.platform_vars(job("day10,cygwin,x86_64,5.4,x.1"))
+        self.assertEqual((linux["os"], linux["arch"], cygwin["os-distribution"]), ("linux", "x86_64", "cygwin"))
+        old = 'os = "linux" & (arch = "arm64" | arch = "x86_64")'
+        self.assertEqual((f(old, linux), f(old, cygwin)), (True, False))
+        self.assertTrue(f("", cygwin))
+        self.assertFalse(f('!(os-distribution = "cygwin")', cygwin))
+        self.assertIsNone(f('opam-version >= "2.1"', linux))      # not a platform variable
+        self.assertFalse(f('opam-version >= "2.1" & os != "win32"', cygwin))
+
+    def test_relaxed_available(self):
+        from unittest import mock
+        from triage import context
+        jobs = [job("day10,cygwin,x86_64,5.4,x.1"), job("day10,cygwin,x86_64,5.4,y.1"),
+                job("day10,macos-homebrew,arm64,5.4,x.1"), job("compilers,5.4,x.1", category="passed")]
+
+        def rules(old, new):
+            with mock.patch.object(context, "pr_opam_changes", lambda *a: {"x.1": {"available": (old, new)}}):
+                return context.relaxed_available_rules({"jobs": jobs}, "s", "b", "d", ["x.1", "y.1"])
+        r = rules('os = "linux"', "")
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["confidence"], "high")
+        # Only x.1's jobs: y.1 failing on cygwin is not caused by x.1's `available`.
+        self.assertEqual(r[0]["jobs"], ["day10,cygwin,x86_64,5.4,x.1", "day10,macos-homebrew,arm64,5.4,x.1"])
+        # Only the platforms the old filter excluded and the new one allows.
+        r = rules('os != "macos" & os != "win32"', 'os != "win32"')
+        self.assertEqual(r[0]["jobs"], ["day10,macos-homebrew,arm64,5.4,x.1"])
+        self.assertEqual(rules('os != "win32"', 'os != "win32" & opam-version >= "2.1"'), [])
+        self.assertEqual(rules('arch != "arm32"', 'arch != "arm32" & arch != "x86_32"'), [])
+
     def test_unanalysed_count(self):
         # Failures beyond --max are counted in the JSON output.
         env = {**os.environ, "OPAM_CI_OFFLINE": "1", "OPAM_CI_RECORD": "0"}
