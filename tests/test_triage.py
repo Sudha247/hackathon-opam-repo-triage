@@ -1453,11 +1453,13 @@ class ModuleFindRuleTest(unittest.TestCase):
         from triage import rules
         self.rules = rules
 
-    def suggest(self, error, installed, depends, providers, history=None, docs=None, depopts=()):
+    def suggest(self, error, installed, depends, providers, history=None, docs=None, depopts=(), published=None,
+                tops=None):
         """The rule's result and the lookups it made: `providers` is
         module_providers's answer, `history` {(package, module path): {version:
         status}} ocaml_module_changes's, `docs` {(package, version): presence}
-        ocaml.org's docs (no git)."""
+        ocaml.org's docs (no git), `published` {(package, version): date} and
+        `tops` {(package, version): top-level modules} ocaml.org's."""
         calls = []
         log = ("".join(f"-> installed {p}.{v}\n" for p, v in installed.items())
                + "#=== ERROR while compiling x.1 ===#\n# exit-code 1\n### output ###\n"
@@ -1490,6 +1492,14 @@ class ModuleFindRuleTest(unittest.TestCase):
             def doc_present(self, pkg, v, mods, kind, ident):
                 calls.append(("docs", pkg, v, tuple(mods), ident))
                 return (docs or {}).get((pkg, v))
+
+            def published(self, pkg, v):
+                calls.append(("published", pkg, v))
+                return (published or {}).get((pkg, v))
+
+            def doc_modules(self, pkg, v):
+                calls.append(("modules", pkg, v))
+                return (tops or {}).get((pkg, v))
 
             def upstream(self, name, version, ref="master"):
                 return None                             # no git
@@ -1584,6 +1594,42 @@ class ModuleFindRuleTest(unittest.TestCase):
         r, _ = self.suggest("Unbound module Unix", {"foo": "1.0"}, ["foo"], found(distribution=True))
         self.assertTrue(r["note"].endswith(" ocaml.org: Unix comes with the OCaml compiler, not with an opam "
                                            "package."), r["note"])
+
+    def test_module_removed_by_a_recent_release(self):
+        # console-eio's tests used Grid, a top-level module of matrix 0.1.0 (Matrix_grid in
+        # 0.2.0, released 3 days before the job), installed through another dependency
+        # (#31170): the module search finds no dependency with it in its newest docs.
+        import datetime
+        recent = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+        args = ("Unbound module Grid", {"foo": "1.0", "matrix": "1.2"})
+        kw = dict(published={("matrix", "1.2"): recent, ("foo", "1.0"): "2020-01-01"},
+                  tops={("matrix", "1.1"): {"Matrix": "matrix/Matrix", "Grid": "matrix.grid/Grid"},
+                        ("matrix", "1.2"): {"Matrix": "matrix/Matrix", "Matrix_grid": "matrix.grid/Matrix_grid"}})
+        none = found(checked={"foo": "no-match"})
+        r, calls = self.suggest(*args, ["foo"], none, **kw)
+        self.assertEqual((r["rule"], r["new"]), ("library-api", '"matrix" {< "1.2"}   (new line in depends)'))
+        self.assertEqual(r["evidence"], {"matrix 1.1": True, "matrix 1.2 (installed in failing job)": False})
+        self.assertEqual(r["note"], "`Grid` is a top-level module of matrix.1.1, not of matrix.1.2 (released "
+                                    f"{recent}). x uses it without declaring matrix: declare it, with this bound. "
+                                    "ocaml.org's docs have no module Grid in the latest documented version of the "
+                                    "dependencies.")
+        # The declared dependencies first; only the recent releases are looked up.
+        self.assertEqual([c for c in calls if c[0] in ("published", "modules")],
+                         [("published", "foo", "1.0"), ("published", "matrix", "1.2"),
+                          ("modules", "matrix", "1.1"), ("modules", "matrix", "1.2")])
+        # Declared: its line gets the bound.
+        r, _ = self.suggest(*args, ["foo", "matrix"], none, **kw)
+        self.assertEqual(r["new"], '"matrix" {< "1.2"}')
+        # An older release, or a module search that did not answer (or only in
+        # part): not looked up.
+        old = dict(kw, published={("matrix", "1.2"): "2020-01-01"})
+        r, calls = self.suggest(*args, ["foo"], none, **old)
+        self.assertNotIn("new", r)
+        self.assertNotIn(("modules", "matrix", "1.1"), calls)
+        for providers in (None, found(checked={"foo": "error"}, partial=True)):
+            r, calls = self.suggest(*args, ["foo"], providers, **kw)
+            self.assertNotIn("new", r)
+            self.assertFalse([c for c in calls if c[0] == "published"])
 
     def test_match_outside_the_installed_packages(self):
         # In a package named after the module (searched by the tool), or an

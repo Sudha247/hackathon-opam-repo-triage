@@ -3,6 +3,7 @@
 import argparse
 import collections
 import concurrent.futures
+import datetime
 import functools
 import gzip
 import hashlib
@@ -107,6 +108,48 @@ def dep_names(opam_text, field):
     """The package names of an opam file's `depends` or `depopts` field, in order."""
     m = re.search(rf"(?m)^{field}:\s*\[([^\]]*)\]", opam_text or "")
     return re.findall(r'"([\w+-]+)"', re.sub(r"\{[^}]*\}", "", m.group(1))) if m else []
+
+
+# How recent a dependency's release must be, before the job, to be
+# suspected of removing a module.
+RECENT_RELEASE_DAYS = 30
+
+
+def job_date(text):
+    """The date of a job, from the first timestamp of its log (today if none)."""
+    m = re.search(r"^(\d{4}-\d\d-\d\d) \d\d:\d\d", text or "", re.M)
+    try:
+        return datetime.date.fromisoformat(m.group(1)) if m else datetime.date.today()
+    except ValueError:
+        return datetime.date.today()
+
+
+def removed_module(src, top, deps, installed, when):
+    """[(package, previous version, installed version, release date)] of the
+    dependencies among `deps` installed at a version released in the
+    RECENT_RELEASE_DAYS before `when`, whose previous version has `top` as a
+    top-level module and whose installed version does not (from their ocaml.org
+    docs). Top-level modules only: a wrapper's page may mention a submodule of
+    that name (matrix 0.2.0's Matrix re-exports a Grid, not the Grid module of
+    matrix 0.1.0)."""
+    out = []
+    for d in deps:
+        v = installed.get(d)
+        pub = v and src.published(d, v)
+        try:
+            age = (when - datetime.date.fromisoformat(pub)).days if pub else None
+        except ValueError:
+            age = None
+        if age is None or not 0 <= age <= RECENT_RELEASE_DAYS:
+            continue
+        older = [x for x in (src.versions(d) or []) if opam_vcmp(x, v) < 0]
+        if not older:
+            continue
+        prev = older[-1]
+        before, now = src.doc_modules(d, prev), src.doc_modules(d, v)
+        if before and top in before and now is not None and top not in now:
+            out.append((d, prev, v, pub))
+    return out
 
 
 def module_find_note(found, top, installed, opam_text, fname):
@@ -379,6 +422,32 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
             if m["package"] in info["installed"]:
                 chosen[m["package"]] = None if m["package"] in chosen else m["module"]
         cands = list(chosen) + [p for p in cands if p not in chosen]
+        # A top-level module that no dependency documents in its newest version
+        # may have been removed by a recent release of one: console-eio's tests
+        # used Grid, a top-level module of matrix 0.1.0, renamed Matrix_grid in
+        # matrix 0.2.0 (#31170).
+        # The package may also use a module of a package it does not declare,
+        # installed through another dependency: matrix, through k7.
+        if kind == "module" and not mods and not chosen and not by_name and found and not found["partial"]:
+            others = [p for p in info["installed"] if p not in searched and p != fname and p not in NOT_SEARCHED
+                      and not p.startswith(("conf-", "base-", "ocaml-")) and p not in ("seq", "compiler-cloning")]
+            for pkg, prev, bad, pub in removed_module(src, top, (searched + others)[:40], info["installed"],
+                                                      job_date(text)):
+                if not satisfies(prev, [x for x in existing_bounds(opam_text, pkg) if x[0] != "="]):
+                    continue
+                old, new = constraint_edit(opam_text, pkg, "<", bad)
+                note = f"`{top}` is a top-level module of {pkg}.{prev}, not of {pkg}.{bad} (released {pub})."
+                if old is None:
+                    tests = re.search(r'^File "(?:[^"]*/)?tests?/', "\n".join(err), re.M)
+                    new = f'"{pkg}" {{{"with-test & " if tests else ""}< "{bad}"}}   (new line in depends)'
+                    note += f" {fname} uses it without declaring {pkg}: declare it, with this bound."
+                out.update(rule="library-api", dep=pkg, old=old, new=new, confidence="medium",
+                           evidence={f"{pkg} {prev}": True, f"{pkg} {bad} (installed in failing job)": False},
+                           source="ocaml.org docs", note=note)
+                extra = module_find_note(found, top, info["installed"], opam_text, fname)
+                if extra:
+                    out["note"] += " " + extra
+                return out
         for pkg in cands[:5]:
             bad = info["installed"].get(pkg)
             if not bad:
