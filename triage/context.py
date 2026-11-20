@@ -728,7 +728,7 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                 continue
             level, name, ver, text = m.groups()
             r = {"variant": "(lint)", "failing": f"{name}.{ver}", **fix_where("pr", "this PR"), "rule": "lint",
-                 "error": text[:220]}
+                 "error": text[:220], "lint_level": level.lower()}
             if "warning 62" in text:
                 val = (re.findall(r'"([^"]+)"', text) or [""])[-1]
                 lid = None

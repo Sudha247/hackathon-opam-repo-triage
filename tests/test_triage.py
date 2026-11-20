@@ -1591,6 +1591,10 @@ class PageTest(unittest.TestCase):
         self.assertEqual(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build")), [2, 3, 4])
         self.assertIsNone(shared(("x.2", "build"), ("x.3", "build"), ("w.1", "build")))
         self.assertIsNone(shared(("y.1", "dependency"), ("z.1", "build"), ("w.1", "build")))
+        # Two releases of one package (y) and one of another: two packages, not three PRs' evidence.
+        self.assertIsNone(shared(("y.1", "build"), ("y.2", "build"), ("w.1", "build")))
+        self.assertEqual(shared(("y.1", "build"), ("y.2", "build"), ("w.1", "build"), ("v.1", "build")),
+                         [2, 3, 4, 5])
         # Never on a failure the evidence puts on this PR: it builds on master.
         self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
                                  suggestion={"rule": "health-check-new", "fix_in": "this PR"}))
@@ -1814,6 +1818,14 @@ class PageTest(unittest.TestCase):
         page = self.r.render_pr(pr)
         self.assertIn("9 skipped jobs", page)
         self.assertNotIn("0 failed jobs", page)
+
+    def test_lint_warning_title(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import context, suggest
+        data = {"jobs": [{"kind": "lint", "status": "failed", "url": "u", "target": None, "messages": [
+            "Warning in x.1: Unnecessary field 'version'", "Error in x.1: Missing field 'license'"]}]}
+        rs = context.lint_rules(data, None)
+        self.assertEqual([suggest.title_of(r) for r in rs], ["opam lint warning", "opam lint error"])
 
     def test_stale_health_check_note(self):
         pr = self.pr([self.lint])

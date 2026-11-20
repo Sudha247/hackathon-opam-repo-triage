@@ -342,7 +342,9 @@ def mark_shared_failures(prs):
 
     Another PR counts only when its failing job tests another package (two
     releases of lwt break the same reverse dependencies: they do not vouch for
-    each other) and fails the same way (its category, when known). Never for a
+    each other) and fails the same way (its category, when known), and those
+    PRs must test at least SHARED_MIN different packages: two releases of lwt
+    count as one piece of evidence for a third PR. Never for a
     failure the analysis puts on this PR (health-check-new, where_kind "pr"):
     the evidence says it is this PR's."""
     where = collections.defaultdict(dict)       # revdep -> PR -> [(tested package name, category)]
@@ -357,7 +359,7 @@ def mark_shared_failures(prs):
             r.pop("also_failing_in", None)
             if r.get("rule") == "health-check-new" or where_kind(r) == "pr":
                 continue
-            others = None
+            others, tested = None, {}          # tested: PR -> the packages its failing jobs test
             for v in (r.get("jobs") or [r.get("variant") or ""]):
                 m = REVDEP_JOB.search(v or "")
                 if not m:
@@ -369,7 +371,12 @@ def mark_shared_failures(prs):
                 same = {p for p, js in where[rd].items()
                         if p != n and any(t and t != name and (not cats or c in cats) for t, c in js)}
                 others = same if others is None else others & same
-            if others and len(others) >= SHARED_MIN:
+                for p in same:
+                    tested.setdefault(p, set()).update(t for t, _ in where[rd][p] if t and t != name)
+            # As many different packages as PRs: two releases of one package
+            # count once.
+            names = set().union(*(tested.get(p, set()) for p in others)) if others else set()
+            if others and len(others) >= SHARED_MIN and len(names) >= SHARED_MIN:
                 r["also_failing_in"] = sorted(others)
 
 

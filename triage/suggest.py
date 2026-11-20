@@ -438,6 +438,8 @@ def title_of(r):
     if not rule:
         return r.get("title") or "Note"
     t = RULE_TITLES.get(rule, rule)
+    if rule == "lint" and r.get("lint_level") == "warning":
+        t = "opam lint warning"
     m = re.match(r"(\d+) packages \[", r.get("variant") or "") if rule.endswith("-systemic") else None
     return f"{t} ({m.group(1)} packages)" if m else t
 
