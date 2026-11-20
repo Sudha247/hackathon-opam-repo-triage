@@ -207,13 +207,31 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
             continue                         # old runs are purged (404)
         idx = {(tuple(b["platform"]), b["kind"], b["revdep"]): b for b in prev["jobs"]
                if b["target"] == info["prev"]}
+        name = split_pkg(target)[0]
+
+        def reason(job, version):
+            # The reason with the release's version left out, normalised as in failure_key.
+            return re.sub(r"[`\"']|-j \d+", "", (job["reason"] or "").replace(version, name)).strip()
         for j in failing:
             if j["target"] != target or j["variant"] in per_job:
                 continue
             b = idx.get((tuple(j["platform"]), j["kind"], j["revdep"]))
-            if b and b["category"] in FAILING_CATS:
-                pr = f"#{info['pr']}" if info.get("pr") else info["sha"][:12]
-                per_job[j["variant"]] = f"{info['prev']} failed the same job in the CI of {pr}"
+            # The same job failing is not enough: the new release may fail
+            # differently. The failure must be the same.
+            if not (b and b["category"] == j["category"] and reason(b, info["prev"]) == reason(j, target)):
+                continue
+            pr = f"#{info['pr']}" if info.get("pr") else info["sha"][:12]
+            why = f"{info['prev']} failed the same job in the CI of {pr}"
+            if not j["revdep"] and re.match(r"The (compilation|installation) of \S+ failed at ", j["reason"] or ""):
+                # The release's own build, and the reason names only the
+                # step that failed, not the error: its code changed, so the
+                # error may be another one. Noted, but not counted as
+                # happening without the PR (`preexisting_unverified`).
+                if notes is None:
+                    continue
+                notes.setdefault("unverified", set()).add(failure_key(j))
+                why += " (failing at the same step; the errors were not compared)"
+            per_job[j["variant"]] = why
     # opam-health-check: master, newest version of each package, no tests, on
     # the classic builder's default platform.
     if notes is not None and base:

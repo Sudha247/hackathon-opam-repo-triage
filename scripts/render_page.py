@@ -87,8 +87,8 @@ def not_this_pr(r):
     """Whether a failure is not the PR's: it happens without the PR (pre-existing,
     or also failing in other open PRs), comes from the CI, or is on an
     experimental platform, whose failures do not block a PR."""
-    return bool(r.get("preexisting") or r.get("also_failing_in") or r.get("experimental")
-                or r.get("rule") in CI_SIDE)
+    return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or r.get("also_failing_in")
+                or r.get("experimental") or r.get("rule") in CI_SIDE)
 
 
 def seems_ready(pr):
@@ -613,7 +613,7 @@ the PR does not break them.</dd>
 day10 builder (the jobs named <code>day10,…</code>). When a job fails only on day10 while the classic
 builder passes on the same system, the problem is in the CI setup, not in the package.</dd>
 <dt>Pre-existing</dt><dd>The failure would happen without the PR: it also failed in the CI of the previous
-release, the PR only adds an upper bound to that package, or opam-health-check (which builds every package on
+release (the same job, with the same reason), the PR only adds an upper bound to that package, or opam-health-check (which builds every package on
 master, without tests) sees it failing too. "Also failing in other open PRs" says the same from the other PRs
 on this page.</dd>
 <dt>LLM diagnosis (unchecked)</dt><dd>For failures that no rule recognises, an LLM reads the log and

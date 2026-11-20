@@ -418,6 +418,36 @@ class RulesTest(unittest.TestCase):
         self.assertEqual(rules('os != "win32"', 'os != "win32" & opam-version >= "2.1"'), [])
         self.assertEqual(rules('arch != "arm32"', 'arch != "arm32" & arch != "x86_32"'), [])
 
+    def test_preexisting_same_failure(self):
+        from unittest import mock
+        from triage import context
+        build = 'The compilation of {} failed at "dune build -p x -j {}"'
+        new = [job("compilers,5.4,x.2", reason=build.format("x.2", 32)),
+               job("compilers,5.3,x.2", reason="Error: Unbound module Foo"),
+               job("compilers,5.2,x.2", category="dependency", reason="y.1 failed to build"),
+               job("compilers,5.1,x.2", category="dependency", reason="z.1 failed to build"),
+               job("compilers,5.4,x.2,revdeps,r.1", reason=build.format("r.1", 8))]
+        old = [job("compilers,5.4,x.1", reason=build.format("x.1", 8)),
+               job("compilers,5.3,x.1", reason="Error: Unbound module Bar"),          # another error
+               job("compilers,5.2,x.1", category="dependency", reason="y.1 failed to build"),
+               job("compilers,5.1,x.1", reason="z.1 failed to build"),                # another category
+               job("compilers,5.4,x.1,revdeps,r.1", reason=build.format("r.1", 8))]
+        notes = {}
+        with mock.patch.object(context, "find_baseline_commit", lambda *a: {"prev": "x.1", "pr": 7, "sha": "b" * 40}), \
+                mock.patch.object(context, "fetch", lambda *a: ""), \
+                mock.patch.object(context, "parse_commit_page", lambda page: {"jobs": old}):
+            pre = context.preexisting_failures({"jobs": new}, "s", None, "d", notes=notes)
+        key = {j["variant"]: self.t.failure_key(j) for j in new}
+        self.assertEqual(set(pre), {key["compilers,5.4,x.2"], key["compilers,5.2,x.2"],
+                                    key["compilers,5.4,x.2,revdeps,r.1"]})
+        self.assertIn("x.1 failed the same job in the CI of #7", pre[key["compilers,5.2,x.2"]])
+        # The release's own build failing at the same step may fail with another error.
+        self.assertEqual(notes["unverified"], {key["compilers,5.4,x.2"]})
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import render_page
+        self.assertFalse(render_page.not_this_pr({"preexisting": "x", "preexisting_unverified": True}))
+        self.assertTrue(render_page.not_this_pr({"preexisting": "x"}))
+
     def test_unanalysed_count(self):
         # Failures beyond --max are counted in the JSON output.
         env = {**os.environ, "OPAM_CI_OFFLINE": "1", "OPAM_CI_RECORD": "0"}

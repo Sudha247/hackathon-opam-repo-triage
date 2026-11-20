@@ -151,6 +151,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
                                 else "this PR only adds upper bounds to these packages, so their dependencies "
                                      "are the same as on master")
             r["note"] = f"Pre-existing: {r['preexisting']}." + (" " + r["note"] if r.get("note") else "")
+            if any(k in new_notes.get("unverified", ()) for k in keys):
+                r["preexisting_unverified"] = True      # not counted as happening without the PR
     results += health_summary(new_notes, src)
     for r in results:
         r.pop("_key", None)
