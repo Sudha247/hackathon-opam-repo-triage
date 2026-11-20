@@ -390,6 +390,17 @@ def sources_rules(data, cache_dir, match=None):
     return out
 
 
+# Architectures whose CI machines abort jobs routinely (slow emulated or few
+# workers): an aborted job there is listed but, like one on an experimental
+# platform, does not hold a PR back. The analysis job is never one of them.
+ROUTINE_ABORT = re.compile(r"(?:^|[,-])(?:riscv64|s390x)(?:[,-]|$)")
+
+
+def routine_abort(j):
+    return (j["status"] == "aborted" and j["kind"] != "analysis"
+            and bool(ROUTINE_ABORT.search(",".join(j["variant"].split(",")[:2]))))     # the platform, not a package
+
+
 def rerun_rules(data, results, match=None):
     """Jobs that failed for reasons unrelated to the packages (network errors,
     cancelled jobs, CI tool crashes), and jobs that CI never ran to the end:
@@ -432,11 +443,13 @@ def rerun_rules(data, results, match=None):
     idle = [j for j in jobs if j["status"] != "failed"]
     variants = merge_jobs([j["variant"] for j in jobs], [v for r in transient for v in r.get("jobs") or [r["variant"]]])
     exp = sum(j["experimental"] for j in jobs)
+    routine = sum(1 for j in jobs if routine_abort(j) and not j["experimental"])
     entry = {"variant": counted(len(variants), "job"), "rule": "rerun", **fix_where("rerun", "CI (rerun)"),
              "error": ", ".join(what(k, n) for k, n in counts.most_common()),
              "confidence": "high", "jobs": variants,
-             # Only experimental jobs to rerun do not hold the PR back.
-             "experimental": exp == len(jobs) and all(r.get("experimental") for r in transient),
+             # Only experimental jobs, and jobs aborted where aborts are routine,
+             # do not hold the PR back.
+             "experimental": exp + routine == len(jobs) and all(r.get("experimental") for r in transient),
              "note": ("These jobs failed because of the CI, not the packages" if not idle else
                       "CI did not run these jobs to the end (aborted, or never started)" if len(idle) == len(jobs)
                       and not transient else
@@ -444,7 +457,11 @@ def rerun_rules(data, results, match=None):
                       "(aborted, or never started)")
                      + ". An opam-repository maintainer can rerun them with \"Rebuild failed\" on the CI page."
                      + ((" One of them is on an experimental platform." if exp == 1 else
-                         f" {exp} of them are on experimental platforms.") if exp else "")}
+                         f" {exp} of them are on experimental platforms.") if exp else "")
+                     + ((" One of them was aborted on riscv64 or s390x, where CI aborts jobs routinely: it does "
+                         "not hold the PR back." if routine == 1 else
+                         f" {routine} of them were aborted on riscv64 or s390x, where CI aborts jobs routinely: "
+                         f"they do not hold the PR back.") if routine else "")}
     return [r for r in results if r.get("rule") != "transient"] + [entry]
 
 

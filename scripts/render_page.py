@@ -27,7 +27,7 @@ from opam_repo_ci_triage import title_of as rule_title  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
 # One verdict per PR: the first that applies, in this order (see `verdict`).
 VERDICTS = [("ready", "Not this PR's fault"), ("change", "Change this PR"), ("blocked", "Blocked elsewhere"),
-            ("ci", "Not this PR's, on hold"), ("rerun", "Needs a rerun"), ("other", "Needs a look"),
+            ("ci", "On hold"), ("rerun", "Needs a rerun"), ("other", "Needs a look"),
             ("error", "Not analysed")]
 VERDICT_LABEL = dict(VERDICTS)
 VERDICT_HELP = {

@@ -469,6 +469,19 @@ class RulesTest(unittest.TestCase):
         pr["result"]["suggestions"].append(r)
         self.assertFalse(R.seems_ready(pr))
         self.assertEqual(R.verdict(pr), "rerun")
+        # Aborted on riscv64 or s390x, where CI aborts jobs routinely: listed, but does not hold the PR back.
+        for v in ("extras,riscv64-ocaml-4.14,foo.1", "day10,day10-riscv64-ocaml-5.5,foo.1,revdeps,X.1",
+                  "extras,s390x-ocaml-5.4,foo.1"):
+            routine = dict(job(v), status="aborted", category="aborted", reason=None)
+            [r] = self.t.rerun_rules({"jobs": [routine]}, [])
+            self.assertTrue(r["experimental"], v)
+            self.assertIn("routinely", r["note"])
+            pr = {"number": 5, "ci_state": "FAILURE", "ci_unfinished": 0, "result": {"suggestions": [pre, r]}}
+            self.assertEqual(R.verdict(pr), "ready", v)
+        # Not a package whose name mentions riscv64.
+        other = dict(job("compilers,5.3,riscv64-tools.1"), status="aborted", category="aborted", reason=None)
+        [r] = self.t.rerun_rules({"jobs": [other]}, [])
+        self.assertFalse(r["experimental"])
         # An aborted analysis: lint never starts; both to rerun.
         an = lambda status: {"variant": "(analysis)", "kind": "analysis", "status": status, "target": None,
                              "category": "analysis" if status == "failed" else status, "reason": None,
@@ -1885,11 +1898,11 @@ class PageTest(unittest.TestCase):
                                                         "rule": "uninstallable"})])), "other")
         self.assertEqual(v(self.pr([], pending=True)), "error")
         self.assertEqual(v(self.pr([], result=None)), "error")
-        # A draft is never ready: then "not this PR's, on hold".
+        # A draft is never ready: then "on hold".
         self.assertEqual(v(self.pr([self.day10], draft=True)), "ci")
 
     def test_ci_only_is_an_allow_list(self):
-        # "Not this PR's, on hold" (key "ci") needs every failure to be not the PR's; anything else
+        # "On hold" (key "ci") needs every failure to be not the PR's; anything else
         # not this PR's change nor another package's needs a look.
         v = self.r.verdict
         draft = {"draft": True}           # never ready: the verdicts below are not "ready"
@@ -1933,7 +1946,7 @@ class PageTest(unittest.TestCase):
             self.assertEqual(v(self.pr([hc, exp], **kw)), "ci", kw)
             self.assertEqual(v(self.pr([self.day10, pre], **kw)), "ci", kw)
         self.assertIn("No failure is this PR's fault", self.r.VERDICT_HELP["ci"])
-        self.assertEqual(self.r.VERDICT_LABEL["ci"], "Not this PR's, on hold")
+        self.assertEqual(self.r.VERDICT_LABEL["ci"], "On hold")
 
     def test_llm_never_ci_side(self):
         # An old stored LLM answer saying "the CI environment" (its where_kind is ci): not a reason

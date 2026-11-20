@@ -281,7 +281,7 @@ publishes the results on the repository's GitHub Pages site:
    applies: not this PR's fault (every failure also happens without the PR,
    comes from the CI's setup, or is on an experimental platform; an LLM
    answer never counts as the CI's), change this
-   PR, blocked elsewhere, not this PR's, on hold (no failure is the PR's, as
+   PR, blocked elsewhere, on hold (no failure is the PR's, as
    for the first verdict, but the PR is a draft, labelled, or its CI still
    runs), needs a rerun
    (jobs that CI did not test: cancelled, aborted or never started, network
