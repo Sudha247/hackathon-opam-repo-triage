@@ -232,7 +232,10 @@ SHARED_MIN = 3   # other open PRs a failure must also appear in to be marked
 def mark_shared_failures(prs):
     """Mark the suggestions about reverse dependencies that also fail in at
     least SHARED_MIN other open PRs: such a failure is not caused by this PR.
-    Uses the failing reverse dependencies of every PR (from `summary`)."""
+    Uses the failing reverse dependencies of every PR (from `summary`). Every
+    job of the suggestion must be a reverse-dependency job, and the same other
+    PRs must fail on each of its reverse dependencies: three revdeps each
+    failing in one other PR do not make a failure shared by three PRs."""
     where = collections.defaultdict(set)
     for e in prs.values():
         for rd in ((e.get("jobs") or {}).get("failing_revdeps") or {}):
@@ -240,9 +243,10 @@ def mark_shared_failures(prs):
     for e in prs.values():
         n = int(e["number"])
         for r in (e.get("result") or {}).get("suggestions", []):
-            rds = {m.group(1) for v in (r.get("jobs") or [r.get("variant") or ""])
-                   for m in [re.search(r"revdeps,([^,]+)", v or "")] if m}
-            others = sorted(set().union(*(where[rd] for rd in rds)) - {n}) if rds else []
+            found = [re.search(r"revdeps,([^,]+)", v or "") for v in (r.get("jobs") or [r.get("variant") or ""])]
+            others = []
+            if found and all(found):
+                others = sorted(set.intersection(*(where[m.group(1)] for m in found)) - {n})
             if len(others) >= SHARED_MIN:
                 r["also_failing_in"] = others
             else:

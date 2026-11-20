@@ -124,7 +124,7 @@ Failures that would happen without the PR are marked "Pre-existing" in the note:
 - jobs that also failed in the CI run of the PR that published the previous release of the package (same platform, same job; 2 GitHub calls and one page per package, skipped when the old run has been purged);
 - reverse dependencies that opam-health-check also sees failing on master (from ocaml.org's MCP `ocaml_package_build_information`; same version and OCaml version, build only, as opam-health-check builds the newest version of each package without tests; one request per package, cached for a day).
 
-Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Builds on master, fails here": those are the failures most likely caused by the PR. On the triage page, a suggestion about a reverse dependency that also fails in 3 or more other open PRs says so, with links.
+Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Builds on master, fails here": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready).
 
 The matrix rules use only the job list (no fetch); the others reuse the log
 already downloaded, plus at most one small lookup.

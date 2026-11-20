@@ -529,6 +529,24 @@ class PageTest(unittest.TestCase):
         self.assertIn("author active since", self.r.label_badges(["needs reporter action"],
                                                                  ["needs reporter action"]))
 
+    def test_shared_failures(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+        rd = "compilers,5.4,x.1,revdeps,{}"
+
+        def entry(n, failing, *suggestions):
+            return {"number": n, "jobs": {"failing_revdeps": {r: [] for r in failing}},
+                    "result": {"suggestions": [{"variant": "v", "jobs": js} for js in suggestions]}}
+        prs = {"1": entry(1, ["a.1", "b.1", "c.1", "d.1"],
+                          [rd.format("a.1"), rd.format("b.1"), rd.format("c.1")],   # each in one other PR
+                          [rd.format("d.1")],                                         # in 3 other PRs
+                          [rd.format("d.1"), "compilers,5.4,x.1"],                    # and a non-revdep job
+                          [rd.format("a.1"), rd.format("d.1")]),
+               "2": entry(2, ["a.1", "d.1"]), "3": entry(3, ["b.1", "d.1"]), "4": entry(4, ["c.1", "d.1"])}
+        T.mark_shared_failures(prs)
+        got = [s.get("also_failing_in") for s in prs["1"]["result"]["suggestions"]]
+        self.assertEqual(got, [None, [2, 3, 4], None, None])
+
     def test_stale_labels(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
         import triage_open_prs as T
