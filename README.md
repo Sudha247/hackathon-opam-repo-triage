@@ -167,8 +167,13 @@ python3 opam_repo_ci_triage.py suggest --pr 29613 --llm-dry-run   # print the pr
 ```
 
 Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
-fallbacks enabled. Responses are cached in `.opam-ci-cache/`, so re-runs cost
-nothing. The log and opam file are passed as untrusted data.
+fallbacks enabled, a 120 s timeout per request and one retry. Responses are
+cached in `.opam-ci-cache/`, so re-runs cost nothing. The log and opam file are
+passed as untrusted data. While CI is still running, the LLM is not asked: the
+prompt holds the job's results on the other platforms, which change as jobs
+finish, so each analysis would pay again. `suggest --json` says how many
+unexplained failures were left without an answer that a later call may give
+(`llm_unanswered`: beyond `--llm-max`, a transient API error, or CI running).
 
 The LLM gets the failures the rules flag as unexplained (also when a note was
 added since: pre-existing, or opam-health-check's "builds on master"). Its
@@ -177,7 +182,9 @@ error, or a log that cannot be read leaves the failure unrecognised (with an
 `llm_error`), it never fails the analysis. The package it names must be one of
 the PR's or the failing one, or it is dropped (with its claim of where the fix
 goes). Only a few shapes of change are shown as a diff: a dependency without a
-version (possibly `{with-test}`, `{build}` or `{with-doc}`), `available`,
+version (possibly `{with-test}`, `{build}` or `{with-doc}`) whose name the
+model was given (the PR's packages, the failing one, the installed
+dependencies, the opam file or the error excerpt), `available`,
 `x-ci-accept-failures` and `x-maintained`, without version bounds or depexts.
 Anything else (bounds, depexts, build or install commands, URLs) is shown as
 text to check.
@@ -258,7 +265,12 @@ publishes the results on the repository's GitHub Pages site:
    `--llm-budget 40` calls per run; answers are cached, so only new failures
    cost anything). Without the secret, or if the API fails, the page is built
    from the rules alone. Once a run's budget is spent, PRs analysed without
-   the LLM are left as they are until a run with budget left. On the page, LLM diagnoses are labelled "unchecked",
+   the LLM are left as they are until a run with budget left. A PR counts as
+   analysed with the LLM (`llm` in the state) only when every unexplained
+   failure got its answer: one whose `--llm-max` was cut to the run's
+   remaining budget, or whose API call failed, is analysed again in a run
+   with budget left (`llm_unanswered` says how many were left); not while
+   its CI runs. On the page, LLM diagnoses are labelled "unchecked",
    the changes they propose are shown as a diff only for a few safe shapes
    (see above), as text to check otherwise, and
    low-confidence ones are folded, as "LLM diagnosis (low confidence)": in an evaluation on 25 answers, 15 were

@@ -45,6 +45,7 @@ from .md import (  # noqa: F401
 # (ANTHROPIC_API_KEY, or an `ant auth login` profile). Responses are cached.
 
 LLM_MODEL = "claude-opus-5-5"
+LLM_TIMEOUT = 120          # seconds per API request (one retry)
 
 
 LLM_SYSTEM = """You triage failures reported by opam-repo-ci on pull requests to ocaml/opam-repository.
@@ -130,8 +131,30 @@ Dependency versions installed by CI:
 Earlier analysis: {r.get('note') or r.get('error') or 'none'}"""
 
 
+def prompt_names(prompt):
+    """The package names the model was given: those of the PR, of the
+    failing package, the dependencies with their installed versions, and the
+    words of the opam file and of the error excerpt (a library or a tool the
+    error names). A dependency the answer adds must be one of them to be
+    shown as a diff."""
+    parts = re.findall(r"^Packages of this PR: ([^\n]*)$|^Failing package: (\S+)"
+                       r"|^Dependency versions installed by CI:\n([^\n]*)$"
+                       r"|<opam_file[^>]*>\n(.*?)</opam_file>|<error_excerpt>\n(.*?)</error_excerpt>",
+                       prompt, re.M | re.S)
+    names = set()
+    for p in parts:
+        for t in re.findall(r"[A-Za-z0-9_][\w+.-]*", " ".join(p)):
+            names.add(t)
+            names.add(split_pkg(t)[0])
+    return names
+
+
 def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run):
+    """The model's answer for one failure (cached), with `_names`, the
+    package names it was given (prompt_names), or {"llm_error": ...}
+    (`transient` when a later call may work), or {"llm_prompt": ...}."""
     prompt = llm_prompt(src, r, job, text, data, pr_packages)
+    names = sorted(prompt_names(prompt))
     key = hashlib.sha256(f"{model}\n{LLM_SYSTEM}\n{prompt}".encode()).hexdigest()[:32]
     disk = os.path.join(cache_dir, f"llm-{key}.json")
     if dry_run:
@@ -139,13 +162,14 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
     hit = cached_json(disk)
     if hit:
         why = llm_answer_error(hit["value"])
-        return {"llm_error": f"unusable cached answer: {why}"} if why else hit["value"]
+        return {"llm_error": f"unusable cached answer: {why}"} if why else dict(hit["value"], _names=names)
     try:
         import anthropic
     except ImportError:
         return {"llm_error": "the anthropic package is not installed (pip install anthropic)"}
     try:
-        client = anthropic.Anthropic()
+        # Not the SDK's defaults (10 minutes, 2 retries): the hourly job gives the whole analysis 10 minutes.
+        client = anthropic.Anthropic(timeout=LLM_TIMEOUT, max_retries=1)
         # Server-side fallbacks: if the model declines, the API reruns the
         # request on a fallback model within the same call.
         resp = client.beta.messages.create(
@@ -155,9 +179,11 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
             output_config={"effort": "medium", "format": {"type": "json_schema", "schema": LLM_SCHEMA}},
             messages=[{"role": "user", "content": prompt}])
     except anthropic.APIStatusError as e:
-        return {"llm_error": f"API error {e.status_code}: {e.message[:200]}"}
-    except anthropic.APIConnectionError as e:
-        return {"llm_error": f"connection error: {e}"}
+        # Overloaded, rate-limited, a server error: asked again in a later run.
+        return {"llm_error": f"API error {e.status_code}: {e.message[:200]}",
+                "transient": e.status_code in (408, 409, 429) or e.status_code >= 500}
+    except anthropic.APIConnectionError as e:          # a timeout too
+        return {"llm_error": f"connection error: {e}", "transient": True}
     except anthropic.AnthropicError as e:          # no credentials, another SDK error
         return {"llm_error": f"{type(e).__name__}: {str(e)[:200]}"}
     NET["llm"] = NET.get("llm", 0) + 1
@@ -173,7 +199,7 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
         return {"llm_error": f"unusable answer: {why}"}
     out["llm_usage"] = {"input": resp.usage.input_tokens, "output": resp.usage.output_tokens, "model": resp.model}
     write_atomic(disk, json.dumps(out))
-    return out
+    return dict(out, _names=names)
 
 
 def llm_answer_error(out):
@@ -215,15 +241,19 @@ def _change_key(line):
     return ("field", m.group(1)) if m else None
 
 
-def llm_change_as_diff(old, new):
+def llm_change_as_diff(old, new, names=None):
     """Whether the model's change (`old` replaced by `new`) has one of the
     shapes shown as a diff (LLM_DIFF_LINE, without a version or a depext),
-    and its old lines set the same dependencies or fields as the new ones."""
+    its old lines set the same dependencies or fields as the new ones, and
+    each dependency it names is one of `names`, the package names the model
+    was given (prompt_names; None: not known, so none is)."""
     lines = [l.strip() for l in (new or "").splitlines() if l.strip()]
     olds = [l.strip() for l in (old or "").splitlines() if l.strip()]
     if not lines or LLM_UNSAFE_CHANGE.search(new) or (old and LLM_UNSAFE_CHANGE.search(old)):
         return False
     if not all(LLM_DIFF_LINE.fullmatch(l) for l in lines):
+        return False
+    if any(k and k[0] == "dep" and k[1] not in (names or ()) for k in map(_change_key, lines)):
         return False
     keys = {_change_key(l) for l in lines}
     return all(_change_key(l) in keys for l in olds)
@@ -256,21 +286,38 @@ def key_error_line(text):
     return lines[-1][:300] if lines else None
 
 
-def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run):
-    jobs = {j["variant"]: j for j in data["jobs"]}
+def llm_todo(results, data):
+    """The failures to ask the LLM about: those no rule explains."""
+    jobs = {j["variant"] for j in data["jobs"]}
 
     def unexplained(r):
         # `_unexplained`: set by the rules that found no explanation (the
         # note may have gained a prefix since: pre-existing, new on master).
         return bool(r.get("_unexplained")) and not r.get("rule") and not r.get("new") and not r.get("candidates")
-    todo = [r for r in results if r.get("url") and r.get("variant") in jobs and unexplained(r)]
-    seen, done, answers = set(), 0, {}
+    return [r for r in results if r.get("url") and r.get("variant") in jobs and unexplained(r)]
 
-    def sig_of(r):
-        return re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
+
+def llm_sig(r):
+    """Failures with the same signature (the same error on other platforms) share one answer."""
+    return re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
+
+
+def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run):
+    """Ask the LLM about the failures no rule explains, `limit` calls at
+    most. Returns how many distinct failures are left without an answer that
+    a later call may give: beyond `limit`, or a transient API error (not a
+    log without an error, a refusal or an unusable answer: asking again
+    would give the same)."""
+    jobs = {j["variant"]: j for j in data["jobs"]}
+    todo = llm_todo(results, data)
+    seen, done, answers, left = set(), 0, {}, set()
+    sig_of = llm_sig
     for r in todo:
         sig = sig_of(r)
-        if sig in seen or done >= limit:
+        if sig in seen:
+            continue
+        if done >= limit:
+            left.add(sig)
             continue
         seen.add(sig)
         done += 1
@@ -291,6 +338,8 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
             # A missing package, a bad key or an API error: the failure stays
             # unrecognised; the error is logged, not shown in the suggestion.
             r["llm_error"] = res["llm_error"]
+            if res.get("transient"):
+                left.add(sig)
             print(f"note: LLM not used for {r['variant']}: {res['llm_error']}", file=sys.stderr)
             continue
         answers[sig] = (res, log_err)
@@ -323,7 +372,7 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         if not r.get("error"):
             r["error"] = res["diagnosis"]
         change = res.get("change_new")
-        if change and not unchecked and llm_change_as_diff(res.get("change_old"), change):
+        if change and not unchecked and llm_change_as_diff(res.get("change_old"), change, res.get("_names")):
             r.update(old=res.get("change_old") or None, new=change)
         elif change:
             # Version bounds and depext package names were the model's wrong
@@ -333,6 +382,6 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
             # the Markdown comment shows it as code, never as Markdown.
             to = f" to {md_code(named)}" if unchecked else ""
             r["note"] += f" Possible change{to}, not checked: {md_code(change)}."
-    if len(seen) < len({re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]
-                        for r in todo}):
+    if left - seen:
         print(f"note: LLM used on {limit} unexplained failures (use --llm-max for more)", file=sys.stderr)
+    return len(left)

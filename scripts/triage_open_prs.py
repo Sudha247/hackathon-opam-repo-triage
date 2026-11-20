@@ -258,9 +258,11 @@ def reuse(prev, p, version, llm, now_=None, digest=None):
     else:
         same = commit
     same_commit = same and prev.get("result") is not None
-    # With the LLM on, a PR analysed without it (key added later, or the
-    # run's budget spent) is analysed again; the logs come from the cache.
-    if same and llm and not prev.get("llm"):
+    # With the LLM on, a PR analysed without it (key added later, the run's
+    # budget spent, --llm-max cut to that budget, an API error) is analysed
+    # again; the logs come from the cache. Not while CI runs: the LLM is
+    # only asked once it has finished.
+    if same and llm and not prev.get("llm") and not (p["ci_state"] == "PENDING" and prev.get("ci_unfinished")):
         same = False
     # An analysis made while ocaml.org's MCP server failed lacks versions,
     # docs or health-check results: done again, a few times a day at most.
@@ -599,8 +601,12 @@ def main():
             entry.pop("since_last_push", None)      # no comparable previous result
         entry.update({"ci_state": p["ci_state"], "ci_created": p.get("ci_created"), "ci_digest": digest,
                       "ci_unfinished": (result or {}).get("ci_unfinished", 0)})
+        # `llm`: every unexplained failure got its LLM answer (else the PR is
+        # analysed again when a run has LLM budget left, see reuse()).
+        unanswered = (result or {}).get("llm_unanswered", 0) if use_llm else None
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
-                      "llm": use_llm, "mcp_errors": net.get("mcp-errors", 0),
+                      "llm": use_llm and not unanswered, "llm_unanswered": unanswered,
+                      "mcp_errors": net.get("mcp-errors", 0),
                       "net_errors": net.get("net-errors", 0) + net.get("timeout", 0),
                       # A git host that failed earlier today: not asked again, not retried (see Sources.git_down).
                       "git_unreachable": net.get("git-unreachable", 0),

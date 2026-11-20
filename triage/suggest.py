@@ -59,6 +59,8 @@ from .context import (  # noqa: F401
 )
 from .llm import (  # noqa: F401
     apply_llm,
+    llm_sig,
+    llm_todo,
 )
 from .where import (  # noqa: F401
     fix_where,
@@ -176,9 +178,17 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         r.pop("_keys", None)
         r.pop("_distros", None)
         r.pop("keep", None)
-    if llm:
+    if llm and data.get("unfinished") and not llm["dry_run"]:
+        # The prompt shows the job's results on the other platforms, which
+        # change as jobs finish: each analysis would pay again (the cache key
+        # is the prompt). Asked once CI has finished.
+        data["llm_unanswered"] = len({llm_sig(r) for r in llm_todo(results, data)})
+        if data["llm_unanswered"]:
+            print("note: CI is still running: the LLM is not asked until it finishes", file=sys.stderr)
+    elif llm:
         data["_sha"] = sha
-        apply_llm(results, data, src, cache_dir, pr_packages, llm["limit"], llm["model"], llm["dry_run"])
+        data["llm_unanswered"] = apply_llm(results, data, src, cache_dir, pr_packages, llm["limit"], llm["model"],
+                                           llm["dry_run"])
         for r in results:
             if r.get("rule") == "llm":
                 # The answer's place comes as `fix_in` (see where.py): the rule's where_kind no longer holds.

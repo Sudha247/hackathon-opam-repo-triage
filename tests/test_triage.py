@@ -1354,6 +1354,8 @@ class PageMainTest(unittest.TestCase):
                 return {"jobs": jobs if jobs is not None else self.FAILED_ANALYSIS}, None, {}
             if not suggest_ok:
                 return None, "timeout after 600s", {"timeout": 1}
+            if suggest_out is not None:
+                return dict(suggest_out), None, {"http": 1}
             return {"suggestions": [{"rule": "x", "variant": "v"}], "ci_unfinished": 0}, None, {"http": 1}
         gh_out = os.path.join(self.tmp, "gh-out")
         open(gh_out, "w").close()
@@ -1518,6 +1520,25 @@ class PageMainTest(unittest.TestCase):
         state, calls, _ = self.run_main([self.pr()], llm=True, args=["--llm-budget", "5"])
         self.assertEqual(self.kinds(calls), ["suggest", "summary"])
         self.assertIn("--llm", calls[0])
+
+    def test_llm_flag_needs_every_answer(self):
+        # `llm` is stored only when every unexplained failure got an answer: a PR left with some
+        # (--llm-max cut to the run's budget, an API error) gets LLM calls in a later run.
+        out = {"suggestions": [{"rule": "x", "variant": "v"}], "ci_unfinished": 0, "llm_unanswered": 1}
+        state, calls, _ = self.run_main([self.pr()], llm=True, suggest_out=out)
+        self.assertEqual((state["1"]["llm"], state["1"]["llm_unanswered"]), (False, 1))
+        state, calls, _ = self.run_main([self.pr()], llm=True, suggest_out=dict(out, llm_unanswered=0))
+        self.assertEqual(self.kinds(calls), ["suggest", "summary"])
+        self.assertEqual((state["1"]["llm"], state["1"]["llm_unanswered"]), (True, 0))
+        state, calls, _ = self.run_main([self.pr()], llm=True)
+        self.assertEqual(calls, [])
+        # While CI runs, the LLM is not asked (see suggest): no analysis again for it.
+        p = self.pr(ci_state="PENDING")
+        running = dict(out, ci_unfinished=4)
+        state, calls, _ = self.run_main([p], llm=True, suggest_out=running)
+        self.assertEqual((state["1"]["llm"], state["1"]["ci_unfinished"]), (False, 4))
+        state, calls, _ = self.run_main([p], llm=True, suggest_out=running)
+        self.assertEqual(self.kinds(calls), ["summary"])
 
     def test_refresh_drops_logs(self):
         sys.path.insert(0, os.path.join(HERE, ".."))
@@ -2149,8 +2170,9 @@ class LlmFallbackTest(unittest.TestCase):
                 "failing": "x.1", "_unexplained": True, **kw}
 
     def answer(self, **kw):
+        # `_names`: the package names in the prompt (llm_suggest adds them).
         return {"diagnosis": "d", "fix_in": "this-pr", "package": "x.1", "change_old": "", "change_new": "",
-                "confidence": "low", "verify": "v", **kw}
+                "confidence": "low", "verify": "v", "_names": ["x", "x.1", "zarith"], **kw}
 
     def apply(self, r, res=None, suggest=None, pr_packages=("x.1",)):
         from unittest import mock
@@ -2164,11 +2186,16 @@ class LlmFallbackTest(unittest.TestCase):
         return r
 
     def test_change_shapes(self):
-        ok = self.L.llm_change_as_diff
+        ok = lambda old, new: self.L.llm_change_as_diff(old, new, {"foo", "bar"})
         for new in ['"foo"', '"foo" {with-test}', '"foo" {build & with-test}', 'available: os != "win32"',
                     'x-ci-accept-failures: ["alpine-3.22"]', "x-maintained: false", '"foo" {with-test}\n"bar"']:
             self.assertTrue(ok("", new), new)
         self.assertTrue(ok('"foo"', '"foo" {with-test}'))
+        # A dependency the model was not given (an invented name): text, not a diff.
+        for new in ['"anything"', '"foo"\n"anything" {with-test}']:
+            self.assertFalse(ok("", new), new)
+        self.assertFalse(self.L.llm_change_as_diff("", '"foo"'))          # names unknown
+        self.assertTrue(self.L.llm_change_as_diff("", "x-maintained: false"))
         for old, new in [("", 'build: [["dune" "build" "-p" name]]'), ("", 'install: [make "install"]'),
                          ("", 'url { src: "https://e.x/a.tgz" }'), ("", 'src: "https://e.x/a.tgz"'),
                          ("", '"foo" {>= "1.0"}'), ("", 'depexts: ["libgmp-dev"]'),
@@ -2181,6 +2208,87 @@ class LlmFallbackTest(unittest.TestCase):
         self.assertIn('Possible change, not checked: `build: [["make" "-j1"]]`.', r["note"])
         r = self.apply(self.result(), self.answer(change_new='"zarith" {with-test}'))
         self.assertEqual((r["new"], r["old"]), ('"zarith" {with-test}', None))
+        r = self.apply(self.result(), self.answer(change_new='"anything"'))
+        self.assertNotIn("new", r)
+        self.assertIn('Possible change, not checked: `"anything"`.', r["note"])
+
+    def test_prompt_names(self):
+        # The names the model was given: the PR's packages, the failing one, the installed
+        # dependencies, the opam file and the error excerpt; not the earlier analysis.
+        prompt = """Failing job: v (blocking platform)
+Packages of this PR: x.1, y.2
+Failing package: z.3 (not part of this PR)
+
+Dependency versions installed by CI:
+{"dune": "3.20.2", "fmt": "0.9.0"}
+
+<opam_file package="z.3">
+depends: [ "ocaml" "lwt" {>= "5.0"} ]
+</opam_file>
+
+<error_excerpt>
+Error: Library "ppx_deriving.show" not found.
+</error_excerpt>
+
+Earlier analysis: anything goes"""
+        names = self.L.prompt_names(prompt)
+        for n in ("x", "y", "z", "dune", "fmt", "ocaml", "lwt", "ppx_deriving", "ppx_deriving.show"):
+            self.assertIn(n, names)
+        self.assertNotIn("anything", names)
+
+    def test_unanswered_counted(self):
+        # apply_llm says how many distinct failures are left without an answer a later call may give:
+        # beyond the limit, or a transient API error; not a refusal (asking again would cost the same).
+        from unittest import mock
+        L = self.L
+        rs = [self.result(variant=f"v{i}", error=f"E{chr(97 + i)}") for i in range(3)]
+        jobs = [dict(self.JOB, variant=f"v{i}") for i in range(3)]
+        answers = {"v0": self.answer(), "v1": {"llm_error": "API error 529: overloaded", "transient": True},
+                   "v2": {"llm_error": "stopped: refusal"}}
+
+        def run(limit):
+            rr = [dict(r) for r in rs]
+            with mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \
+                    mock.patch.object(L, "excerpt", lambda *a, **k: {"error_block": "e"}), \
+                    mock.patch.object(L, "key_error_line", lambda t: "e"), \
+                    mock.patch.object(L, "llm_suggest", lambda s, r, *a: dict(answers[r["variant"]])), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                return L.apply_llm(rr, {"jobs": jobs}, None, self.tmp, {"x.1"}, limit, "m", False)
+        self.assertEqual(run(3), 1)          # the transient error
+        self.assertEqual(run(1), 2)          # two beyond the limit
+        self.assertEqual(run(0), 3)
+
+    def test_not_asked_while_ci_runs(self):
+        # While CI runs, the prompt (the job's results on other platforms) changes as jobs finish:
+        # the LLM is asked once CI has finished, and the output says how many are left.
+        patch = """
+import triage.suggest as s, triage.llm as L, triage.cli as c
+_orig = s.suggest_for_job
+def f(src, job, *a):
+    r = _orig(src, job, *a)
+    if "kinetic-client" in job["variant"]:
+        r = {k: r[k] for k in ("variant", "url", "kind", "experimental", "failing")}
+        r.update(error="Unbound value frobnicate", note="Unrecognised error.", _unexplained=True)
+    return r
+s.suggest_for_job = f
+def ask(*a):
+    print("LLM CALLED", file=sys.stderr)
+    return {"llm_error": "fake", "transient": True}
+L.llm_suggest = ask
+_load = c.load_commit
+def load(*a, **k):
+    page, data = _load(*a, **k)
+    data["unfinished"] = %d
+    return page, data
+c.load_commit = load
+"""
+        out = run_patched("lwt-revdeps", patch % 3, ["--llm"])
+        self.assertEqual(out.returncode, 0, out.stderr[-1500:])
+        self.assertNotIn("LLM CALLED", out.stderr)
+        self.assertEqual(json.loads(out.stdout)["llm_unanswered"], 1)
+        out = run_patched("lwt-revdeps", patch % 0, ["--llm"])
+        self.assertIn("LLM CALLED", out.stderr)
+        self.assertEqual(json.loads(out.stdout)["llm_unanswered"], 1)      # a transient error
 
     def test_package_checked(self):
         # A package the input does not name: dropped, with the claim of where the fix goes.
@@ -2217,6 +2325,8 @@ class LlmFallbackTest(unittest.TestCase):
         class APIConnectionError(AnthropicError):
             pass
 
+        clients = []
+
         def sdk(answer=None, client_error=None):
             m = types.ModuleType("anthropic")
             m.AnthropicError, m.APIStatusError, m.APIConnectionError = \
@@ -2226,7 +2336,8 @@ class LlmFallbackTest(unittest.TestCase):
                                          usage=types.SimpleNamespace(input_tokens=1, output_tokens=1))
 
             class Anthropic:
-                def __init__(self):
+                def __init__(self, **kw):
+                    clients.append(kw)
                     if client_error:
                         raise client_error
                     self.beta = types.SimpleNamespace(messages=types.SimpleNamespace(create=lambda **k: resp))
@@ -2242,6 +2353,8 @@ class LlmFallbackTest(unittest.TestCase):
                 res = self.L.llm_suggest(None, {}, self.JOB, "log", {}, [], self.tmp, "m", False)
             self.assertIn(why, res.get("llm_error", ""), (why, res))
         self.assertEqual([f for f in os.listdir(self.tmp) if f.startswith("llm-")], [])     # nothing cached
+        # A client timeout, one retry: not the SDK's 10 minutes and 2 retries.
+        self.assertEqual(clients[0], {"timeout": 120, "max_retries": 1})
         # A good answer is cached; a damaged cached one is an error, not a crash.
         with mock.patch.dict(sys.modules, {"anthropic": sdk(json.dumps(self.answer()))}), \
                 mock.patch.object(self.L, "llm_prompt", lambda *a: "good"):
