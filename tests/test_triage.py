@@ -375,6 +375,34 @@ class WhereTest(unittest.TestCase):
                          "the dependency that declares these depexts (another package)")
 
 
+class LintTest(unittest.TestCase):
+    """The messages of a failed lint job: findings of this PR, or a CI error."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import context
+        self.c = context
+
+    def rules(self, *messages):
+        data = {"jobs": [{"variant": "(lint)", "kind": "lint", "status": "failed", "target": None,
+                          "url": "https://x/(lint)", "messages": list(messages)}]}
+        return self.c.lint_rules(data, None, None, "/nonexistent")
+
+    def test_warning_is_a_finding(self):
+        # opam-ci-check fails the lint job on a warning alone (#30007).
+        [r] = self.rules("Warning in ocaml-r.0.7.0: Dubious use of 'dune subst'. 'dune subst' should always only "
+                         "be called with {dev}")
+        self.assertEqual((r["rule"], r["failing"], r["where_kind"]), ("lint", "ocaml-r.0.7.0", "pr"))
+        self.assertIn("Dubious use", r["error"])
+        self.assertIn("fails on warnings too", r["note"])
+
+    def test_ci_error(self):
+        [r] = self.rules('Command "git" "-C" "/tmp/git-checkout5e08f64" "reset" "--hard" "-q" "7386318" '
+                         'exited with status 128')
+        self.assertEqual((r["rule"], r["where_kind"]), ("lint-ci-error", "rerun"))
+        self.assertIn("git could not check out", r["note"])
+
+
 def job(variant, category="build", reason="The compilation of x failed", experimental=False):
     """A synthetic CI job, as parse_commit_page makes it."""
     sys.path.insert(0, os.path.join(HERE, ".."))

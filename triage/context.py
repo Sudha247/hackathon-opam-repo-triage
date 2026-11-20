@@ -606,11 +606,16 @@ def lint_baseline(data, cache_dir):
         msgs = set()
         for j in base["jobs"]:
             for m in j.get("messages", []):
-                mm = re.match(r"Error in ([\w+-]+)\.\S+?: (.*)$", m)
+                mm = LINT_MESSAGE.match(m)
                 if mm:
-                    msgs.add(mm.groups())
+                    msgs.add((mm.group(2), mm.group(4)))
         return info.get("pr"), msgs
     return None
+
+
+# A finding of opam-ci-check: "Error in pkg.ver: …" or "Warning in pkg.ver: …".
+# It fails the lint job on warnings too.
+LINT_MESSAGE = re.compile(r"(Error|Warning) in ([\w+-]+)\.(\S+?): (.*)$")
 
 
 def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
@@ -621,8 +626,8 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
     for j in data["jobs"]:
         if j["kind"] != "lint" or j["status"] != "failed":
             continue
-        if not any(re.match(r"Error in [\w+-]+\.\S+?: ", m) for m in j["messages"]):
-            # The job failed before linting: the CI could not fetch or check out the PR.
+        if not any(LINT_MESSAGE.match(m) for m in j["messages"]):
+            # No finding: the job failed before linting (the CI could not fetch or check out the PR).
             msg = next((m for m in j["messages"] if m.strip()), "") or "no message"
             git = re.search(r'"git"', msg) and re.search(r"status 128", msg)
             out.append({"variant": "(lint)", **fix_where("rerun", "CI (rerun)"), "rule": "lint-ci-error",
@@ -632,10 +637,10 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                                  + ". Rerun it; if it fails again the same way, push the branch again.")})
             continue
         for msg in j["messages"]:
-            m = re.match(r"Error in ([\w+-]+)\.(\S+?): (.*)$", msg)
+            m = LINT_MESSAGE.match(msg)
             if not m:
                 continue
-            name, ver, text = m.groups()
+            level, name, ver, text = m.groups()
             r = {"variant": "(lint)", "failing": f"{name}.{ver}", **fix_where("pr", "this PR"), "rule": "lint",
                  "error": text[:220]}
             if "warning 62" in text:
@@ -739,7 +744,8 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                     r.update(note="This package has `depexts` but is not a conf package: move them into a conf-* "
                                   "package, or ask the maintainers to accept it (they often do).", confidence="medium")
             else:
-                r["note"] = "The tool has no advice for this lint message."
+                r["note"] = ("The tool has no advice for this lint message." if level == "Error" else
+                             "A warning, but the lint job fails on warnings too: follow the message.")
             if baseline and (name, text) in baseline[1]:
                 prev = (r.get("note") or "").rstrip(".")
                 r["note"] = ((prev + ". " if prev else "") + f"Already reported in the CI of #{baseline[0]} "
