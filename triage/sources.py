@@ -158,9 +158,14 @@ class Sources:
     # ---- opam-repository
 
     def versions(self, name, ref="master"):
-        """Versions of `name` in opam-repository: from the opam.ocaml.org package
-        page (one small HTML page); git listing only if that page is unavailable."""
+        """Versions of `name` in opam-repository, oldest first: from ocaml.org's
+        ocaml_package_versions; from the opam.ocaml.org package page if the MCP
+        server does not answer; from a git listing for another ref."""
         if ref == "master":
+            vs = self.mcp_versions(name)
+            if vs is not None:
+                return sorted({v["version"] for v in vs if isinstance(v.get("version"), str)},
+                              key=functools.cmp_to_key(opam_vcmp))
             page = self.raw(f"https://opam.ocaml.org/packages/{name}/")
             vs = set(re.findall(re.escape(name) + r"\.(\d[^\s\"'<>/]*)", page or ""))
             return sorted(vs, key=functools.cmp_to_key(opam_vcmp))   # [] if not a package
@@ -220,6 +225,42 @@ class Sources:
         self.mem[key] = v
         return v
 
+    # Version lists change with each release: their answers are kept a day.
+    VERSIONS_MAX_AGE = 24 * 3600
+
+    def mcp_versions(self, name):
+        """[{version, published, statuses}] of `name`, newest first, from
+        ocaml_package_versions (one call per 500 versions), or None if the
+        server did not answer (or `name` is not a package)."""
+        key = ("mcp-versions", name)
+        if key not in self.mem:
+            out, offset = [], 0
+            while True:
+                args = {"package": name, "limit": 500, **({"offset": offset} if offset else {})}
+                d = self.mcp("ocaml_package_versions", _max_age=self.VERSIONS_MAX_AGE, **args)
+                if not isinstance(d, dict) or not isinstance(d.get("versions"), list):
+                    out = None
+                    break
+                out += [v for v in d["versions"] if isinstance(v, dict)]
+                if not d.get("truncated") or not d["versions"] or len(out) >= 5000:
+                    break
+                offset = len(out)
+            self.mem[key] = out
+        return self.mem[key]
+
+    def changelog(self, pkg, since=None, until=None):
+        """The sections of pkg's changelog for the versions after `since` up to
+        `until`, from ocaml_package_changelog: {file, versions, text,
+        truncated}, or None (no changelog, no section heading names a version,
+        or no section in the range). The text is written by the package's
+        authors: untrusted."""
+        args = {"package": pkg, **({"since": since} if since else {}), **({"until": until} if until else {})}
+        d = self.mcp("ocaml_package_changelog", **args)
+        if not isinstance(d, dict) or not d.get("section_versions") or not isinstance(d.get("content"), str):
+            return None
+        return {"file": d.get("file"), "versions": [str(v) for v in d["section_versions"]],
+                "text": d["content"], "truncated": bool(d.get("truncated"))}
+
     def doc_modules(self, pkg, version):
         """{TopModule: 'lib/TopModule'} for pkg.version, or None without docs."""
         d = self.mcp("ocaml_package_documentation", package=pkg, version=version)
@@ -270,7 +311,11 @@ class Sources:
         return defines(page, kind, ident)
 
     def published(self, pkg, version):
-        """Release date (YYYY-MM-DD) of pkg.version, from its ocaml.org page."""
+        """Release date (YYYY-MM-DD) of pkg.version: from ocaml_package_versions,
+        else from its opam.ocaml.org page."""
+        for v in self.mcp_versions(pkg) or []:
+            if v.get("version") == version and re.fullmatch(r"\d{4}-\d\d-\d\d", str(v.get("published") or "")):
+                return v["published"]
         page = self.raw(f"https://opam.ocaml.org/packages/{pkg}/{pkg}.{version}/")
         m = re.search(r'datetime="(\d{4}-\d\d-\d\d)', page or "")
         return m.group(1) if m else None

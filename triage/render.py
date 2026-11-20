@@ -181,6 +181,19 @@ def evidence_line(r):
     return f"`{r.get('error', '')}`: present in " + ", ".join(parts)
 
 
+def changelog_details(c):
+    """A folded changelog excerpt of a candidate, in a code block: its text is
+    written by the dependency's authors, and in a code block GitHub renders no
+    link, image or mention from it."""
+    log = c["changelog"]
+    text = log["text"] + ("\n…" if log.get("cut") else "")
+    fence = "`" * max(3, 1 + max((len(m) for m in re.findall(r"`+", text)), default=0))
+    # The versions come from the changelog's headings: keep version-like ones only.
+    versions = [v for v in log["versions"] if re.fullmatch(r"[\w.+~-]{1,40}", v)]
+    return ("<details><summary>" + f"Changelog of {c['dep']}: {', '.join(versions)}" + "</summary>\n\n"
+            + f"{fence}text\n{text}\n{fence}\n\n</details>")
+
+
 def render_comment(sha, data, results, placed=0, placed_lines=0):
     """A draft PR comment (Markdown) from ranked suggestions. With `placed`,
     the fixes already attached to lines by `review` are left out."""
@@ -211,6 +224,9 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
             if r.get("candidates"):
                 out.append(f"Candidates ({r.get('compared_with', '')}):")
                 out.append("```diff\n" + "\n".join("+ " + c["new"].split("   ")[0] for c in r["candidates"]) + "\n```")
+                for c in r["candidates"]:
+                    if c.get("changelog"):
+                        out.append(changelog_details(c))
             else:
                 out.append(diff_block(r))
                 if r.get("alternative"):
@@ -389,6 +405,15 @@ def render_suggestions(results):
             if c.get("old"):
                 print(f"    - {c['old']}")
             print(f"    + {c['new']}")
+            log = c.get("changelog")
+            if log:
+                lines = log["text"].splitlines()
+                print(f"      changelog ({log.get('file') or '?'}, {', '.join(log['versions'])}), "
+                      f"written by its authors:")
+                for line in lines[:12]:
+                    print(f"        | {line}")
+                if len(lines) > 12 or log.get("cut"):
+                    print("        | …")
         if r.get("also_newer"):
             print(f"  also released after it (not ranked): {', '.join(r['also_newer'])}")
         if r.get("note"):

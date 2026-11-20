@@ -16,6 +16,7 @@ history, or the change the PR author actually made.
 
 import gzip
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -57,7 +58,8 @@ CASES = {
         ["--max", "6", "--match",
          r"^compilers,(4\.14,lwt.5.10.2,revdeps,kinetic-client|5\.5,lwt.5.10.2,revdeps,passage\.0\.1\.7)"],
         [{"failing": "kinetic-client.0.0.9", "rule": "safe-string", "new": '< "4.06"'},
-         {"failing": "passage.0.1.7", "candidate": '"cmdliner" {with-test & < "2.0.0"}'}]),
+         {"failing": "passage.0.1.7", "candidate": '"cmdliner" {with-test & < "2.0.0"}',
+          "changelog": "no longer allows command names"}]),
     "graphql-async-license": (
         "765646df4b8a6b4fcf3b68949aa3a82236d89e0d", ["--max", "6"],
         [{"failing": "graphql-async.0.13.0", "new": 'license: "MIT"'}]),
@@ -243,6 +245,9 @@ def matches(s, exp):
         if k == "candidate":
             if not any(v in c.get("new", "") for c in s.get("candidates", [])):
                 return False
+        elif k == "changelog":
+            if not any(v in (c.get("changelog") or {}).get("text", "") for c in s.get("candidates", [])):
+                return False
         elif v not in str(s.get(k) or ""):
             return False
     return True
@@ -263,6 +268,36 @@ def record(cases):
                 os.remove(p)
         size = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(d) for f in fs)
         print(f"  fixture size: {size // 1024} KiB")
+
+
+def top_up(cases, rounds=4):
+    """Add to existing fixtures the ocaml.org MCP answers they miss (after a
+    change that makes new MCP calls), without fetching anything else again."""
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    import opam_repo_ci_triage as t
+    for case in cases:
+        d = os.path.join(FIXTURES, case)
+        added = 0
+        for _ in range(rounds):
+            out = run(case)
+            misses = re.findall(r"^  miss: mcp (.*)$", out.stderr, re.M)
+            others = re.findall(r"^  miss: (?!mcp )(.*)$", out.stderr, re.M)
+            if others:
+                print(f"{case}: {len(others)} other misses, re-record it: {others[:2]}")
+            if not misses:
+                break
+            src = t.Sources(d)
+            for key in dict.fromkeys(misses):
+                tool, args = json.loads(key)
+                src.mcp(tool, **args)
+                added += 1
+        for name in os.listdir(d):
+            p = os.path.join(d, name)
+            if name.startswith("mcp-") and name.endswith(".json"):
+                with open(p, "rb") as f, gzip.open(p + ".gz", "wb", compresslevel=9) as g:
+                    g.write(f.read())
+                os.remove(p)
+        print(f"{case}: {added} MCP answers added")
 
 
 class TriageTest(unittest.TestCase):
@@ -401,6 +436,20 @@ class PageTest(unittest.TestCase):
                          {"ready", "merge"})
         self.assertIn("&lt;b&gt;", self.r.label_badges(["<b>"]))
 
+    def test_changelog_in_comment(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import opam_repo_ci_triage as t
+        c = {"dep": "x", "changelog": {"file": "CHANGES", "versions": ["2.0.0", "<img src=a>"],
+                                       "text": "- uses ``` fences\n- @someone [link](https://e.x)", "cut": True}}
+        md = t.changelog_details(c)
+        self.assertIn("````text\n", md)              # a fence longer than any backtick run inside
+        self.assertTrue(md.rstrip().endswith("````\n\n</details>".rstrip()))
+        self.assertNotIn("<img", md)                   # not a version: left out of the summary
+        self.assertIn("\n…\n", md)
+        page = self.r.render_suggestion({"rule": "test-output", "candidates": [dict(c, new='"x" {< "2.0.0"}')]})
+        self.assertIn("&lt;img src=a&gt;", page)
+        self.assertNotIn("<img", page)
+
     def test_comment_markdown(self):
         md = self.r.comment_markdown(self.pr([self.day10]))
         self.assertIn("No failure seems to come from this PR", md)
@@ -418,5 +467,7 @@ class PageTest(unittest.TestCase):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--record":
         record(sys.argv[2:] or list(CASES))
+    elif len(sys.argv) > 1 and sys.argv[1] == "--top-up":
+        top_up(sys.argv[2:] or list(CASES))
     else:
         unittest.main()

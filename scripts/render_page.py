@@ -220,6 +220,12 @@ def render_suggestion(r, sha=None):
             if c.get("new"):
                 diff.append(f'<span class="add">+ {e(c["new"])}</span>')
             out.append('<pre class="diff">' + "\n".join(diff) + "</pre>")
+            log = c.get("changelog")
+            if log:
+                out.append(f'<details class="jobs"><summary>Changelog of {e(c.get("dep"))}: '
+                           f'{e(", ".join(log.get("versions") or []))} ({e(log.get("file") or "?")}, written by '
+                           f'its authors)</summary><pre class="err">{e(log.get("text"))}'
+                           f'{chr(10) + "…" if log.get("cut") else ""}</pre></details>')
     if r.get("also_newer"):
         out.append(f'<div class="meta">Also released after it (not ranked): '
                    f'{e(", ".join(map(str, r["also_newer"])))}</div>')

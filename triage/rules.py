@@ -390,8 +390,12 @@ def complete_test_output(src, r, job, text, data, cache_dir):
             vs = [v for v in src.versions(p) if opam_vcmp(v, good_v) > 0]
             first = vs[0] if vs else bad_v
             # Test-only: keep the main constraint, add a separate with-test line.
-            r["candidates"].append({"dep": p, "passing": good_v, "failing": bad_v, "old": None,
-                                    "new": f'"{p}" {{with-test & < "{first}"}}   (new line in depends)'})
+            c = {"dep": p, "passing": good_v, "failing": bad_v, "old": None,
+                 "new": f'"{p}" {{with-test & < "{first}"}}   (new line in depends)'}
+            log = changelog_excerpt(src, p, good_v, first)
+            if log:
+                c["changelog"] = log
+            r["candidates"].append(c)
     r["confidence"] = "low (candidates differ between a passing and the failing job)"
 
 
@@ -718,13 +722,34 @@ TRIVIAL_DEPS = {"ocaml", "dune", "ocamlfind", "odoc", "ocaml-base-compiler", "oc
                 "base-threads", "base-bytes", "conf-pkg-config", "dune-configurator"}
 
 
+CHANGELOG_EXCERPT = 1500
+
+
+def changelog_excerpt(src, dep, since, until):
+    """The changelog sections of `dep` between two versions (after `since`, up
+    to `until`), cut to CHANGELOG_EXCERPT characters, for a candidate of a
+    test-output failure; None if ocaml.org has none. `until` is the first
+    release after the passing one, whose changes the suggested bound excludes.
+    ocaml.org escapes "<" and "&" in changelogs; the text is decoded here, and
+    escaped again by each output (HTML page, Markdown code block)."""
+    c = src.changelog(dep, since=since, until=until)
+    if not c:
+        return None
+    text = html.unescape(c["text"]).strip()
+    cut = len(text) > CHANGELOG_EXCERPT or c["truncated"]
+    if len(text) > CHANGELOG_EXCERPT:
+        text = text[:CHANGELOG_EXCERPT].rsplit("\n", 1)[0]
+    return {"file": c["file"], "versions": c["versions"], "text": text, "cut": cut}
+
+
 def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
     """No passing job to compare with: dependencies whose installed version was
     released after the failing package itself are candidates for having changed
     its test output. Bound: before their first release after that date.
-    Cost: one small opam.ocaml.org page per dependency looked at (at most
-    `max_lookups`, those mentioned in the error first) plus a binary search
-    over dates for the candidates."""
+    Cost: one ocaml_package_versions call per dependency looked at (at most
+    `max_lookups`, those mentioned in the error first; the binary search over
+    release dates reuses it), and one ocaml_package_changelog call per
+    candidate, for the changes between the two versions."""
     day = src.published(fname, fver)
     if not day:
         r["note"] = "No passing job to compare with, and no release date for the package."
@@ -755,12 +780,17 @@ def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
                 hi = mid
             else:
                 lo = mid + 1
-        cands.append((d.lower() not in blob, dv, d, v, vs[lo] if vs else v))
+        cands.append((d.lower() not in blob, dv, d, v, vs[lo] if vs else v, vs[lo - 1] if vs and lo else None))
     cands.sort(key=lambda c: (c[0], c[1]))
     r["compared_with"] = f"release date of {fname}.{fver} ({day})"
-    r["candidates"] = [{"dep": d, "failing": v, "first_after": first, "old": None,
-                        "new": f'"{d}" {{with-test & < "{first}"}}   (new line in depends)'}
-                       for _, _, d, v, first in cands]
+    r["candidates"] = []
+    for _, _, d, v, first, before in cands:
+        c = {"dep": d, "failing": v, "first_after": first, "old": None,
+             "new": f'"{d}" {{with-test & < "{first}"}}   (new line in depends)'}
+        log = changelog_excerpt(src, d, before, first)
+        if log:
+            c["changelog"] = log
+        r["candidates"].append(c)
     r["also_newer"] = [d for _, _, d, _ in newer[3:]]
     r["confidence"] = "low (dependencies released after the package; check their changelogs)"
     if not cands:
