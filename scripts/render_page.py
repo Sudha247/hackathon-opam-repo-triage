@@ -245,12 +245,14 @@ def packages_text(r, n=2):
 
 
 def blocked_by(sugg):
-    """The other packages where a fix goes, in order."""
+    """The other packages where a fix goes, in order. A fix_in that is not a
+    package name ("the dependency declaring these depexts") is left out:
+    the headline then names the finding instead."""
     out = []
     for r in sugg:
         f = r.get("fix_in") or ""
-        if other_package(f):
-            name = f[:-len(" (other package)")] if f.endswith(" (other package)") else f
+        if f.endswith(" (other package)"):
+            name = f[:-len(" (other package)")]
             if name not in out:
                 out.append(name)
     return out
@@ -292,10 +294,16 @@ def headline(pr, v=None, as_html=True):
         others = blocked_by(sugg)
         if others:
             parts.append(t(f"also blocked by {short_list(others, 2)}"))
-    elif v == "blocked":
+    elif v == "blocked" and blocked_by(sugg):
         others = blocked_by(sugg)
         parts.append(t(f"needs a fix in {short_list(others)}" if len(others) == 1
                        else f"needs fixes in {short_list(others)}"))
+    elif v == "blocked":
+        # The fix goes in a dependency the analysis cannot name (depexts declared
+        # by a dependency, say): the first such finding.
+        r = merge_similar([r for r in sugg if other_package(r.get("fix_in"))] or sugg)[0]
+        pkgs = packages_text(r)
+        parts.append(t(title_of(r) + (f" ({pkgs})" if pkgs else "")))
     else:
         pool = [r for r in sugg if r.get("fix_in") == "this PR"] if v == "other" else sugg
         pool = [r for r in pool if r.get("rule") != "llm"] or pool or sugg
@@ -344,8 +352,17 @@ def failed_count(pr):
     return sum(v for k, v in failed.items() if k not in NOISE), sum(failed.values())
 
 
+SAFE_VARIANT = re.compile(r"[A-Za-z0-9._+~,-]{1,200}")
+SAFE_SHA = re.compile(r"[0-9a-f]{7,40}")
+
+
 def job_link(sha, variant):
-    return link(f"{BASE}{sha}/variant/{variant}" if sha else None, describe_job(variant))
+    """A link to a job's log. Inside a PR, whose element carries the base URL
+    of its commit's jobs (data-ci), only the variant is written and the
+    script builds the href: a full URL per job made up most of the page."""
+    if sha and SAFE_SHA.fullmatch(sha) and SAFE_VARIANT.fullmatch(variant or ""):
+        return f'<a data-job="{e(variant)}">{e(describe_job(variant))}</a>'
+    return e(describe_job(variant))
 
 
 def where_of(r):
@@ -554,8 +571,14 @@ def render_pr(pr, year=None):
         line2.append(f'<span class="run" title="These are the failures so far; the page is updated when CI '
                      f'finishes">CI running{f", {e(left)} job{plural(left)} left" if left else ""}</span>')
     jobs_title = ", ".join(f"{k} {JOB_CATEGORIES.get(c, c)}" for c, k in failed if c not in NOISE)
-    line2.append(f'<span title="Failed build and test jobs ({e(jobs_title or "none")}); network errors, cancelled '
-                 f'and skipped jobs are not counted">{real} failed job{"s" if real != 1 else ""}</span>')
+    skipped = dict(failed).get("not-available", 0)
+    if real == 0 and skipped:
+        line2.append(f'<span title="Not installable on these platforms: the jobs did not run">{skipped} skipped '
+                     f'job{"s" if skipped != 1 else ""}</span>')
+    else:
+        line2.append(f'<span title="Failed build and test jobs ({e(jobs_title or "none")}); network errors, '
+                     f'cancelled and skipped jobs are not counted">{real} failed job{"s" if real != 1 else ""}'
+                     f'</span>')
     head = (f'<summary>{link(f"{REPO_URL}/pull/{n}", f"#{n}", "num")}'
             f'<span class="ttl">{e(title)}{" <i>(draft)</i>" if pr.get("draft") else ""}'
             f'{label_badges(pr.get("labels") or [], pr.get("stale_labels") or [])}</span>'
@@ -608,8 +631,10 @@ def render_pr(pr, year=None):
                         f'({e(shorten(kinds, 90))})</span></summary>'
                         + "".join(render_item(r, sha) for r in other) + "</details>")
     body.append("</div>")
+    sha = pr.get("sha") or ""
+    ci = f' data-ci="{e(BASE + sha)}/variant/"' if SAFE_SHA.fullmatch(sha) else ""
     return (f'<details class="pr v-{v}" id="pr-{n}" data-v="{v}"{" data-merge" if is_merge(pr) else ""}'
-            f' data-search="{e(search)}">' + head + "\n".join(body) + "</details>")
+            f' data-search="{e(search)}"{ci}>' + head + "\n".join(body) + "</details>")
 
 
 def table(head, rows, shown=25):
@@ -768,6 +793,12 @@ details.more>ul.ready{margin-top:4px}
 
 JS = """
 (function(){
+  // Job links carry only their variant: the href is the PR's data-ci + variant.
+  [].forEach.call(document.querySelectorAll('a[data-job]'),function(a){
+    var p=a.closest('[data-ci]'); if(!p)return;
+    a.href=p.getAttribute('data-ci')+a.getAttribute('data-job');   // variants are checked: [A-Za-z0-9._+~,-]
+    a.rel='noopener noreferrer';
+  });
   var cur='all', q='', merge=false;
   var prs=[].slice.call(document.querySelectorAll('details.pr'));
   var btns=[].slice.call(document.querySelectorAll('.seg button[data-f]'));
@@ -884,10 +915,11 @@ def render(data):
     merge = sum(1 for p in prs if is_merge(p))
     failing, running = data.get("failing_prs"), data.get("running_prs")
     scope = (f'{e(len(prs))} of the {e(data.get("open_prs"))} open {link(REPO_URL, "ocaml/opam-repository")} PRs '
-             f'fail opam-repo-ci' + (f' ({e(running)} still running)' if running else "")
+             f'have failing opam-repo-ci jobs'
+             + (f' (for {e(running)} of them, CI is still running)' if running else "")
              + (f' (limited to {e(data["limit"])})' if data.get("limit") else "")
-             + '. Failures are read from the CI logs and matched against known causes; nothing is rebuilt, so '
-             'check a suggestion before applying it.') if failing is not None else ""
+             + '. The failures are read from the CI logs and matched against known causes. Nothing is rebuilt, '
+             'so check a suggestion before applying it.') if failing is not None else ""
     seg = ['<button type="button" class="v-all" data-f="all" aria-pressed="true">All<b>' + str(len(prs)) + '</b></button>']
     seg += [f'<button type="button" class="v-{k}" data-f="{k}" aria-pressed="false" title="{e(VERDICT_HELP[k])}">'
             f'<i></i>{e(label)}<b>{count[k]}</b></button>' for k, label in VERDICTS if count[k]]

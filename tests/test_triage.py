@@ -1198,6 +1198,31 @@ class PageTest(unittest.TestCase):
         self.assertIn("Not caused by this PR (1)", page)
         self.assertEqual(page.count('<details class="it">'), 1)
 
+    def test_compact_job_links(self):
+        link = self.r.job_link("a" * 40, "compilers,5.4,x.1")
+        self.assertIn('data-job="compilers,5.4,x.1"', link)
+        self.assertNotIn("href", link)
+        self.assertNotIn("<a", self.r.job_link("a" * 40, "x\"><script>"))     # not a variant: plain text
+        page = self.r.render_pr(self.pr([dict(self.day10, jobs=["v1", "v2"])]))
+        self.assertIn(f'data-ci="{self.r.BASE}{"a" * 40}/variant/"', page)
+
+    def test_headline_blocked_without_package(self):
+        depext = {"class": "elsewhere", "rule": "missing-system-package", "failing": "p.1",
+                  "fix_in": "the dependency declaring these depexts", "variant": "v",
+                  "title": "System package not found"}
+        pr = self.pr([depext])
+        self.assertEqual(self.r.verdict(pr), "blocked")
+        h = self.r.headline(pr, as_html=False)
+        self.assertNotIn("the dependency declaring", h)
+        self.assertIn("System package not found (p.1)", h)
+
+    def test_skipped_jobs(self):
+        pr = self.pr([dict(self.lint, rule="uninstallable", new=None, **{"class": "explanation"})],
+                     jobs={"total": 10, "failed": {"not-available": 9}})
+        page = self.r.render_pr(pr)
+        self.assertIn("9 skipped jobs", page)
+        self.assertNotIn("0 failed jobs", page)
+
     def test_headline(self):
         h = self.r.headline
         fix = dict(self.lint, new='"ocaml" {>= "5.1"}   (a comment)', failing="colibri2.0.7")

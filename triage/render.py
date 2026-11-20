@@ -304,7 +304,7 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
     out += details("Workarounds: restrict where this PR is built or tested", by["workaround"], lambda r: [
         f"{head(r)}: {md_text(r.get('error'), 220)}",
         "  " + diff_block(r).replace("\n", "\n  ")])
-    out += details("Problems in other packages or in the CI (nothing to change in this PR)", by["elsewhere"],
+    out += details("Not caused by this PR (nothing to change here)", by["elsewhere"],
                    lambda r: [
         f"{head(r, where=True)}: {md_text(r.get('error'), 200)}"
         + (f"<br>Suggested change: {md_code((r.get('new') or '').split('   ')[0])}" if r.get("new") else "")
