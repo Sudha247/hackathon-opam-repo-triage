@@ -176,7 +176,10 @@ class Sources:
     def file_at(self, url, ref, path, is_tag=True):
         m = re.match(r"https://github\.com/([^/]+/[^/]+)$", url)
         if m:
-            return self.raw(f"https://raw.githubusercontent.com/{m.group(1)}/{ref}/{path}")
+            # Upstream paths may hold spaces or non-ASCII characters: quoted
+            # (characters allowed in a URL path are kept, so are the cache keys).
+            return self.raw(f"https://raw.githubusercontent.com/{m.group(1)}/{ref}/"
+                            + urllib.parse.quote(path, safe="/!$&'()*+,;=:@~"))
         rev = self._ensure(url, ref, is_tag)
         if not rev:
             return None

@@ -38,8 +38,9 @@ VERDICT_HELP = {
                "PR do not count)",
     "ci": "Every failure comes from the CI's setup (the day10 builder, the CI's opam), but the PR is a draft, has "
           "a label that keeps it out of the ready list, or its CI is still running",
-    "rerun": "Some jobs did not run to the end because of the CI (network errors, cancelled jobs, a crash of the "
-             "CI's tools), and nothing else points at this PR: rerun them before merging",
+    "rerun": "Some jobs did not run to the end because of the CI (network errors, cancelled or aborted jobs, jobs "
+             "that never started, a crash of the CI's tools), and nothing else points at this PR: rerun them "
+             "before merging",
     "other": "Failures of this PR's packages without a suggested change, failures whose cause is not known, or "
              "failures the tool cannot explain",
     "error": "The analysis is pending or failed"}

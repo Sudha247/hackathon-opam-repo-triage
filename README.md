@@ -88,7 +88,7 @@ failures" entry listing their jobs.
 | The PR removes or relaxes the `available` filter of an existing version, and that version (or its reverse dependencies) now fails on platforms the old filter excluded and the new one allows (filters on `os`, `arch`, `os-distribution` and `os-family` are evaluated; medium confidence when another variable decides) | restore the old filter, or narrow it to the platforms that build (read from the PR's diff: one GitHub call) | high/medium |
 | A conf package fails on a platform listed in its `x-ci-accept-failures` | CI should have ignored it: CI-environment problem | high |
 | Lint error already reported in the previous release's CI | noted, with the PR number | high |
-| A PR package installs on no platform | the constraint every solver conflict goes through (e.g. `js_of_ocaml-compiler < 5.0.0`); nothing to fix when every conflict goes through an upper bound the PR adds to (or lowers in) `depends`, unless no version satisfies that bound (`{>= "3.0" & < "2.0"}`: a mistake in the PR) | high |
+| A PR package installs on no platform | the constraint every solver conflict goes through (e.g. `js_of_ocaml-compiler < 5.0.0`); nothing to fix when every conflict goes through an upper bound the PR adds to (or lowers in) `depends`, unless no version satisfies that bound (`{>= "3.0" & < "2.0"}`, or no published version: `"dune" {< "0.3"}`, a mistake in the PR; when ocaml.org gives no versions, the bound is not assumed intended either) | high |
 | The analysis job fails (no build job runs) | its reason, from the CI page or the end of its log; fix in this PR, or rerun when the CI cancelled it | medium |
 | The lint job fails with only `Warning in pkg.ver: …` | a finding of this PR (opam-ci-check fails the job on warnings too); a lint job failing with neither an error nor a warning is a CI error to rerun | high |
 | Lint warning 62 / 41, known false positives | SPDX id detected from the LICENSE text, `%{_:VAR}%`, or "known waiver" | high |
@@ -100,7 +100,7 @@ failures" entry listing their jobs.
 | mdx/toplevel test output differs (types, values, error locations) | the expected output depends on the OCaml version: `"ocaml" {< "X" \| !with-test}` (keeps the package installable), or `"@runtest" {with-test & ocaml:version < "X"}` | medium |
 | C/C++ error introduced by a newer compiler: `-Wimplicit-int` and friends (GCC 14), `uint64_t` without `<cstdint>` (GCC 13), `bool` as a keyword (GCC 15, C23), `-Werror=…` | the cause and the upstream fix; `x-maintained: false` for an old release | high |
 | System library at the wrong version (`pkg-config --atleast-version`, `Requested 'x >= V'`, conf-libclang's LLVM) | the required and the installed version per distribution (read from the depext installation); exclude those distributions | high |
-| Network errors, cancelled jobs, CI tool crash (`Segmentation fault day10-install`) | one entry listing the jobs to rebuild | high |
+| Network errors, cancelled jobs, CI tool crash (`Segmentation fault day10-install`), jobs CI did not run to the end (`aborted`, the analysis included, or `not started` when nothing else runs; those waiting for a failed analysis are the analysis's) | one entry listing the jobs to rebuild | high |
 | Source archive that cannot be unpacked (symlinks on msys2) | replace the symlinks upstream, or exclude the platform | high |
 | A day10 failure on a platform the failing package already lists in `x-ci-accept-failures` | nothing to change: day10 does not honour it there (cygwin, freebsd) | high |
 | Lint "conf packages should always use …" on npm depexts (`npm-version`) | known false positive for Melange bindings | high |
@@ -225,7 +225,9 @@ publishes the results on the repository's GitHub Pages site:
    are partial. An `aborted` job has finished, and so has a `not started`
    one when the analysis job failed (lint never starts then) or when nothing
    else runs and some job failed: `opam-ci`'s status stays pending for good
-   then, but the page is cached and the PR is shown as finished. A failed or
+   then, but the page is cached and the PR is shown as finished; those jobs
+   (the aborted ones too) are listed as jobs to rerun, so such a PR is never
+   "not this PR's fault". A failed or
    timed-out analysis is tried three times a day at most, while CI runs too.
 
    The GraphQL query also gives the date of the `opam-ci` status. When a
@@ -263,8 +265,8 @@ publishes the results on the repository's GitHub Pages site:
    comes from the CI's setup, or is on an experimental platform), change this
    PR, blocked elsewhere, CI only (every failure comes from the CI's setup,
    but the PR is a draft, labelled, or its CI still runs), needs a rerun
-   (jobs that CI did not test: cancelled, network errors, a CI tool crash;
-   nothing else points at the PR), needs a look (anything else, including
+   (jobs that CI did not test: cancelled, aborted or never started, network
+   errors, a CI tool crash; nothing else points at the PR), needs a look (anything else, including
    failures nothing explains). It is used by
    the filters, and a headline says what the problem is; its details show
    the suggested changes in full and the other failures folded, one line

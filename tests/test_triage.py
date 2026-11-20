@@ -451,6 +451,41 @@ class RulesTest(unittest.TestCase):
         [r] = self.t.rerun_rules({"jobs": [exp, job("compilers,4.14,x.1", "network", "curl failed")]}, [])
         self.assertFalse(r["experimental"])
 
+    def test_jobs_not_run(self):
+        # Jobs CI never ran to the end (aborted, or never started while CI
+        # counts as finished) are jobs to rerun: the PR is not "not this
+        # PR's fault" (the reviewer's scenario: an aborted build and a
+        # pre-existing failure).
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import render_page as R
+        aborted = dict(job("compilers,5.3,foo.1"), status="aborted", category="aborted", reason=None)
+        data = {"jobs": [aborted, job("compilers,5.3,foo.1,revdeps,X.1", reason="x")]}
+        [r] = self.t.rerun_rules(data, [])
+        self.assertEqual((r["where_kind"], r["error"], r["jobs"], r["experimental"]),
+                         ("rerun", "1 aborted job", ["compilers,5.3,foo.1"], False))
+        pre = {"rule": "health-check-preexisting", "where_kind": "other-package", "class": "elsewhere"}
+        pr = {"number": 5, "ci_state": "FAILURE", "ci_unfinished": 0, "result": {"suggestions": [pre]}}
+        self.assertEqual(R.verdict(pr), "ready")
+        pr["result"]["suggestions"].append(r)
+        self.assertFalse(R.seems_ready(pr))
+        self.assertEqual(R.verdict(pr), "rerun")
+        # An aborted analysis: lint never starts; both to rerun.
+        an = lambda status: {"variant": "(analysis)", "kind": "analysis", "status": status, "target": None,
+                             "category": "analysis" if status == "failed" else status, "reason": None,
+                             "experimental": False}
+        lint = {"variant": "(lint)", "kind": "lint", "status": "not-started", "target": None,
+                "category": "not-started", "reason": None, "experimental": False}
+        [r] = self.t.rerun_rules({"jobs": [an("aborted"), lint]}, [])
+        self.assertEqual((r["error"], sorted(r["jobs"])), ("1 aborted job, 1 job not run", ["(analysis)", "(lint)"]))
+        # A failed analysis: the analysis rule explains it, lint included.
+        self.assertEqual(self.t.rerun_rules({"jobs": [an("failed"), lint]}, []), [])
+        # Still running: a job waiting for another one is not finished.
+        running = dict(job("compilers,5.3,foo.1"), status="active", category="active")
+        self.assertEqual(self.t.rerun_rules({"jobs": [an("passed"), lint, running]}, []), [])
+        # Aborted experimental jobs alone do not hold the PR back.
+        [r] = self.t.rerun_rules({"jobs": [dict(aborted, experimental=True)]}, [])
+        self.assertTrue(r["experimental"])
+
     def test_unanalysed_order(self):
         # The PR's own failures are analysed before those of its reverse
         # dependencies, experimental platforms last; classic builder first.
@@ -867,6 +902,28 @@ class NetErrorTest(NetTestBase):
                 self.assertIsNone(self.t.gh_api("repos/x/y/pulls/1", self.tmp), e)
                 self.assertEqual(self.errors("net-errors"), before + 2, e)
             self.assertEqual(os.listdir(self.tmp), [], e)
+
+    def test_upstream_path_quoted(self):
+        # A path with a space or non-ASCII characters is quoted: neither an
+        # InvalidURL (counted as a network error) nor a UnicodeEncodeError (a rule error).
+        from unittest import mock
+        urls = []
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        def urlopen(req, timeout=None):
+            urls.append(req.full_url)
+            req.full_url.encode("ascii")
+            return Resp(b"body")
+        with mock.patch("urllib.request.urlopen", urlopen):
+            body = self.t.Sources(self.tmp).file_at("https://github.com/o/r", "v1.0", "doc/a b/é+x.ml")
+        self.assertEqual(body, "body")
+        self.assertEqual(urls, ["https://raw.githubusercontent.com/o/r/v1.0/doc/a%20b/%C3%A9+x.ml"])
 
     def test_not_found_and_master_files_expire(self):
         from unittest import mock
@@ -1462,13 +1519,33 @@ class BoundedOutTest(unittest.TestCase):
         self.assertEqual(r["where_kind"], "pr")
         self.assertIn("no version of ocaml satisfies it", r["note"])
 
-    def run_rule(self, bounds):
+    class Src:
+        def __init__(self, versions):
+            self.v = versions
+
+        def versions(self, name):
+            return self.v.get(name) if self.v is not None else None
+
+    OCAML = {"ocaml": ["4.02.3", "4.05.0", "4.14.2", "5.4.0"]}
+
+    def run_rule(self, bounds, versions=OCAML):
         jobs = [{"target": "kinetic-client.0.0.9", "kind": "build", "category": "not-available",
                  "variant": f"compilers,{v},kinetic-client.0.0.9", "url": "https://x/" + v}
                 for v in ("4.14", "5.4", "5.5")]
         with unittest.mock.patch.object(self.c, "fetch", lambda *a, **k: ""), \
                 unittest.mock.patch.object(self.c, "log_text", lambda *a: self.LOG):
-            return self.c.skipped_rules({"jobs": jobs}, None, "/nonexistent", ["kinetic-client.0.0.9"], bounds)
+            return self.c.skipped_rules({"jobs": jobs}, self.Src(versions), "/nonexistent",
+                                        ["kinetic-client.0.0.9"], bounds)
+
+    def test_no_published_version(self):
+        # A typo such as `{< "0.3"}` that no published version satisfies: a mistake, not intended.
+        [r] = self.run_rule({"kinetic-client.0.0.9": {"ocaml": '"ocaml" {< "4.0"}'}})
+        self.assertEqual((r["rule"], r["where_kind"]), ("uninstallable", "pr"))
+        self.assertIn("no published version of ocaml satisfies it", r["note"])
+        # The versions are unknown (ocaml.org did not answer): not assumed intended either.
+        [r] = self.run_rule({"kinetic-client.0.0.9": {"ocaml": '"ocaml" {>= "4.02.0" & < "4.06"}'}}, None)
+        self.assertEqual((r["rule"], r["where_kind"]), ("uninstallable", "pr"))
+        self.assertIn("could not be read", r["note"])
 
     def test_intended(self):
         [r] = self.run_rule({"kinetic-client.0.0.9": {"ocaml": '"ocaml" {>= "4.02.0" & < "4.06"}'}})

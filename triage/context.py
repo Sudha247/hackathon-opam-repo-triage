@@ -38,6 +38,7 @@ from .ci import (  # noqa: F401
     parse_commit_page,
     split_pkg,
     failing_dep,
+    unfinished_jobs,
 )
 from .sources import (  # noqa: F401
     constraint_edit,
@@ -391,14 +392,27 @@ def sources_rules(data, cache_dir, match=None):
 
 def rerun_rules(data, results, match=None):
     """Jobs that failed for reasons unrelated to the packages (network errors,
-    cancelled jobs, CI tool crashes): one entry listing what to rebuild."""
-    jobs = [j for j in data["jobs"] if j["status"] == "failed" and j["category"] in ("network", "cancelled")
-            and j["kind"] not in ("lint", "analysis") and (not match or re.search(match, j["variant"]))]
+    cancelled jobs, CI tool crashes), and jobs that CI never ran to the end:
+    aborted ones (the analysis included), and those waiting for another job
+    that will never start (see unfinished_jobs: their CI counts as
+    finished). One entry listing what to rebuild. Jobs waiting for a failed
+    analysis are left to the analysis rule."""
+    picked = lambda j: not match or re.search(match, j["variant"])
+    unfinished = {j["variant"] for j in unfinished_jobs(data)}
+    analysis_failed = any(j["kind"] == "analysis" and j["status"] == "failed" for j in data["jobs"])
+    jobs = [j for j in data["jobs"] if picked(j) and (
+        (j["status"] == "failed" and j["category"] in ("network", "cancelled")
+         and j["kind"] not in ("lint", "analysis"))
+        or j["status"] == "aborted"
+        or (j["status"] == "not-started" and j["variant"] not in unfinished and not analysis_failed))]
     transient = [r for r in results if r.get("rule") == "transient"]
     if not jobs and not transient:
         return results
     counts = collections.Counter()
     for j in jobs:
+        if j["status"] != "failed":
+            counts[(j["status"], None)] += 1
+            continue
         m = re.search(r"HTTP error code (\d+)|curl failed|Could not resolve", j["reason"] or "")
         detail = (f"HTTP {m.group(1)}" + (", rate limit" if m.group(1) == "429" else "") if m and m.group(1)
                   else m.group(0) if m else None)
@@ -410,8 +424,12 @@ def rerun_rules(data, results, match=None):
         cat, detail = k
         if cat is None:              # a CI tool crash, from the log
             return f"{detail} ({counted(n, 'job')})"
-        noun = {"network": "network error", "cancelled": "cancelled job"}.get(cat, f"{cat} job")
+        if cat == "not-started":
+            return f"{counted(n, 'job')} not run"
+        noun = {"network": "network error", "cancelled": "cancelled job",
+                "aborted": "aborted job"}.get(cat, f"{cat} job")
         return counted(n, noun) + (f" ({detail})" if detail else "")
+    idle = [j for j in jobs if j["status"] != "failed"]
     variants = merge_jobs([j["variant"] for j in jobs], [v for r in transient for v in r.get("jobs") or [r["variant"]]])
     exp = sum(j["experimental"] for j in jobs)
     entry = {"variant": counted(len(variants), "job"), "rule": "rerun", **fix_where("rerun", "CI (rerun)"),
@@ -419,8 +437,12 @@ def rerun_rules(data, results, match=None):
              "confidence": "high", "jobs": variants,
              # Only experimental jobs to rerun do not hold the PR back.
              "experimental": exp == len(jobs) and all(r.get("experimental") for r in transient),
-             "note": "These jobs failed because of the CI, not the packages. An opam-repository maintainer can "
-                     "rerun them with \"Rebuild failed\" on the CI page."
+             "note": ("These jobs failed because of the CI, not the packages" if not idle else
+                      "CI did not run these jobs to the end (aborted, or never started)" if len(idle) == len(jobs)
+                      and not transient else
+                      "These jobs failed because of the CI, not the packages, or CI did not run them to the end "
+                      "(aborted, or never started)")
+                     + ". An opam-repository maintainer can rerun them with \"Rebuild failed\" on the CI page."
                      + ((" One of them is on an experimental platform." if exp == 1 else
                          f" {exp} of them are on experimental platforms.") if exp else "")}
     return [r for r in results if r.get("rule") != "transient"] + [entry]
@@ -855,7 +877,8 @@ def skipped_rules(data, src, cache_dir, pr_packages, bounds=None):
     """A PR package that installs nowhere: report the solver's conflict chain.
     When every conflict goes through a dependency whose upper bound the PR
     adds (`bounds`, from pr_added_bounds), that is the point of the change
-    (an old release restricted to old compilers, say): explained as such."""
+    (an old release restricted to old compilers, say): explained as such,
+    provided some published version of the dependency satisfies the bound."""
     out = []
     for t in pr_packages:
         own = [j for j in data["jobs"] if j["target"] == t and j["kind"] == "build"]
@@ -889,15 +912,40 @@ def skipped_rules(data, src, cache_dir, pr_packages, bounds=None):
         through = {f.split(" ")[0] for f in firsts}
         bounded = added and through and through <= set(added) and not unknown
         lines = "; ".join(f"`{added[d]}`" for d in sorted(through)) if bounded else ""
-        # A bound that no version satisfies (`{>= "3.0" & < "2.0"}`) is a mistake, not the point of the change.
-        from .suggest import VERSION_TERM, unsatisfiable       # (suggest imports this module)
-        empty = sorted(d for d in through if bounded and "|" not in added[d]
-                       and unsatisfiable(VERSION_TERM.findall(added[d])))
+        # A bound that no version satisfies (`{>= "3.0" & < "2.0"}`), or no published version (a typo
+        # such as `{< "0.3"}` for dune), is a mistake, not the point of the change. The versions come
+        # from ocaml.org (and this PR); when they are unknown (no answer, counted in NET["mcp-errors"]:
+        # the analysis is retried), nothing says the bound is intended. A disjunction is not checked.
+        from .suggest import VERSION_TERM, allows, unsatisfiable       # (suggest imports this module)
+        empty, unpublished, unchecked = [], [], []
+        for d in sorted(through) if bounded else []:
+            terms = VERSION_TERM.findall(added[d])
+            if "|" in added[d] or not terms:
+                continue
+            if unsatisfiable(terms):
+                empty.append(d)
+                continue
+            vs = src.versions(d) if src else None
+            if vs is None:
+                unchecked.append(d)
+                continue
+            vs = list(vs) + [split_pkg(p)[1] for p in pr_packages if split_pkg(p)[0] == d]
+            if not any(allows(v, terms) for v in vs):
+                unpublished.append(d)
         if empty:
             r.update(confidence="high",
                      note=f"This PR adds {lines} to {t}, and no version of {', '.join(empty)} satisfies "
                           f"{'it' if len(empty) == 1 else 'them'}: a lower bound is above an upper bound. Fix "
                           f"the bound.")
+        elif unpublished:
+            r.update(confidence="high",
+                     note=f"This PR adds {lines} to {t}, and no published version of {', '.join(unpublished)} "
+                          f"satisfies {'it' if len(unpublished) == 1 else 'them'}: check the bound for a typo.")
+        elif unchecked:
+            r.update(confidence="medium",
+                     note=f"This PR adds {lines} to {t}, which no tested platform satisfies, so CI cannot build "
+                          f"it. The versions of {', '.join(unchecked)} could not be read (ocaml.org did not "
+                          f"answer), so nothing says some version satisfies the bound: check it.")
         elif bounded:
             r.update(fix_where("none", "nothing (this PR's bound)"), rule="bounded-out", confidence="high",
                      note=f"This PR adds {lines} to {t}, which no tested platform satisfies, so CI cannot "
