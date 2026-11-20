@@ -332,6 +332,53 @@ class ChecksTest(unittest.TestCase):
                       self.t.applied(text, {"new": '"conf-python-3" {build}   (new line in depends)'}))
 
 
+def job(variant, category="build", reason="The compilation of x failed", experimental=False):
+    """A synthetic CI job, as parse_commit_page makes it."""
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    from triage import ci
+    parts = variant.split(",")
+    i = 4 if parts[0] == "day10" else 2
+    platform, rest = parts[:i], parts[i:]
+    kind = "revdeps" if rest[1:2] == ["revdeps"] else rest[1] if len(rest) > 1 else "build"
+    status = "passed" if category == "passed" else "failed"
+    return {"variant": variant, "platform": platform, "target": rest[0], "kind": kind,
+            "revdep": rest[2] if kind == "revdeps" else None, "status": status, "category": category,
+            "reason": "" if status == "passed" else reason, "experimental": experimental,
+            "url": ci.BASE + "0" * 40 + "/variant/" + variant}
+
+
+class RulesTest(unittest.TestCase):
+    """Rules on synthetic job lists (no fixture)."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import opam_repo_ci_triage as t
+        self.t = t
+
+    def test_unanalysed_order(self):
+        # The PR's own failures are analysed before those of its reverse
+        # dependencies, experimental platforms last; classic builder first.
+        jobs = [job("compilers,5.4,a.1,revdeps,r.1", reason="Error in r"),
+                job("freebsd,freebsd-15.1-ocaml-5.5-amd64,a.1", reason="Error on freebsd", experimental=True),
+                job("day10,debian-13,x86_64,5.4,a.1", reason="Error in a"),
+                job("compilers,5.4,a.1", reason="Error in a"),
+                job("compilers,5.4,a.1,revdeps,s.1", category="passed")]
+        groups = self.t.distinct_failures(jobs)
+        self.assertEqual([[j["variant"] for j in g] for g in groups],
+                         [["compilers,5.4,a.1", "day10,debian-13,x86_64,5.4,a.1"],
+                          ["compilers,5.4,a.1,revdeps,r.1"],
+                          ["freebsd,freebsd-15.1-ocaml-5.5-amd64,a.1"]])
+
+    def test_unanalysed_count(self):
+        # Failures beyond --max are counted in the JSON output.
+        env = {**os.environ, "OPAM_CI_OFFLINE": "1", "OPAM_CI_RECORD": "0"}
+        out = subprocess.run([sys.executable, TOOL, "suggest", CASES["websocket-bound"][0], "--json", "--max", "2",
+                              "--cache-dir", os.path.join(FIXTURES, "websocket-bound")],
+                             capture_output=True, text=True, env=env, timeout=300)
+        self.assertIn("offline cache misses: 0", out.stderr)
+        self.assertGreater(json.loads(out.stdout)["unanalysed"], 0)
+
+
 def make_test(case):
     def test(self):
         if not os.path.isdir(os.path.join(FIXTURES, case)):
@@ -467,6 +514,12 @@ class PageTest(unittest.TestCase):
         # Unexplained failures (only skipped jobs), CI not finished, drafts, labels.
         self.assertFalse(self.r.seems_ready(self.pr([])))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], ci_unfinished=2)))
+        # Distinct failures beyond --max were not analysed: nothing says they are not the PR's.
+        unanalysed = self.pr([self.day10])
+        unanalysed["result"]["unanalysed"] = 3
+        self.assertFalse(self.r.seems_ready(unanalysed))
+        self.assertIn("3 more distinct failures were not analysed", self.r.render_pr(unanalysed))
+        self.assertIn("3 more distinct failure(s) were not analysed", self.r.comment_markdown(unanalysed))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], draft=True)))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], labels=["needs reporter action"])))
         self.assertTrue(self.r.seems_ready(self.pr([self.day10], labels=["consider for merge"])))

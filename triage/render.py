@@ -208,6 +208,8 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
     if data.get("unfinished"):
         out += [f"**CI is still running** ({data['unfinished']} of {len(data['jobs'])} jobs not finished): "
                 "these are the failures so far.", ""]
+    if data.get("unanalysed"):
+        out += [f"**{data['unanalysed']} more distinct failure(s) were not analysed**: see the CI results.", ""]
     fixes = by["fix"]
     if placed:
         out += [f"{placed} suggested change{'s are' if placed > 1 else ' is'} attached to "

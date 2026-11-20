@@ -122,7 +122,8 @@ def main():
             return
         if args.json:
             json.dump({"sha": sha, "pr": data["pr"], "ci_unfinished": data["unfinished"],
-                       "ci_jobs": len(data["jobs"]), "suggestions": results}, sys.stdout, indent=2)
+                       "ci_jobs": len(data["jobs"]), "unanalysed": data.get("unanalysed", 0),
+                       "suggestions": results}, sys.stdout, indent=2)
             print()
         else:
             render_suggestions(results)

@@ -50,7 +50,11 @@ Common options:
   A variant is the last part of a job URL, e.g.
   `compilers,4.14,lwt.5.10.2,revdeps,osc.0.1.4` or
   `day10,debian-13,x86_64,5.5,lwt.5.10.2,tests`.
-- `--max N`: analyse at most N distinct failures (default 30).
+- `--max N`: analyse at most N distinct failures (default 30): those of the
+  PR's own packages first, then those of their reverse dependencies, and
+  experimental platforms last. `suggest --json` gives the number of the others
+  that no suggestion explains in `unanalysed`; the PR comment and the triage
+  page say how many, and such a PR is not listed as seeming ready.
 - `--cache-dir DIR`: cache location (default `.opam-ci-cache/`).
 - `--refresh`: fetch the commit's CI page again and drop the cached logs of
   its jobs (after a rebuild: a finished page and the logs are otherwise cached
