@@ -634,6 +634,11 @@ def render_pr(pr, year=None, max_failures=None):
         parts.append(f'{e(since.get("still", 0))} unchanged')
         body.append(f'<p class="note since">Since the previous push '
                     f'({e((since.get("previous_sha") or "")[:12])}): ' + "; ".join(parts) + ".</p>")
+    stale = (pr.get("result") or {}).get("health_stale")
+    if stale:
+        body.append(f'<p class="note">opam-health-check\'s latest results are from {e(day(stale))}, more than a '
+                    f'week ago, so failures were not compared with master: some may be marked as this PR\'s '
+                    f'although they also fail without it.</p>')
     if pr.get("pending"):
         body.append('<p class="note">Not analysed yet; the next page update will cover it.</p>')
     elif pr.get("result") is None:

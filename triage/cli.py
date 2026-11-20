@@ -133,6 +133,7 @@ def main():
             json.dump({"sha": sha, "pr": data["pr"], "ci_unfinished": data["unfinished"],
                        "ci_jobs": len(data["jobs"]), "unanalysed": data.get("unanalysed", 0),
                        "incomplete": bool(errors), "errors": errors,
+                       **({"health_stale": data["health_stale"]} if data.get("health_stale") else {}),
                        "suggestions": results}, sys.stdout, indent=2)
             print()
         else:

@@ -338,6 +338,8 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
             if status == "good" and notes is not None:
                 notes.setdefault("new", {})[failure_key(j)] = (
                     f"{rd} builds on master ({when}), so this PR probably causes this failure.")
+        if stale and notes is not None:
+            notes["health_stale"] = max(stale)
         if stale:
             print(f"note: opam-health-check's latest results are from {short_date(max(stale))}, more than "
                   f"{HEALTH_MAX_AGE_DAYS} days ago: not used to tell pre-existing failures from new ones",

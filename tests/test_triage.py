@@ -1559,6 +1559,12 @@ class PageTest(unittest.TestCase):
         self.assertIn("9 skipped jobs", page)
         self.assertNotIn("0 failed jobs", page)
 
+    def test_stale_health_check_note(self):
+        pr = self.pr([self.lint])
+        pr["result"]["health_stale"] = "2026-10-01"
+        self.assertIn("opam-health-check's latest results are from", self.r.render_pr(pr))
+        self.assertNotIn("opam-health-check's latest", self.r.render_pr(self.pr([self.lint])))
+
     def test_headline(self):
         h = self.r.headline
         fix = dict(self.lint, new='"ocaml" {>= "5.1"}   (a comment)', failing="colibri2.0.7")

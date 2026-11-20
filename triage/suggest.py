@@ -146,6 +146,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     accepted_but_failing(results, src, sha, set(pr_packages))
     new_notes = {}
     pre = preexisting_failures(data, sha, base, cache_dir, src, new_notes)
+    if new_notes.get("health_stale"):
+        data["health_stale"] = new_notes["health_stale"]     # reported in the JSON output and on the page
     for r in results:
         keys = r.get("_keys") or ([r["_key"]] if r.get("_key") else [])
         hints = {new_notes["new"][k] for k in keys if k in new_notes.get("new", {})}
