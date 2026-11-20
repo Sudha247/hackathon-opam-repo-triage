@@ -29,9 +29,23 @@ from .net import (  # noqa: F401
 )
 
 
+# Job statuses that will not change without a rebuild.
+FINISHED = ("passed", "failed", "aborted")
+
+
 def unfinished_jobs(data):
-    """Jobs still running or queued (status `active`, ...)."""
-    return [j for j in data["jobs"] if j["status"] not in ("passed", "failed")]
+    """Jobs still running or queued (status `active`, ...). An `aborted` job
+    has finished. A `not-started` one waits for another job: it never starts
+    when that job failed (lint after a failed analysis), so it is finished when
+    the analysis failed or was aborted, or when no other job is running and
+    some job failed."""
+    left = [j for j in data["jobs"] if j["status"] not in FINISHED]
+    stuck = [j for j in left if j["status"] == "not-started"]
+    analysis_failed = any(j["kind"] == "analysis" and j["status"] in ("failed", "aborted") for j in data["jobs"])
+    some_failed = any(j["status"] in ("failed", "aborted") for j in data["jobs"])
+    if stuck and (analysis_failed or (len(stuck) == len(left) and some_failed)):
+        return [j for j in left if j["status"] != "not-started"]
+    return left
 
 
 def load_commit(sha, cache_dir, refresh=False):

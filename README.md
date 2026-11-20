@@ -200,10 +200,15 @@ publishes the results on the repository's GitHub Pages site:
    previous one: the problems gone, the new ones, and how many remain.
 
    PRs whose CI is still running are included once some job has failed,
-   with a "CI running" badge, and analysed again on every run until their CI
+   with a "CI running" badge, and analysed again when the statuses of their
+   jobs change (a digest of them is kept in the state), until their CI
    finishes. The tool never caches the CI page of a commit while jobs are
    still running (it fetches it again next time), and says when the results
-   are partial.
+   are partial. An `aborted` job has finished, and so has a `not started`
+   one when the analysis job failed (lint never starts then) or when nothing
+   else runs and some job failed: `opam-ci`'s status stays pending for good
+   then, but the page is cached and the PR is shown as finished. A failed or
+   timed-out analysis is tried three times a day at most, while CI runs too.
 
    The GraphQL query also gives the date of the `opam-ci` status. When a
    finished CI's status changes for the same commit (another state, or a
@@ -211,13 +216,24 @@ publishes the results on the repository's GitHub Pages site:
    finished within the hour), the PR is analysed again with `--refresh`: the
    CI page is fetched again and the cached logs of its jobs are dropped (a
    rebuilt job keeps its URL), so each log the analysis reads comes from the
-   new build. Nothing is fetched again when the status has not changed.
+   new build. The same happens when there is no previous analysis of the
+   build: a new PR or commit (free: nothing is cached), a PR whose entry was
+   dropped when its CI passed and that fails again, or an entry saved before
+   the status dates were recorded. Nothing is fetched again when the status
+   has not changed.
+
+   A PR left for the next run (`--time-budget`) keeps showing its previous
+   result when it is for the same commit. When analysing a commit again fails
+   (a timeout, a server down), the previous result is kept, with the error
+   beside it (`last_error` in the state), and tried again three times a day
+   at most.
 
    With an `ANTHROPIC_API_KEY` repository secret, failures that no rule
    recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most
    `--llm-budget 40` calls per run; answers are cached, so only new failures
    cost anything). Without the secret, or if the API fails, the page is built
-   from the rules alone. On the page, LLM diagnoses are labelled "unchecked",
+   from the rules alone. Once a run's budget is spent, PRs analysed without
+   the LLM are left as they are until a run with budget left. On the page, LLM diagnoses are labelled "unchecked",
    version bounds and depexts they propose are shown as text to check, and
    low-confidence ones are folded, as "LLM diagnosis (low confidence)": in an evaluation on 25 answers, 15 were
    right, 7 plausible, 1 wrong and 2 harmful, all the harmful ones being

@@ -1015,9 +1015,196 @@ class RefreshTest(unittest.TestCase):
         self.assertTrue(T.ci_changed(prev, rebuilt))
         self.assertEqual(T.reuse(prev, rebuilt, "v", False), (False, False, False))
         self.assertTrue(T.ci_changed(prev, dict(p, ci_state="PENDING")))
-        # Unknown dates (state saved before they were recorded), another commit.
-        self.assertFalse(T.ci_changed(dict(prev, ci_created=None), rebuilt))
+        # A previous analysis without a date (state saved before dates were
+        # recorded) does not say which build it saw: changed. Without a date
+        # now either, nothing says it changed.
+        self.assertTrue(T.ci_changed(dict(prev, ci_created=None), rebuilt))
+        self.assertFalse(T.ci_changed(dict(prev, ci_created=None), dict(p, ci_created=None)))
+        # Another commit is not a change of status, but it is analysed with --refresh
+        # (free), as is a PR without a previous entry.
         self.assertFalse(T.ci_changed(prev, dict(rebuilt, sha="b")))
+        self.assertTrue(T.needs_refresh(prev, dict(rebuilt, sha="b")))
+        self.assertTrue(T.needs_refresh(None, p))
+        self.assertFalse(T.needs_refresh(prev, p))
+
+    def test_unfinished_jobs(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import ci
+
+        def data(*statuses):
+            kinds = ["analysis", "lint"] + ["build"] * (len(statuses) - 2)
+            return {"jobs": [{"variant": f"v{i}", "kind": k, "status": s}
+                             for i, (k, s) in enumerate(zip(kinds, statuses))]}
+        n = lambda *s: len(ci.unfinished_jobs(data(*s)))
+        # Lint never starts after a failed or aborted analysis (opam-ci's status stays pending).
+        self.assertEqual(n("failed", "not-started"), 0)
+        self.assertEqual(n("aborted", "not-started"), 0)
+        self.assertEqual(n("passed", "passed", "aborted", "failed"), 0)        # aborted: finished
+        # A job waiting for another one that failed, nothing else running: finished.
+        self.assertEqual(n("passed", "passed", "failed", "not-started"), 0)
+        # Still running: a job is active, or nothing failed yet (CI starting).
+        self.assertEqual(n("passed", "passed", "active", "not-started"), 2)
+        self.assertEqual(n("passed", "not-started", "passed"), 1)
+        self.assertEqual(n("active", "not-started"), 2)
+        # The statuses as the CI page writes them.
+        page = ('<details><summary><b>Main results</b></summary><ul class="statuses">'
+                '<li class="failed"><a href="/github/ocaml/opam-repository/commit/a/variant/(analysis)">'
+                '(analysis) (failed: x)</a></li><li class="not-started"><a href="/github/ocaml/'
+                'opam-repository/commit/a/variant/(lint)">(lint) (not started)</a></li></ul></details>')
+        d = ci.parse_commit_page(page)
+        self.assertEqual([j["status"] for j in d["jobs"]], ["failed", "not-started"])
+        self.assertEqual(ci.unfinished_jobs(d), [])
+
+
+class PageMainTest(unittest.TestCase):
+    """scripts/triage_open_prs.py main() on synthetic states and a fake tool:
+    which PRs are analysed again, with which arguments, and what is kept."""
+
+    SHA = "a" * 40
+    FAILED_ANALYSIS = [{"variant": "(analysis)", "status": "failed", "category": "analysis"},
+                       {"variant": "(lint)", "status": "not-started", "category": "not-started"}]
+
+    def setUp(self):
+        import tempfile
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+        self.T = T
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state = os.path.join(self.tmp, "prs.json")
+
+    def pr(self, **kw):
+        return {"number": 1, "title": "t", "url": "u", "draft": False, "updated": "2026-11-20T00:00:00Z",
+                "sha": self.SHA, "author": "x", "labels": [], "stale_labels": [], "ci_state": "FAILURE",
+                "ci_url": None, "ci_created": "2026-11-20T10:00:00Z", **kw}
+
+    def run_main(self, prs, jobs=None, suggest_ok=True, args=(), llm=False, version="v"):
+        """One run; (state after it, the tool's calls, `changed` output)."""
+        from unittest import mock
+        import contextlib
+        calls = []
+
+        def run_tool(a, timeout, tool=None):
+            calls.append(a)
+            if a[0] == "summary":
+                return {"jobs": jobs if jobs is not None else self.FAILED_ANALYSIS}, None, {}
+            if not suggest_ok:
+                return None, "timeout after 600s", {"timeout": 1}
+            return {"suggestions": [{"rule": "x", "variant": "v"}], "ci_unfinished": 0}, None, {"http": 1}
+        gh_out = os.path.join(self.tmp, "gh-out")
+        open(gh_out, "w").close()
+        with mock.patch.object(self.T, "github_token", return_value="tok"), \
+                mock.patch.object(self.T, "list_open_prs", return_value=(prs, 1)), \
+                mock.patch.object(self.T, "run_tool", run_tool), \
+                mock.patch.object(self.T, "llm_available", return_value=llm), \
+                mock.patch.object(self.T, "tool_version", return_value=version), \
+                mock.patch.object(sys, "argv", ["triage_open_prs.py", "--state", self.state,
+                                                "--out", os.path.join(self.tmp, "data.json")] + list(args)), \
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": gh_out}), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.T.main()
+        with open(self.state) as f:
+            state = json.load(f)["prs"]
+        with open(gh_out) as f:
+            return state, calls, f.read().strip()
+
+    def save(self, prs):
+        with open(self.state, "w") as f:
+            json.dump({"prs": prs}, f)
+
+    def kinds(self, calls):
+        return [c[0] + (" --refresh" if "--refresh" in c else "") for c in calls]
+
+    def test_pending_with_finished_page(self):
+        # opam-ci's status stays pending (lint never starts after a failed
+        # analysis): analysed once, then kept while the job statuses are the same.
+        p = self.pr(ci_state="PENDING")
+        state, calls, changed = self.run_main([p])
+        self.assertEqual(self.kinds(calls), ["summary --refresh", "suggest"])
+        self.assertEqual(changed, "changed=true")
+        state, calls, changed = self.run_main([p])
+        self.assertEqual(self.kinds(calls), ["summary"])          # the page only (cached once finished)
+        self.assertEqual(changed, "changed=false")
+        self.assertIsNotNone(state["1"]["result"])
+        # A job status changed: analysed again.
+        jobs = [dict(self.FAILED_ANALYSIS[0], status="passed"), dict(self.FAILED_ANALYSIS[1], status="failed")]
+        state, calls, changed = self.run_main([p], jobs=jobs)
+        self.assertEqual(self.kinds(calls), ["summary", "suggest"])
+
+    def test_pending_failures_limited(self):
+        # A PR whose analysis times out while CI runs: MAX_ATTEMPTS attempts,
+        # even though jobs keep finishing, then not tried again for a while.
+        p = self.pr(ci_state="PENDING")
+        for i in range(self.T.MAX_ATTEMPTS):
+            jobs = self.FAILED_ANALYSIS + [{"variant": f"b{j}", "status": "passed"} for j in range(i)]
+            state, calls, _ = self.run_main([p], jobs=jobs, suggest_ok=False)
+            self.assertIn("suggest", self.kinds(calls), i)
+            self.assertEqual(state["1"]["attempts"], i + 1)
+        state, calls, changed = self.run_main([p], jobs=self.FAILED_ANALYSIS + [{"variant": "z", "status": "passed"}],
+                                              suggest_ok=False)
+        self.assertEqual(calls, [])
+        self.assertEqual(changed, "changed=false")
+
+    def test_refresh(self):
+        p = self.pr()
+        # No previous entry (new PR, or one dropped when its CI passed and failing again).
+        state, calls, _ = self.run_main([p])
+        self.assertEqual(self.kinds(calls), ["suggest --refresh", "summary"])
+        # Nothing changed: nothing fetched.
+        state, calls, _ = self.run_main([p])
+        self.assertEqual(calls, [])
+        # An entry saved before the status dates were recorded.
+        self.save({"1": {k: v for k, v in state["1"].items() if k != "ci_created"}})
+        state, calls, _ = self.run_main([p])
+        self.assertEqual(self.kinds(calls), ["suggest --refresh", "summary"])
+        # Another commit.
+        state, calls, _ = self.run_main([self.pr(sha="b" * 40)])
+        self.assertEqual(self.kinds(calls), ["suggest --refresh", "summary"])
+        # The tool changed: analysed again from the cache.
+        state, calls, _ = self.run_main([self.pr(sha="b" * 40)], version="w")
+        self.assertEqual(self.kinds(calls), ["suggest", "summary"])
+
+    def test_deferred_keeps_result_of_the_same_commit(self):
+        self.run_main([self.pr()])
+        # The tool changed, and the time budget is spent: the result stays.
+        state, calls, _ = self.run_main([self.pr()], args=["--time-budget", "-1"], version="w")
+        self.assertEqual(calls, [])
+        self.assertIsNotNone(state["1"]["result"])
+        self.assertFalse(state["1"].get("pending"))
+        # Another commit: the result of the old one is not shown.
+        state, calls, _ = self.run_main([self.pr(sha="b" * 40)], args=["--time-budget", "-1"], version="w")
+        self.assertIsNone(state["1"].get("result"))
+        self.assertTrue(state["1"]["pending"])
+
+    def test_failed_redo_keeps_result(self):
+        state, _, _ = self.run_main([self.pr()])
+        good = state["1"]["result"]
+        for i in range(self.T.MAX_ATTEMPTS):
+            state, calls, _ = self.run_main([self.pr()], version="w", suggest_ok=False)
+            self.assertEqual(self.kinds(calls), ["suggest"], i)
+            self.assertEqual(state["1"]["result"], good)
+            self.assertEqual((state["1"]["last_error"], state["1"]["attempts"]), ("timeout after 600s", i + 1))
+            self.assertEqual(state["1"]["tool_version"], "v")        # what the result saw
+        state, calls, _ = self.run_main([self.pr()], version="w", suggest_ok=False)
+        self.assertEqual(calls, [])                                   # kept, until the attempts expire
+        self.assertEqual(state["1"]["result"], good)
+        # The attempts expired: tried again, and this time it works.
+        state["1"]["last_error_at"] = "2026-01-01T00:00:00+00:00"
+        self.save(state)
+        state, calls, _ = self.run_main([self.pr()], version="w")
+        self.assertEqual(self.kinds(calls), ["suggest", "summary"])
+        self.assertNotIn("last_error", state["1"])
+        self.assertEqual(state["1"]["tool_version"], "w")
+
+    def test_llm_budget_spent(self):
+        # Analysed without the LLM; this run has the LLM but no budget left:
+        # not analysed again (it would be without the LLM again).
+        self.run_main([self.pr()])
+        state, calls, _ = self.run_main([self.pr()], llm=True, args=["--llm-budget", "0"])
+        self.assertEqual(calls, [])
+        state, calls, _ = self.run_main([self.pr()], llm=True, args=["--llm-budget", "5"])
+        self.assertEqual(self.kinds(calls), ["suggest", "summary"])
+        self.assertIn("--llm", calls[0])
 
     def test_refresh_drops_logs(self):
         sys.path.insert(0, os.path.join(HERE, ".."))
@@ -1147,6 +1334,16 @@ class PageTest(unittest.TestCase):
                                                    stale_labels=["needs reporter action"])))
         self.assertIn("(author replied since)", self.r.label_badges(["needs reporter action"],
                                                                  ["needs reporter action"]))
+
+    def test_pending_status_with_finished_page(self):
+        # opam-ci's status stays pending when a job never starts: the CI page
+        # has finished (no unfinished job), so the PR is not "CI running".
+        done = self.pr([self.day10], ci_state="PENDING", ci_unfinished=0)
+        self.assertTrue(self.r.seems_ready(done))
+        self.assertNotIn("CI running", self.r.render_pr(done))
+        running = self.pr([self.day10], ci_state="PENDING", ci_unfinished=3)
+        self.assertFalse(self.r.seems_ready(running))
+        self.assertIn("CI running, 3 jobs left", self.r.render_pr(running))
 
     def test_shared_failures(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))

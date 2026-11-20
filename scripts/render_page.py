@@ -101,6 +101,13 @@ def groups(pr):
     return g
 
 
+def ci_running(pr):
+    """Whether the PR's CI is still running: its opam-ci status is pending and
+    the analysis did not find the CI page finished. The status stays pending
+    for good when a job never starts (lint after a failed analysis)."""
+    return pr.get("ci_state") == "PENDING" and pr.get("ci_unfinished") != 0
+
+
 def not_this_pr(r):
     """Whether a failure is not the PR's: it happens without the PR (pre-existing,
     or also failing in other open PRs), comes from the CI, or is on an
@@ -114,7 +121,7 @@ def seems_ready(pr):
     finished, and its failures must have been explained: a PR whose only
     "failures" are skipped jobs may not be installable anywhere."""
     res = pr.get("result")
-    if pr.get("pending") or res is None or pr.get("ci_state") == "PENDING" or pr.get("draft"):
+    if pr.get("pending") or res is None or ci_running(pr) or pr.get("draft"):
         return False
     if blocking_labels(pr) or pr.get("ci_unfinished") or res.get("ci_unfinished"):
         return False
@@ -585,7 +592,7 @@ def render_pr(pr, year=None, max_failures=None):
     pkgs = " ".join(dict.fromkeys(r.get("failing") or "" for rs in g.values() for r in rs))
     search = " ".join(f"{n} {title} {pr.get('author') or ''} {pkgs}".lower().split())
     line2 = [f'<b class="v" title="{e(VERDICT_HELP[v])}">{e(VERDICT_LABEL[v])}</b>', headline(pr, v)]
-    if pr.get("ci_state") == "PENDING":
+    if ci_running(pr):
         left = pr.get("ci_unfinished")
         line2.append(f'<span class="run" title="These are the failures so far; the page is updated when CI '
                      f'finishes">CI running{f", {e(left)} job{plural(left)} left" if left else ""}</span>')
@@ -994,7 +1001,7 @@ def render_feed(data):
         v = verdict(pr)
         g = groups(pr)
         lines = [f"{VERDICT_LABEL[v]}: {headline(pr, v, as_html=False)}"]
-        if pr.get("ci_state") == "PENDING":
+        if ci_running(pr):
             lines.append(f"CI still running ({pr.get('ci_unfinished') or '?'} jobs left).")
         since = pr.get("since_last_push")
         if since and (since.get("fixed") or since.get("new")):
