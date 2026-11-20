@@ -397,6 +397,27 @@ class LintTest(unittest.TestCase):
         self.assertIn("Dubious use", r["error"])
         self.assertIn("fails on warnings too", r["note"])
 
+    def test_field_already_missing_on_master(self):
+        # The PR deprecates an old version that never had a license (#30832, bjack): said so,
+        # the change still suggested (#31205's author added it).
+        class Src:
+            def opam_file(self, name, version, ref="master"):
+                return {"1.0": 'opam-version: "2.0"\nsynopsis: "Old"\n',
+                        "2.0": 'opam-version: "2.0"\nlicense: "MIT"\n'}.get(version)
+
+            def versions(self, name):
+                return ["1.0", "2.0"]
+
+        data = {"jobs": [{"variant": "(lint)", "kind": "lint", "status": "failed", "target": None,
+                          "url": "https://x/(lint)", "messages": [
+                              "Warning in foo.1.0: Opam lint warning 68: Missing field 'license'",
+                              "Warning in foo.3.0: Opam lint warning 68: Missing field 'license'"]}]}
+        old, new = self.c.lint_rules(data, Src(), None, "/nonexistent")
+        self.assertEqual((old["new"], new["new"]), ('license: "MIT"', 'license: "MIT"'))
+        self.assertEqual(old["note"], "Taken from foo.2.0 in opam-repository. Already missing on master: "
+                                      "this PR, which changes an existing version, did not remove it.")
+        self.assertEqual(new["note"], "Taken from foo.2.0 in opam-repository.")
+
     def test_ci_error(self):
         [r] = self.rules('Command "git" "-C" "/tmp/git-checkout5e08f64" "reset" "--hard" "-q" "7386318" '
                          'exited with status 128')

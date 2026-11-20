@@ -871,6 +871,14 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
             else:
                 r["note"] = ("The tool has no advice for this lint message." if level == "Error" else
                              "A warning, but the lint job fails on warnings too: follow the message.")
+            # A field also missing in the version on master (a PR that deprecates or
+            # bounds old versions): the lint job reports it again. Some authors add
+            # it then (#31205), others do not (#30832): the change stays, with the note.
+            mf = re.search(r"Missing field '([\w-]+)'", text)
+            on_master = src.opam_file(name, ver) if mf and src else None
+            if on_master and not re.search(rf"^{re.escape(mf.group(1))}\s*:", on_master, re.M):
+                r["note"] = ((r.get("note") or "").rstrip(".") + ". " if r.get("note") else "") + (
+                    "Already missing on master: this PR, which changes an existing version, did not remove it.")
             if baseline and (name, text) in baseline[1]:
                 prev = (r.get("note") or "").rstrip(".")
                 r["note"] = ((prev + ". " if prev else "") + f"Already reported in the CI of #{baseline[0]} "
