@@ -421,6 +421,16 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
     for j in data["jobs"]:
         if j["kind"] != "lint" or j["status"] != "failed":
             continue
+        if not any(re.match(r"Error in [\w+-]+\.\S+?: ", m) for m in j["messages"]):
+            # The job failed before linting: the CI could not fetch or check out the PR.
+            msg = next((m for m in j["messages"] if m.strip()), "") or "no message"
+            git = re.search(r'"git"', msg) and re.search(r"status 128", msg)
+            out.append({"variant": "(lint)", "fix_in": "CI (rerun)", "rule": "lint-ci-error",
+                        "error": msg[:220], "url": j.get("url"),
+                        "note": ("The lint job failed before linting anything"
+                                 + (": git could not check out the PR's commit" if git else "")
+                                 + ". Rerun it; if it fails again the same way, push the branch again.")})
+            continue
         for msg in j["messages"]:
             m = re.match(r"Error in ([\w+-]+)\.(\S+?): (.*)$", msg)
             if not m:
@@ -554,19 +564,40 @@ def skipped_rules(data, src, cache_dir, pr_packages):
         if len(own) < 3 or any(j["category"] != "not-available" for j in own):
             continue
         pick = sorted(own, key=lambda j: (not j["variant"].startswith("compilers,"), j["variant"]))[-1:]
-        chains = []
+        chains, unknown, no_version = [], set(), set()
         for j in pick:
             try:
                 txt = log_text(fetch(j["url"], cache_dir))
             except Exception:
                 continue
-            chains += re.findall(rf"^\s*- ({re.escape(t.split('.')[0])} = \S+ -> .+)$", txt, re.M)
+            # opam writes the package with the constraint that pulled it in, if
+            # any: "pkg = 1.0 -> …", "pkg >= 0.7 -> …" or "pkg -> …"; the line
+            # after a chain gives the reason, such as "unknown package".
+            for chain, why in re.findall(rf"^\s*- ({re.escape(t.split('.')[0])}(?: [<>=!]+ \S+)? -> .+)\n\s*(.*)$",
+                                         txt, re.M):
+                chains.append(chain)
+                last = chain.split(" -> ")[-1]
+                if why.strip() == "unknown package":
+                    unknown.add(last.split(" ")[0])
+                elif why.strip() == "no matching version" and " " in last:
+                    no_version.add(last)
         if not chains:
             continue
         firsts = {c.split(" -> ")[1] for c in chains if " -> " in c}
         r = {"variant": f"{t} [all build jobs skipped]", "failing": t, "fix_in": "this PR", "rule": "uninstallable",
              "error": "not installable on any tested platform; solver: " + "; ".join(sorted(set(chains))[:3])}
-        if len(firsts) == 1:
+        if unknown:
+            names = ", ".join(f"`{u}`" for u in sorted(unknown))
+            r.update(confidence="high",
+                     note=f"{names} {'is' if len(unknown) == 1 else 'are'} not in opam-repository. Add "
+                          f"{'it' if len(unknown) == 1 else 'them'} to this PR, or wait until "
+                          f"{'it is' if len(unknown) == 1 else 'they are'} published.")
+        elif no_version:
+            dep, _, cstr = sorted(no_version)[0].partition(" ")
+            r.update(confidence="high",
+                     note=f"No version of `{dep}` in opam-repository satisfies `{cstr}`. Publish that version "
+                          f"first (or in this PR), or relax the constraint if an existing version works.")
+        elif len(firsts) == 1:
             first = firsts.pop()
             ends = sorted({c.split(" -> ")[2] for c in chains if c.count(" -> ") >= 2})
             r.update(confidence="high",

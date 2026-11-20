@@ -214,6 +214,18 @@ CASES = {
     "janestreet-cpuid-old-day10-log": (
         "e1268d425980a62d80b8507a0148af0f5c54d2c2", ["--max", "1", "--match", "^day10,day10-archlinux-ocaml-5.5,janestreet_cpuid"],
         [{"rule": "ocaml-runtime-api", "error": "caml_alloc_local"}]),
+    # Every build job skipped: the solver chain is "pkg >= 0.7 -> …", not "pkg = 0.7 -> …".
+    "opam-dune-lint-uninstallable": (
+        "1c9cedbb0aed129d82fd932138d24126c7e06ebe", [],
+        [{"rule": "uninstallable", "note": "`dune-private-libs < 3.0`"}]),
+    "obs-loki-eio-no-matching-version": (
+        "feb8cffb7befd056276f7fe38943de8faef7eac8", [],
+        [{"rule": "uninstallable", "note": "No version of `obs-eio`"}]),
+    # A dependency missing from opam-repository, and a lint job that failed before linting.
+    "omni-irc-unknown-package-lint-ci-error": (
+        "7386318651c3e60f273db07ad6d31c6c377ca249", [],
+        [{"rule": "uninstallable", "note": "`omni-irc-sig` is not in opam-repository"},
+         {"rule": "lint-ci-error", "class": "elsewhere", "note": "git could not check out"}]),
 }
 
 
@@ -335,6 +347,8 @@ class PageTest(unittest.TestCase):
         self.assertTrue(self.r.seems_ready(self.pr([self.day10, dict(self.revdep, preexisting="on master")])))
         self.assertTrue(self.r.seems_ready(self.pr([dict(self.revdep, also_failing_in=[2, 3])])))
         self.assertTrue(self.r.seems_ready(self.pr([dict(self.lint, experimental=True)])))
+        self.assertTrue(self.r.seems_ready(self.pr([{"class": "elsewhere", "rule": "lint-ci-error",
+                                                      "fix_in": "CI (rerun)", "variant": "(lint)"}])))
         self.assertFalse(self.r.seems_ready(self.pr([self.lint])))
         # Unexplained failures (only skipped jobs), CI not finished, drafts, labels.
         self.assertFalse(self.r.seems_ready(self.pr([])))

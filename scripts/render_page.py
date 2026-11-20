@@ -33,7 +33,7 @@ MERGE_LABEL, NO_MERGE_LABEL = "consider for merge", "do not merge"
 NOT_READY_LABELS = {NO_MERGE_LABEL, "needs reporter action"}
 # Rules whose failures come from the CI, not from the PR.
 CI_SIDE = {"builder-specific", "builder-specific-systemic", "accept-failures-ignored", "rerun",
-           "opam-same-version-reinstall", "health-check-preexisting"}
+           "opam-same-version-reinstall", "health-check-preexisting", "lint-ci-error"}
 # Job categories (from `summary`), in words.
 JOB_CATEGORIES = {"build": "build failed", "build-or-test": "build or tests failed",
                   "dependency": "a dependency failed", "solver": "no solution", "network": "network error",

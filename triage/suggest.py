@@ -359,6 +359,7 @@ RULE_TITLES = {
     "builder-specific": "Fails only on the day10 builder",
     "builder-specific-systemic": "Fails only on the day10 builder, several packages",
     "pr-relaxed-available": "`available` relaxed by this PR", "lint": "Lint",
+    "lint-ci-error": "Lint job failed (CI error)",
     "uninstallable": "Not installable anywhere", "newer-c-compiler": "Newer C compiler",
     "system-library-version": "System library version", "rerun": "Jobs to rerun",
     "sources": "Source archive cannot be unpacked", "accept-failures-ignored": "Accepted failure not ignored",
