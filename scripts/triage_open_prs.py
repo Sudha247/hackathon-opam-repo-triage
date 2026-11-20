@@ -353,7 +353,7 @@ def main():
     ap.add_argument("--time-budget", type=int, default=0,
                     help="stop starting new analyses after this many seconds (0: no limit)")
     ap.add_argument("--llm-max", type=int, default=2,
-                    help="LLM calls per PR at most, for failures no rule recognises (needs ANTHROPIC_API_KEY)")
+                    help="LLM calls per PR at most, for failures the tool cannot explain (needs ANTHROPIC_API_KEY)")
     ap.add_argument("--llm-budget", type=int, default=40,
                     help="LLM calls per run at most; PRs left without them get them in a later run")
     args = ap.parse_args()
