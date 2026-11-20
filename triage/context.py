@@ -494,6 +494,29 @@ def eval_filter(text, env):
     return v if i == len(toks) else None
 
 
+def pr_added_bounds(base, sha, cache_dir):
+    """{"name.version": {dep: new line}} for the dependencies whose upper bound
+    (`<`) the commit `sha` adds or changes in an opam file it modifies,
+    relative to master commit `base`. The same (cached) compare call as
+    pr_opam_changes."""
+    d = gh_api(f"repos/{REPO}/compare/{base}...{sha}", cache_dir) if base else None
+    out = {}
+    for f in (d or {}).get("files", []):
+        m = re.match(r"packages/[^/]+/([^/]+)/opam$", f.get("filename", ""))
+        if not m or f.get("status") != "modified":
+            continue
+        old, new = {}, {}
+        for l in (f.get("patch") or "").splitlines():
+            dm = re.match(r'([-+])\s*"([\w+.-]+)"\s*(\{[^}]*\})?', l)
+            if dm:
+                (old if dm.group(1) == "-" else new)[dm.group(2)] = l[1:].strip()
+        added = {dep: line for dep, line in new.items()
+                 if re.search(r"<\s*\"", line) and old.get(dep) != line}
+        if added:
+            out[m.group(1)] = added
+    return out
+
+
 def relaxed_available_rules(data, sha, base, cache_dir, pr_packages):
     """A PR that removes or relaxes the `available` filter of an existing
     version makes CI try it on platforms where it never ran: failures there
@@ -709,8 +732,11 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
     return out
 
 
-def skipped_rules(data, src, cache_dir, pr_packages):
-    """A PR package that installs nowhere: report the solver's conflict chain."""
+def skipped_rules(data, src, cache_dir, pr_packages, bounds=None):
+    """A PR package that installs nowhere: report the solver's conflict chain.
+    When every conflict goes through a dependency whose upper bound the PR
+    adds (`bounds`, from pr_added_bounds), that is the point of the change
+    (an old release restricted to old compilers, say): explained as such."""
     out = []
     for t in pr_packages:
         own = [j for j in data["jobs"] if j["target"] == t and j["kind"] == "build"]
@@ -732,14 +758,21 @@ def skipped_rules(data, src, cache_dir, pr_packages):
                 last = chain.split(" -> ")[-1]
                 if why.strip() == "unknown package":
                     unknown.add(last.split(" ")[0])
-                elif why.strip() == "no matching version" and " " in last:
+                elif why.strip() == "no matching version" and " " in last and "|" not in last:
                     no_version.add(last)
         if not chains:
             continue
         firsts = {c.split(" -> ")[1] for c in chains if " -> " in c}
         r = {"variant": f"{t} [all build jobs skipped]", "failing": t, "fix_in": "this PR", "rule": "uninstallable",
              "error": "not installable on any tested platform; solver: " + "; ".join(sorted(set(chains))[:3])}
-        if unknown:
+        added = (bounds or {}).get(t) or {}
+        through = {f.split(" ")[0] for f in firsts}
+        if added and through and through <= set(added) and not unknown:
+            lines = "; ".join(f"`{added[d]}`" for d in sorted(through))
+            r.update(rule="bounded-out", fix_in="nothing (this PR's bound)", confidence="high",
+                     note=f"This PR adds {lines} to {t}, which no tested platform satisfies, so CI cannot "
+                          f"build it. That is expected when the bound is the point of the change.")
+        elif unknown:
             names = ", ".join(f"`{u}`" for u in sorted(unknown))
             r.update(confidence="high",
                      note=f"{names} {'is' if len(unknown) == 1 else 'are'} not in opam-repository. Add "

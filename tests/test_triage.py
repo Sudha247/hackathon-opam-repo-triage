@@ -972,6 +972,61 @@ class RefreshTest(unittest.TestCase):
             self.assertEqual(fetched, [(net.BASE + sha, False), (net.BASE + sha, True)])
 
 
+class BoundedOutTest(unittest.TestCase):
+    """A PR package that installs nowhere because of an upper bound the PR
+    adds is explained as intended, not as a problem to fix."""
+
+    PATCH = """@@ -10,7 +10,7 @@ depends: [
+-  "ocaml" {>= "4.02.0"}
++  "ocaml" {>= "4.02.0" & < "4.06"}
+   "dune"
+-  "cmdliner" {with-test}
++  "cmdliner" {with-test & < "2.0.0"}
++  "fmt" {>= "0.9"}
+"""
+    LOG = """kinetic-client.0.0.9 is not installed. Install it? [Y/n] y
+  * Missing dependency:
+    - kinetic-client < 0.0.11 -> ocaml < 4.06 -> ocaml-base-compiler < 4.11.0 | ocaml-system (<= 3.07+1 | = 3.07+2 | >= 3.08.0) | ocaml-variants < 4.05.1~
+    no matching version
+"""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import context
+        self.c = context
+
+    def compare(self, patch):
+        return {"files": [{"filename": "packages/kinetic-client/kinetic-client.0.0.9/opam",
+                           "status": "modified", "patch": patch}]}
+
+    def test_added_bounds(self):
+        with unittest.mock.patch.object(self.c, "gh_api", lambda *a, **k: self.compare(self.PATCH)):
+            b = self.c.pr_added_bounds("base", "sha", "/nonexistent")
+        self.assertEqual(sorted(b["kinetic-client.0.0.9"]), ["cmdliner", "ocaml"])   # not fmt: no upper bound
+
+    def run_rule(self, bounds):
+        jobs = [{"target": "kinetic-client.0.0.9", "kind": "build", "category": "not-available",
+                 "variant": f"compilers,{v},kinetic-client.0.0.9", "url": "https://x/" + v}
+                for v in ("4.14", "5.4", "5.5")]
+        with unittest.mock.patch.object(self.c, "fetch", lambda *a, **k: ""), \
+                unittest.mock.patch.object(self.c, "log_text", lambda *a: self.LOG):
+            return self.c.skipped_rules({"jobs": jobs}, None, "/nonexistent", ["kinetic-client.0.0.9"], bounds)
+
+    def test_intended(self):
+        [r] = self.run_rule({"kinetic-client.0.0.9": {"ocaml": '"ocaml" {>= "4.02.0" & < "4.06"}'}})
+        self.assertEqual(r["rule"], "bounded-out")
+        self.assertNotEqual(r["fix_in"], "this PR")
+        self.assertIn('< "4.06"', r["note"])
+
+    def test_not_intended(self):
+        # Without a bound added by the PR, it is a problem, and the alternatives
+        # of a disjunction are not read as one package's constraint.
+        [r] = self.run_rule({})
+        self.assertEqual(r["rule"], "uninstallable")
+        self.assertNotIn("No version of `ocaml-base-compiler`", r.get("note") or "")
+        self.assertIn("`ocaml < 4.06`", r.get("note") or "")
+
+
 class PageTest(unittest.TestCase):
     """The triage page: which PRs seem ready, labels, the Markdown comment."""
 

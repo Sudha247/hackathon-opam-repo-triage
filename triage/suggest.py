@@ -51,6 +51,7 @@ from .context import (  # noqa: F401
     preexisting_failures,
     relaxed_available_rules,
     rerun_rules,
+    pr_added_bounds,
     skipped_rules,
     sources_rules,
     accepted_elsewhere,
@@ -222,7 +223,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     results += sources_rules(data, cache_dir, match)
     if not match or re.search(match, "(lint)"):
         results += lint_rules(data, src, sha, cache_dir)
-    results += skipped_rules(data, src, cache_dir, pr_packages)
+    results += skipped_rules(data, src, cache_dir, pr_packages, pr_added_bounds(base, sha, cache_dir))
     check_changes(results, src, sha, set(pr_packages))
     accepted_elsewhere(results, src, set(pr_packages))
     for r in results:
@@ -388,7 +389,8 @@ RULE_TITLES = {
     "builder-specific-systemic": "Fails only on the day10 builder, several packages",
     "pr-relaxed-available": "`available` relaxed by this PR", "lint": "Lint",
     "lint-ci-error": "Lint job failed (CI error)",
-    "uninstallable": "Not installable anywhere", "newer-c-compiler": "Newer C compiler",
+    "uninstallable": "Not installable anywhere",
+    "bounded-out": "Not installable on tested platforms, by this PR's bound", "newer-c-compiler": "Newer C compiler",
     "system-library-version": "System library version", "rerun": "Jobs to rerun",
     "sources": "Source archive cannot be unpacked", "accept-failures-ignored": "Accepted failure not ignored",
     "unrecognised": "Not recognised", "llm": "LLM diagnosis (unchecked)",
