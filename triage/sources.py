@@ -471,7 +471,9 @@ class Sources:
         deployed, a failed call (counted in NET["mcp-errors"]), no module path
         (an unbound top-level module), or its error (an unknown package or
         version, the item in no documented version: then the callers look
-        version by version, which also covers the versions without docs)."""
+        version by version, which also covers the versions without docs), and
+        when the module path names several modules ("ambiguous_with"): the
+        tool's answer may be about another module than the code's."""
         if not mods or not versions:
             return None
         cmp = functools.cmp_to_key(opam_vcmp)
@@ -491,6 +493,12 @@ class Sources:
                     continue                # maybe of the next kind
                 break
             if not isinstance(d.get("versions"), list):
+                break
+            # The module path names several modules ("List" in ocaml-base-compiler's
+            # docs: compiler-libs' Parameter.List and Stdlib.List): the tool used one
+            # of them, maybe not the code's. No answer: the callers look version by
+            # version, through the module path as written.
+            if d.get("ambiguous_with") and d.get("resolved_module") != ".".join(mods):
                 break
             statuses = {e["version"]: e["status"] for e in d["versions"]
                         if isinstance(e, dict) and isinstance(e.get("version"), str)

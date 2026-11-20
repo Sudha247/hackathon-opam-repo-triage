@@ -963,6 +963,22 @@ class ApiHistoryTest(NetTestBase):
         self.assertEqual(json.loads(srv.requests[0])["params"]["arguments"]["module"], "Foo.Bar")
         self.assertEqual([pres(h, "1.0"), pres(h, "1.1"), has_mod(h, "1.0")], ["no-docs", "no-docs", False])
 
+    def test_ambiguous_module_is_no_answer(self):
+        # "List" in ocaml-base-compiler's docs is compiler-libs' Parameter.List and Stdlib.List:
+        # the answer may be about the wrong one, so it is not used (the callers look version by version).
+        srv = self.serve(lambda p: mcp_answer(history_answer({"1.0": "absent", "1.1": "present"},
+                                                             module="Parameter.List",
+                                                             ambiguous_with=["Stdlib.List"])))
+        before = self.errors()
+        self.assertIsNone(self.src(srv).api_history("foo", ["List"], "value", "x", ["1.0", "1.1"]))
+        self.assertEqual(self.errors(), before)                 # an answer, not a failure
+        # Written in full, the module is the code's even when the name is ambiguous elsewhere.
+        srv2 = self.serve(lambda p: mcp_answer(history_answer({"1.0": "absent", "1.1": "present"},
+                                                              module="Stdlib.List",
+                                                              ambiguous_with=["Parameter.List"])))
+        h = self.src(srv2).api_history("foo", ["Stdlib", "List"], "value", "x", ["1.0", "1.1"])
+        self.assertEqual(h["versions"], {"1.0": "absent", "1.1": "present"})
+
     def test_partial_is_a_failure(self):
         # docs-ci could not be read for a version: what was read is used, the
         # rest is unknown, the call counts as failed and is not cached.
