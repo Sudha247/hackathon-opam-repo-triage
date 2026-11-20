@@ -118,7 +118,12 @@ def groups(pr):
 def ci_running(pr):
     """Whether the PR's CI is still running: its opam-ci status is pending and
     the analysis did not find the CI page finished. The status stays pending
-    for good when a job never starts (lint after a failed analysis)."""
+    for good when a job never starts (lint after a failed analysis). A
+    result kept from an earlier CI run (`ci_state_now`: a rebuild whose
+    analysis was deferred or failed) says nothing about the run now: running
+    while the status now is pending."""
+    if "ci_state_now" in pr:
+        return pr["ci_state_now"] == "PENDING"
     return pr.get("ci_state") == "PENDING" and pr.get("ci_unfinished") != 0
 
 
@@ -651,7 +656,7 @@ def render_pr(pr, year=None, max_failures=None):
     search = " ".join(f"{n} {title} {pr.get('author') or ''} {pkgs}".lower().split())
     line2 = [f'<b class="v" title="{e(VERDICT_HELP[v])}">{e(VERDICT_LABEL[v])}</b>', headline(pr, v)]
     if ci_running(pr):
-        left = pr.get("ci_unfinished")
+        left = pr.get("ci_unfinished") if "ci_state_now" not in pr else None      # unknown: a rebuild runs
         line2.append(f'<span class="run" title="These are the failures so far; the page is updated when CI '
                      f'finishes">CI running{f", {e(left)} job{plural(left)} left" if left else ""}</span>')
     jobs_title = ", ".join(f"{k} {JOB_CATEGORIES.get(c, c)}" for c, k in failed if c not in NOISE)
@@ -1081,7 +1086,8 @@ def render_feed(data):
         g = groups(pr)
         lines = [f"{VERDICT_LABEL[v]}: {headline(pr, v, as_html=False)}"]
         if ci_running(pr):
-            lines.append(f"CI still running ({pr.get('ci_unfinished') or '?'} jobs left).")
+            left = pr.get("ci_unfinished") if "ci_state_now" not in pr else None
+            lines.append(f"CI still running ({left or '?'} jobs left).")
         since = pr.get("since_last_push")
         if since and (since.get("fixed") or since.get("new")):
             lines.append(f"Since the previous push: {len(since.get('fixed') or [])} gone, "

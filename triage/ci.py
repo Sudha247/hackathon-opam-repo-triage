@@ -54,7 +54,10 @@ def load_commit(sha, cache_dir, refresh=False):
     cached as running before is fetched again. With `refresh` (jobs were
     rebuilt), the page is fetched again and the cached logs of its jobs are
     dropped: a rebuilt job has the same URL but a new log. Each log is
-    fetched again only when an analysis needs it."""
+    fetched again only when an analysis needs it. NET["refreshed"] says it
+    was done (a page that cannot be fetched raises first, and the cache
+    still holds the previous build's page and logs): the triage page reads
+    it to know whether the next attempt must refresh again."""
     url = BASE + sha
     before = NET["http"]
     page = fetch(url, cache_dir, refresh=refresh)
@@ -65,6 +68,7 @@ def load_commit(sha, cache_dir, refresh=False):
                 os.remove(cache_path(j["url"], cache_dir))
             except OSError:
                 pass
+        NET["refreshed"] = 1
     if unfinished_jobs(data) and NET["http"] == before and not OFFLINE:
         page = fetch(url, cache_dir, refresh=True)
         data = parse_commit_page(page)

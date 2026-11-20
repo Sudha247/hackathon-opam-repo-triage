@@ -1353,20 +1353,25 @@ class PageMainTest(unittest.TestCase):
                 "ci_url": None, "ci_created": "2026-11-20T10:00:00Z", **kw}
 
     def run_main(self, prs, jobs=None, suggest_ok=True, args=(), llm=False, version="v", summary_ok=True,
-                 suggest_out=None):
-        """One run; (state after it, the tool's calls, `changed` output)."""
+                 suggest_out=None, tool=None):
+        """One run; (state after it, the tool's calls, `changed` output).
+        `tool(args)`: the suggest runs' (result, error, request counts)."""
         from unittest import mock
         import contextlib
         calls = []
 
-        def run_tool(a, timeout, tool=None):
+        def run_tool(a, timeout, tool_=None):
             calls.append(a)
             if a[0] == "summary":
                 if not summary_ok:
                     return None, "timeout after 120s", {"timeout": 1}
-                return {"jobs": jobs if jobs is not None else self.FAILED_ANALYSIS}, None, {}
+                return ({"jobs": jobs if jobs is not None else self.FAILED_ANALYSIS}, None,
+                        {"refreshed": 1} if "--refresh" in a else {})
+            if tool:
+                return tool(a)
             if not suggest_ok:
-                return None, "timeout after 600s", {"timeout": 1}
+                # Killed after it refreshed the cache, when asked to (see test_refresh_not_done).
+                return None, "timeout after 600s", {"timeout": 1, **({"refreshed": 1} if "--refresh" in a else {})}
             if suggest_out is not None:
                 return dict(suggest_out), None, {"http": 1}
             return {"suggestions": [{"rule": "x", "variant": "v"}], "ci_unfinished": 0}, None, {"http": 1}
@@ -1553,6 +1558,156 @@ class PageMainTest(unittest.TestCase):
         state, calls, _ = self.run_main([p], llm=True, suggest_out=running)
         self.assertEqual(self.kinds(calls), ["summary"])
 
+    def test_llm_retries_limited(self):
+        # The LLM asked, no answer came (API errors, the LLM off for the run): analysed again as a
+        # retry, MAX_ATTEMPTS times a day. With answers coming (the per-PR limit), analysed again
+        # until every failure has its answer.
+        out = {"suggestions": [{"rule": "x", "variant": "v"}], "ci_unfinished": 0, "llm_unanswered": 1}
+        for i in range(self.T.MAX_ATTEMPTS):
+            state, calls, _ = self.run_main([self.pr()], llm=True, tool=lambda a: (dict(out), None, {"http": 1}))
+            self.assertEqual([c[0] for c in calls], ["suggest", "summary"], i)
+            self.assertEqual(state["1"]["attempts"], i + 1)
+        state, calls, _ = self.run_main([self.pr()], llm=True, tool=lambda a: (dict(out), None, {"http": 1}))
+        self.assertEqual(calls, [])
+        # Two answers this run, one left: analysed again (not a retry), until none is left.
+        self.save({})
+        for left in (2, 1, 0):
+            state, calls, _ = self.run_main([self.pr()], llm=True,
+                                            tool=lambda a: (dict(out, llm_unanswered=left), None, {"llm": 2}))
+            self.assertEqual([c[0] for c in calls], ["suggest", "summary"], left)
+            self.assertEqual((state["1"]["attempts"], state["1"]["llm"]), (1, left == 0))
+        state, calls, _ = self.run_main([self.pr()], llm=True)
+        self.assertEqual(calls, [])
+
+    def test_llm_not_asked_while_page_unfinished(self):
+        # opam-ci says failure, but the CI page had unfinished jobs: the LLM was not asked (see
+        # suggest), and the PR is not analysed again for it until something changes.
+        out = {"suggestions": [{"rule": "x", "variant": "v"}], "ci_unfinished": 2, "llm_unanswered": 1}
+        self.run_main([self.pr()], llm=True, suggest_out=out)
+        state, calls, _ = self.run_main([self.pr()], llm=True, suggest_out=out)
+        self.assertEqual(calls, [])
+
+    def test_llm_off_for_the_run(self):
+        # The tool turned the LLM off (credentials refused), or its API failed LLM_BREAKER times in
+        # a row over the PRs analysed so far: the next PRs are analysed without it.
+        out = {"suggestions": [{"rule": "x", "variant": "v"}], "ci_unfinished": 0, "llm_unanswered": 1}
+        prs = [self.pr(number=n, sha=str(n) * 40) for n in (1, 2, 3)]
+        for nets in ([{"llm-off": 1}], [{"llm-streak": 1}, {"llm-streak": 1}],
+                     [{"llm-streak": 1, "llm": 1}, {"llm-streak": 1}]):
+            self.save({})
+            it = iter(nets + [{}] * 3)
+            state, calls, _ = self.run_main(prs, llm=True, tool=lambda a: (dict(out), None, next(it)))
+            asked = [n for n, c in zip((1, 2, 3), [c for c in calls if c[0] == "suggest"]) if "--llm" in c]
+            self.assertEqual(asked, [1, 2, 3][:len(nets)], nets)
+            self.assertIsNone(state[str(len(nets) + 1)]["llm_unanswered"])     # analysed without the LLM
+        # A success between failures: not in a row.
+        self.save({})
+        it = iter([{"llm-streak": 1}, {"llm": 1, "llm-streak": 0}, {"llm-streak": 1}])
+        state, calls, _ = self.run_main(prs, llm=True, tool=lambda a: (dict(out), None, next(it)))
+        self.assertTrue(all("--llm" in c for c in calls if c[0] == "suggest"))
+
+    def test_refresh_not_done(self):
+        # The CI page of a rebuild could not be fetched (503 after the retries): the cache still
+        # holds the previous build's page and logs, so the next attempt refreshes it again, with
+        # a previous result kept or without one; then the cache is not refreshed again.
+        down = lambda a: (None, "HTTP Error 503: Service Unavailable", {"http": 1, "net-errors": 1})
+        refreshed_down = lambda a: (None, "timeout after 600s", {"timeout": 1, "refreshed": 1})
+        self.run_main([self.pr()])
+        rebuilt = self.pr(ci_created="2026-11-20T11:00:00Z")
+        state, calls, _ = self.run_main([rebuilt], tool=down)
+        self.assertEqual(self.kinds(calls), ["suggest --refresh"])
+        self.assertFalse(state["1"]["last_error_refreshed"])
+        state, calls, _ = self.run_main([rebuilt], tool=refreshed_down)
+        self.assertEqual(self.kinds(calls), ["suggest --refresh"])
+        self.assertTrue(state["1"]["last_error_refreshed"])
+        state, calls, _ = self.run_main([rebuilt])
+        self.assertEqual(self.kinds(calls), ["suggest", "summary"])
+        # No previous entry (dropped when its CI passed): the failed attempt records that the
+        # refresh is still to do, and the attempts add up.
+        self.save({})
+        state, calls, _ = self.run_main([rebuilt], tool=down)
+        self.assertTrue(state["1"]["refresh_pending"])
+        state, calls, _ = self.run_main([rebuilt], tool=down)
+        self.assertEqual((self.kinds(calls), state["1"]["attempts"]), (["suggest --refresh", "summary"], 2))
+        state, calls, _ = self.run_main([rebuilt])
+        self.assertEqual(self.kinds(calls), ["suggest --refresh", "summary"])
+        self.assertNotIn("refresh_pending", state["1"])
+        # A running PR: `summary` refreshed the page.
+        self.save({})
+        p = self.pr(ci_state="PENDING")
+        state, calls, _ = self.run_main([p], tool=down)
+        self.assertEqual(self.kinds(calls), ["summary --refresh", "suggest"])
+        self.assertNotIn("refresh_pending", state["1"])
+
+    def test_kept_result_during_a_rebuild(self):
+        # A result that says "not this PR's fault", then a rebuild runs and its analysis is
+        # deferred, or its CI page cannot be read: on hold while CI runs, not ready.
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import render_page as R
+        out = {"suggestions": [{"rule": "x", "variant": "v", "class": "elsewhere", "where_kind": "other-package",
+                                "preexisting": "on master"}], "ci_unfinished": 0}
+        state, _, _ = self.run_main([self.pr()], suggest_out=out)
+        self.assertEqual(R.verdict(state["1"]), "ready")
+        rebuilding = self.pr(ci_state="PENDING", ci_created="2026-11-20T11:00:00Z")
+        state, calls, _ = self.run_main([rebuilding], args=["--time-budget", "-1"])
+        self.assertEqual(calls, [])
+        self.assertEqual((state["1"]["ci_state"], state["1"]["ci_state_now"]), ("FAILURE", "PENDING"))
+        self.assertEqual(R.verdict(state["1"]), "ci")
+        self.assertTrue(R.ci_running(state["1"]))
+        self.assertIn("CI running</span>", R.render_pr(state["1"]))       # no count of jobs left: unknown
+        state, calls, _ = self.run_main([rebuilding], summary_ok=False)
+        self.assertEqual(R.verdict(state["1"]), "ci")
+        # The rebuild failed again: the result kept is shown for what it is (a rerun to analyse).
+        rebuilt = self.pr(ci_created="2026-11-20T11:00:00Z")
+        state, calls, _ = self.run_main([rebuilt], suggest_out=out, args=["--time-budget", "-1"])
+        self.assertEqual(state["1"]["ci_state_now"], "FAILURE")
+        self.assertEqual(R.verdict(state["1"]), "ready")
+        # Analysed: the field is gone.
+        state, calls, _ = self.run_main([rebuilt], suggest_out=out)
+        self.assertNotIn("ci_state_now", state["1"])
+
+    def test_since_last_push_after_a_deferred_or_failed_analysis(self):
+        # The first analysis of a new commit is deferred, then fails: what changed since the
+        # previous commit is still computed when an analysis of the new commit lands.
+        old = {"suggestions": [{"rule": "lint", "variant": "(lint)", "failing": "x.1"},
+                               {"rule": "library-api", "variant": "v", "failing": "y.1", "title": "API"}]}
+        new = {"suggestions": [{"rule": "library-api", "variant": "v", "failing": "y.1", "title": "API"}]}
+        self.run_main([self.pr()], suggest_out=dict(old, ci_unfinished=0))
+        b = self.pr(sha="b" * 40)
+        state, _, _ = self.run_main([b], args=["--time-budget", "-1"])
+        self.assertEqual(state["1"]["since_base"]["sha"], self.SHA)
+        state, _, _ = self.run_main([b], suggest_ok=False)
+        self.assertIsNone(state["1"]["result"])
+        state, _, _ = self.run_main([b], suggest_out=dict(new, ci_unfinished=0))
+        since = state["1"]["since_last_push"]
+        self.assertEqual((since["previous_sha"], since["still"], since["new"]), (self.SHA, 1, []))
+        self.assertNotIn("since_base", state["1"])
+
+    def test_pending_summary_failed_keeps_failed_analysis(self):
+        # A running PR whose analysis failed, then whose CI page cannot be read: the entry stays,
+        # so its attempts keep adding up.
+        p = self.pr(ci_state="PENDING")
+        state, _, _ = self.run_main([p], suggest_ok=False)
+        self.assertEqual((state["1"]["result"], state["1"]["attempts"]), (None, 1))
+        state, calls, _ = self.run_main([p], summary_ok=False)
+        self.assertEqual((self.kinds(calls), state["1"]["attempts"]), (["summary"], 1))
+        jobs = self.FAILED_ANALYSIS + [{"variant": "b", "status": "passed"}]
+        state, calls, _ = self.run_main([p], jobs=jobs, suggest_ok=False)
+        self.assertEqual(state["1"]["attempts"], 2)
+
+    def test_git_host_down_asked_again_a_day_later(self):
+        # A git host found unreachable is not asked for a day (Sources.git_down); the analysis that
+        # skipped it is done again once that day has passed.
+        T = self.T
+        p = {"sha": "a", "ci_state": "FAILURE"}
+        now = time.time()
+        at = lambda h: datetime.datetime.fromtimestamp(now - h * 3600, datetime.timezone.utc).isoformat()
+        prev = {"sha": "a", "ci_state": "FAILURE", "tool_version": "v", "result": {}, "attempts": 2,
+                "git_unreachable": 1, "analysed_at": at(3)}
+        self.assertEqual(T.reuse(prev, p, "v", False, now), (True, True, False))
+        self.assertEqual(T.reuse(dict(prev, analysed_at=at(25)), p, "v", False, now)[0], False)
+        self.assertEqual(T.reuse(dict(prev, git_unreachable=0, analysed_at=at(25)), p, "v", False, now)[0], True)
+
     def test_refresh_drops_logs(self):
         sys.path.insert(0, os.path.join(HERE, ".."))
         import tempfile
@@ -1573,9 +1728,23 @@ class PageMainTest(unittest.TestCase):
             open(log, "w").close()
             ci.load_commit(sha, d)
             self.assertTrue(os.path.exists(log))           # no rebuild: the cached log is kept
+            net.NET.pop("refreshed", None)
+            ci.load_commit(sha, d)
+            self.assertNotIn("refreshed", net.NET)
             ci.load_commit(sha, d, refresh=True)
             self.assertFalse(os.path.exists(log))          # rebuilt: fetched again when needed
-            self.assertEqual(fetched, [(net.BASE + sha, False), (net.BASE + sha, True)])
+            self.assertEqual(fetched, [(net.BASE + sha, False)] * 2 + [(net.BASE + sha, True)])
+            self.assertEqual(net.NET.pop("refreshed"), 1)       # said, for the triage page
+
+        # The page could not be fetched: the logs of the previous build stay, and it is not said.
+        def down(url, cache_dir, refresh=False):
+            raise urllib.error.URLError("503 after the retries")
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(ci, "fetch", down):
+            open(net.cache_path(job["url"], d), "w").close()
+            with self.assertRaises(urllib.error.URLError):
+                ci.load_commit(sha, d, refresh=True)
+            self.assertTrue(os.path.exists(net.cache_path(job["url"], d)))
+            self.assertNotIn("refreshed", net.NET)
 
 
 class BoundedOutTest(unittest.TestCase):

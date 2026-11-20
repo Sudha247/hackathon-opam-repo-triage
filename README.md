@@ -227,7 +227,9 @@ publishes the results on the repository's GitHub Pages site:
    analysis without visiting the page.
 
    When a PR gets a new commit, the page says what changed since the
-   previous one: the problems gone, the new ones, and how many remain.
+   previous one: the problems gone, the new ones, and how many remain (also
+   when the first analysis of the new commit was deferred or failed: the
+   previous result is kept for the comparison, as `since_base`).
 
    PRs whose CI is still running are included once some job has failed,
    with a "CI running" badge, and analysed again when the statuses of their
@@ -240,7 +242,9 @@ publishes the results on the repository's GitHub Pages site:
    then, but the page is cached and the PR is shown as finished; those jobs
    (the aborted ones too) are listed as jobs to rerun, so such a PR is never
    "not this PR's fault". A failed or
-   timed-out analysis is tried three times a day at most, while CI runs too.
+   timed-out analysis is tried three times a day at most, while CI runs too;
+   a running PR whose CI page cannot be read keeps its entry (and its
+   attempts).
 
    The GraphQL query also gives the date of the `opam-ci` status. When a
    finished CI's status changes for the same commit (another state, or a
@@ -252,7 +256,12 @@ publishes the results on the repository's GitHub Pages site:
    build: a new PR or commit (free: nothing is cached), a PR whose entry was
    dropped when its CI passed and that fails again, or an entry saved before
    the status dates were recorded. Nothing is fetched again when the status
-   has not changed.
+   has not changed. The tool says when it did refresh the cache (`refreshed`
+   in its request counts): an attempt that failed before (the CI page
+   answering 503, a timeout) leaves the previous build's page and logs in
+   the cache, so the next attempt passes `--refresh` again
+   (`last_error_refreshed` false, or `refresh_pending` without a previous
+   result).
 
    A PR left for the next run (`--time-budget`) keeps showing its previous
    result when it is for the same commit. When analysing a commit again fails
@@ -261,9 +270,13 @@ publishes the results on the repository's GitHub Pages site:
    of date), and tried again three times a day at most. After a rebuild too:
    the state records the CI run the failed attempts were for
    (`last_error_ci_state`, `last_error_ci_created`), so their attempts add
-   up, and only the first one passes `--refresh` (the next ones read the logs
-   it cached); a newer run is analysed at once, with `--refresh`. A PR whose
-   CI is running keeps its result when its CI page cannot be read.
+   up, and only the first one that refreshed the cache passes `--refresh`
+   (the next ones read the logs it cached); a newer run is analysed at once,
+   with `--refresh`. A PR whose CI is running keeps its result when its CI
+   page cannot be read. While a result from an earlier CI run is kept that
+   way (deferred, failed, or the page unreadable), the state records the
+   status listed now (`ci_state_now`): while it is pending, the page shows
+   the PR as running and on hold, not ready.
 
    With an `ANTHROPIC_API_KEY` repository secret, failures that no rule
    recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most
@@ -272,10 +285,16 @@ publishes the results on the repository's GitHub Pages site:
    from the rules alone. Once a run's budget is spent, PRs analysed without
    the LLM are left as they are until a run with budget left. A PR counts as
    analysed with the LLM (`llm` in the state) only when every unexplained
-   failure got its answer: one whose `--llm-max` was cut to the run's
-   remaining budget, or whose API call failed, is analysed again in a run
-   with budget left (`llm_unanswered` says how many were left); not while
-   its CI runs. On the page, LLM diagnoses are labelled "unchecked",
+   failure got its answer: one with more unexplained failures than
+   `--llm-max`, one whose `--llm-max` was cut to the run's remaining budget,
+   or one whose API call failed, is analysed again in a run with budget left
+   (`llm_unanswered` says how many were left); not while its CI page has
+   unfinished jobs (whatever `opam-ci`'s status). An analysis that asked the
+   LLM and got no answer from the API (`llm_calls` is 0: API errors, the LLM
+   off) is retried like a failed one, three times a day at most. The LLM is
+   off for the rest of the run once the tool says its credentials were
+   refused, or after two transient API failures in a row over the PRs
+   analysed (the next run tries again). On the page, LLM diagnoses are labelled "unchecked",
    the changes they propose are shown as a diff only for a few safe shapes
    (see above), as text to check otherwise, and
    low-confidence ones are folded, as "LLM diagnosis (low confidence)": in an evaluation on 25 answers, 15 were
@@ -386,7 +405,9 @@ that failed in a way a dead host fails every time (no DNS name, a TLS or
 certificate error, nothing listening, a timeout) is not asked again for a
 day: the later analyses count it in `git-unreachable` (shown as a failed
 lookup too), not as a new `net-errors`, so a dead dev-repo host neither
-costs a timeout on each analysis nor makes the PR retried. A rule
+costs a timeout on each analysis nor makes the PR retried; the triage page
+analyses such a PR again once the day has passed (the host is then asked
+again). A rule
 that crashes on a log gives a `rule-error` result for that job only.
 
 Limitations:

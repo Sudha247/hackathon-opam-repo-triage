@@ -170,17 +170,22 @@ def list_open_prs(token):
 LAST_ERROR = ("last_error", "last_error_at", "last_error_ci_state", "last_error_ci_created", "last_error_refreshed")
 
 
+def age(iso, now_=None):
+    """Seconds since the date `iso` (from now()), or None."""
+    try:
+        return (now_ or time.time()) - datetime.datetime.fromisoformat(iso).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 def attempts_used(prev, now_=None):
     """The analyses of `prev`'s commit made so far that count toward
     MAX_ATTEMPTS: none once ATTEMPTS_EXPIRE has passed since the last one
     (for a failed attempt that kept an earlier result: since `last_error_at`)."""
     if not prev:
         return 0
-    try:
-        last = datetime.datetime.fromisoformat(prev.get("last_error_at") or prev["analysed_at"]).timestamp()
-    except (KeyError, TypeError, ValueError):
-        last = None
-    if last is not None and (now_ or time.time()) - last >= ATTEMPTS_EXPIRE:
+    last = age(prev.get("last_error_at") or prev.get("analysed_at"), now_)
+    if last is not None and last >= ATTEMPTS_EXPIRE:
         return 0
     return prev.get("attempts", 0)
 
@@ -216,15 +221,51 @@ def needs_refresh(prev, p):
     (ci_changed), or nothing says which build the cache holds: no previous
     entry (a PR dropped when its CI passed, failing again after a rebuild,
     would get the first build's cached page) or another commit (free: its
-    page is not cached). Not when a failed attempt already refreshed the
-    cache for this CI run (`last_error_refreshed`): the logs it read since
-    come from this run, and dropping them again would cost the next attempt
-    the same work."""
+    page is not cached), or a failed analysis that was to refresh it and
+    failed before (`refresh_pending`). Not when a failed attempt already
+    refreshed the cache for this CI run (`last_error_refreshed`, set when
+    the tool says it did: NET["refreshed"]): the logs it read since come
+    from this run, and dropping them again would cost the next attempt the
+    same work."""
     if prev is None or prev.get("sha") != p["sha"]:
+        return True
+    if prev.get("refresh_pending"):
         return True
     if tried_run(prev, p) and prev.get("last_error_refreshed"):
         return False
     return ci_changed(prev, p)
+
+
+def note_listed_ci(entry, p):
+    """`ci_state_now`: opam-ci's status as listed now, when the result kept
+    in `entry` was made for another CI run (a rebuild whose analysis was
+    deferred or failed, or whose CI page could not be read): the page shows
+    such a PR on hold while that status is pending, not ready from the
+    previous run's result (see render_page.ci_running)."""
+    if entry.get("result") is not None and ci_changed(entry, p):
+        entry["ci_state_now"] = p["ci_state"]
+    else:
+        entry.pop("ci_state_now", None)
+
+
+def ci_running(e):
+    """Whether the CI of a state entry is running (see render_page.ci_running)."""
+    if "ci_state_now" in e:
+        return e["ci_state_now"] == "PENDING"
+    return e.get("ci_state") == "PENDING" and e.get("ci_unfinished") != 0
+
+
+def since_base(prev, sha):
+    """The analysis that since_last_push compares commit `sha`'s with: the
+    previous head's result, or the one kept when the first analysis of a
+    newer commit was deferred or failed (`since_base`), or None. Only what
+    since_last_push reads is kept."""
+    if prev and prev.get("sha") != sha and prev.get("result") is not None:
+        keep = ("rule", "title", "failing", "job")
+        return {"sha": prev["sha"], "result": {"suggestions": [
+            {k: s[k] for k in keep if s.get(k) is not None} for s in prev["result"].get("suggestions", [])]}}
+    base = (prev or {}).get("since_base")
+    return base if base and base.get("sha") != sha else None
 
 
 def ci_digest(summary):
@@ -261,15 +302,28 @@ def reuse(prev, p, version, llm, now_=None, digest=None):
     same_commit = same and prev.get("result") is not None
     # With the LLM on, a PR analysed without it (key added later, the run's
     # budget spent, --llm-max cut to that budget, an API error) is analysed
-    # again; the logs come from the cache. Not while CI runs: the LLM is
-    # only asked once it has finished.
-    if same and llm and not prev.get("llm") and not (p["ci_state"] == "PENDING" and prev.get("ci_unfinished")):
-        same = False
+    # again; the logs come from the cache. Not while the CI page it saw had
+    # unfinished jobs (whatever opam-ci's status): the LLM is only asked once
+    # CI has finished. An analysis that asked the LLM and got no new answer
+    # (`llm_calls`: API errors, the LLM off for the run) is a retry: the
+    # attempts add up, MAX_ATTEMPTS a day at most.
+    llm_retry = False
+    if same and llm and not prev.get("llm") and not prev.get("ci_unfinished"):
+        if prev.get("llm_unanswered") is not None and not prev.get("llm_calls"):
+            llm_retry = attempts_used(prev, now_) < MAX_ATTEMPTS
+            same = not llm_retry
+        else:
+            same = False
     # An analysis made while ocaml.org's MCP server failed lacks versions,
     # docs or health-check results: done again, a few times a day at most.
-    retry = bool(same and (prev.get("mcp_errors") or prev.get("net_errors"))
-                 and attempts_used(prev, now_) < MAX_ATTEMPTS)
+    retry = llm_retry or bool(same and (prev.get("mcp_errors") or prev.get("net_errors"))
+                              and attempts_used(prev, now_) < MAX_ATTEMPTS)
     if retry:
+        same = False
+    # A git host that failed is not asked again for GIT_DOWN_MAX_AGE
+    # (Sources.git_down): an analysis that skipped one is done again once
+    # that has passed (then once a day while the host stays down).
+    if same and prev.get("git_unreachable") and (age(prev.get("analysed_at"), now_) or 0) >= GIT_DOWN_MAX_AGE:
         same = False
     # A failed attempt to redo an analysis kept the previous result: tried
     # again MAX_ATTEMPTS times at most, then the result is kept as it is.
@@ -512,6 +566,9 @@ def main():
     version = tool_version()
     new_state, stats = {}, collections.Counter()
     net_total = collections.Counter()
+    # Transient LLM failures in a row, across the PRs of this run: after
+    # LLM_BREAKER (an outage), the LLM is not asked again in this run.
+    llm_streak = 0
     for p in failing:
         key = str(p["number"])
         prev = old.get(key)
@@ -535,10 +592,14 @@ def main():
                 new_state[key] = entry
                 continue
             if prev and prev.get("sha") != p["sha"]:     # an older result would describe another commit
+                base = since_base(prev, p["sha"])
                 for k in ("result", "error", "jobs", "analysed_at", "attempts", "tool_version", "ci_digest",
-                          "since_last_push", "ci_created", "ci_unfinished", "llm", "llm_unanswered", "mcp_errors",
-                          "net_errors", "git_unreachable", "seconds") + LAST_ERROR:
+                          "since_last_push", "since_base", "ci_created", "ci_unfinished", "llm", "llm_unanswered",
+                          "llm_calls", "mcp_errors", "net_errors", "git_unreachable", "seconds",
+                          "refresh_pending") + LAST_ERROR:
                     entry.pop(k, None)
+                if base:
+                    entry["since_base"] = base      # compared with when the new commit's analysis lands
                 entry["ci_state"] = p["ci_state"]        # the new commit's (its CI may still run)
             entry["pending"] = True
             new_state[key] = entry
@@ -549,22 +610,28 @@ def main():
         # fetches the CI page again and drops the cached logs of its jobs. Also
         # after an analysis made while CI was running (a job whose log was read
         # then may have been rebuilt since), and without a previous analysis of
-        # this build (see needs_refresh).
+        # this build (see needs_refresh). `refreshed`: the tool says it did
+        # (NET["refreshed"]: a CI page that could not be fetched leaves the
+        # previous build's page and logs in the cache), or a failed attempt at
+        # this CI run did.
         refresh = ["--refresh"] if needs_refresh(prev, p) else []
-        refreshed = bool(refresh) or (tried_run(prev, p) and bool(prev.get("last_error_refreshed")))
+        asked_refresh = bool(refresh)
+        refreshed = tried_run(prev, p) and bool(prev.get("last_error_refreshed"))
         if refresh:
             stats["refreshed"] += 1
         if p["ci_state"] == "PENDING":
             # Only worth showing once some job has failed: `summary` reads the
             # CI page (not cached while CI runs) and gives the counts.
-            summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir] + refresh,
-                                        120)
+            summary, serr, snet = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir] + refresh,
+                                           120)
+            refreshed = refreshed or bool(snet.get("refreshed"))
             refresh = []
-            if summary is None and prev and prev.get("sha") == p["sha"] and prev.get("result") is not None:
+            if summary is None and prev and prev.get("sha") == p["sha"]:
                 # The CI page could not be read (timeout, network): nothing says
-                # the failures are gone, so the result is kept until the next run.
-                print(f"#{p['number']} {p['sha'][:12]} summary failed: {serr}; the previous result is kept",
-                      file=sys.stderr)
+                # the failures are gone, so the result is kept until the next
+                # run; a failed analysis too, with its attempts.
+                print(f"#{p['number']} {p['sha'][:12]} summary failed: {serr}; the previous "
+                      f"{'result' if prev.get('result') is not None else 'analysis'} is kept", file=sys.stderr)
                 stats["summary failed"] += 1
                 new_state[key] = entry
                 continue
@@ -587,9 +654,20 @@ def main():
         result, err, net = run_tool(["suggest", p["sha"], "--json", "--max", str(args.max),
                                      "--cache-dir", args.cache_dir] + extra + refresh, args.timeout)
         net_total.update(net)
+        refreshed = refreshed or bool(net.get("refreshed"))
         llm_left -= net.get("llm", 0)
         if net.get("timeout") and use_llm:      # an LLM call may have been under way: count it
             llm_left -= 1
+        if use_llm:
+            # The tool turned the LLM off (credentials refused, an outage), or
+            # its API failed LLM_BREAKER times in a row over the PRs analysed
+            # so far: not asked again in this run (a later run tries again).
+            if "llm-streak" in net:
+                llm_streak = net["llm-streak"] + (0 if net.get("llm") else llm_streak)
+            if (net.get("llm-off") or llm_streak >= LLM_BREAKER) and llm_left > 0:
+                print(f"LLM off for the rest of this run ({llm_streak} API failures in a row"
+                      f"{', or the tool turned it off' if net.get('llm-off') else ''})", file=sys.stderr)
+                llm_left = 0
         if result is None and prev and prev.get("sha") == p["sha"] and prev.get("result") is not None:
             # A failed redo (timeout, outage) of an analysis of the same
             # commit: the previous result is kept, with the error beside it.
@@ -610,20 +688,34 @@ def main():
             continue
         if summary is None:
             summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
-        if prev and prev.get("sha") != p["sha"] and prev.get("result") is not None and result is not None:
-            entry["since_last_push"] = since_last_push(prev, result)
+        base = since_base(prev, p["sha"])
+        if base and result is not None:
+            entry["since_last_push"] = since_last_push(base, result)
+            entry.pop("since_base", None)
         elif prev and prev.get("sha") != p["sha"]:
-            entry.pop("since_last_push", None)      # no comparable previous result
+            entry.pop("since_last_push", None)      # no comparable previous result yet
+            if base:
+                entry["since_base"] = base      # kept for when an analysis of this commit lands
         entry.update({"ci_state": p["ci_state"], "ci_created": p.get("ci_created"), "ci_digest": digest,
                       "ci_unfinished": (result or {}).get("ci_unfinished", 0)})
+        # A failed analysis that was to refresh the cache and did not get that
+        # far: the next attempt must, whatever ci_created says (see needs_refresh).
+        if result is None and asked_refresh and not refreshed:
+            entry["refresh_pending"] = True
+        else:
+            entry.pop("refresh_pending", None)
         # `llm`: every unexplained failure got its LLM answer (else the PR is
         # analysed again when a run has LLM budget left, see reuse()).
+        # `llm_calls`: the answers this analysis got from the API (none: the
+        # next attempt is a retry, see reuse()).
         unanswered = (result or {}).get("llm_unanswered", 0) if use_llm else None
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
                       "llm": use_llm and not unanswered, "llm_unanswered": unanswered,
+                      "llm_calls": net.get("llm", 0) if use_llm else None,
                       "mcp_errors": net.get("mcp-errors", 0),
                       "net_errors": net.get("net-errors", 0) + net.get("timeout", 0),
-                      # A git host that failed earlier today: not asked again, not retried (see Sources.git_down).
+                      # A git host that failed earlier today: not asked again; the
+                      # analysis is done again once the day has passed (see reuse()).
                       "git_unreachable": net.get("git-unreachable", 0),
                       "analysed_at": now(), "seconds": round(time.monotonic() - t0, 1),
                       "jobs": jobs_overview(summary) if summary else None})
@@ -636,6 +728,9 @@ def main():
         new_state[key] = entry
         save_state(args.state, {**old, **new_state})      # keep the progress if the run is killed
 
+    listed = {str(p["number"]): p for p in failing}
+    for key, entry in new_state.items():
+        note_listed_ci(entry, listed[key])
     mark_shared_failures(new_state)
     stats["dropped"] = len(set(old) - set(new_state))
     save_state(args.state, new_state)
@@ -644,8 +739,7 @@ def main():
             "failing_prs": len([p for p in prs if p["ci_state"] == "FAILURE"]),
             # opam-ci's status stays pending when a job never starts: running
             # only while the CI page has unfinished jobs.
-            "running_prs": len([p for p in new_state.values()
-                                if p.get("ci_state") == "PENDING" and p.get("ci_unfinished") != 0]),
+            "running_prs": len([e for e in new_state.values() if ci_running(e)]),
             "limit": args.limit, "max_failures_per_pr": args.max,
             "llm": {"enabled": llm, "calls": net_total.get("llm", 0)},
             "run": {"github_api_calls": list_calls, "tool_requests": dict(net_total), **stats},
