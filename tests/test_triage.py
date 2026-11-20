@@ -402,6 +402,22 @@ class LintTest(unittest.TestCase):
         self.assertEqual((r["rule"], r["where_kind"]), ("lint-ci-error", "rerun"))
         self.assertIn("git could not check out", r["note"])
 
+    def test_failed_analysis(self):
+        # The analysis job failed: no build job ran (#31172). Its reason is shown, the fix is in the PR,
+        # unless the CI cancelled it.
+        def data(reason, messages=()):
+            return {"jobs": [{"variant": "(analysis)", "kind": "analysis", "status": "failed", "reason": reason,
+                              "category": "analysis", "url": "https://x/(analysis)", "experimental": False,
+                              "messages": list(messages), "target": None}]}
+        [r] = self.c.analysis_rules(data("Failed to parse packages/x/x.1/opam: unexpected token"), "/nonexistent")
+        self.assertEqual((r["rule"], r["where_kind"]), ("analysis", "pr"))
+        self.assertIn("unexpected token", r["error"])
+        self.assertIn("no build job ran", r["note"])
+        [r] = self.c.analysis_rules(data("Cancelled"), "/nonexistent")
+        self.assertEqual(r["where_kind"], "rerun")
+        [r] = self.c.analysis_rules(data(None, ["Error: x.1 changes files outside packages/"]), "/nonexistent")
+        self.assertIn("outside packages/", r["error"])
+
 
 def job(variant, category="build", reason="The compilation of x failed", experimental=False):
     """A synthetic CI job, as parse_commit_page makes it."""
@@ -1232,6 +1248,48 @@ class PageTest(unittest.TestCase):
         self.assertEqual(v(self.pr([], result=None)), "error")
         # A draft is never ready: then its CI-only failures say so.
         self.assertEqual(v(self.pr([self.day10], draft=True)), "ci")
+
+    def test_ci_only_is_an_allow_list(self):
+        # "CI only" needs every failure to come from the CI; anything else
+        # not this PR's change nor another package's needs a look.
+        v = self.r.verdict
+        draft = {"draft": True}           # never ready: the verdicts below are not "ready"
+        self.assertEqual(v(self.pr([self.day10], **draft)), "ci")
+        # No suggestion at all, though jobs failed (a failed analysis job, stored before its rule).
+        empty = self.pr([], jobs={"total": 2, "failed": {"analysis": 1}})
+        self.assertEqual(v(empty), "other")
+        self.assertIn("no explanation for the failed jobs (1 analysis failed)", self.r.headline(empty))
+        self.assertIn("No explanation for the failed jobs", self.r.render_pr(empty))
+        unknown = {"class": "explanation", "rule": "unrecognised", "fix_in": "unknown", "failing": "x.1",
+                   "variant": "1 job"}
+        self.assertEqual(v(self.pr([self.day10, unknown], **draft)), "other")
+        self.assertEqual(v(self.pr([dict(unknown, rule="rule-error")], **draft)), "other")
+        systemic = {"class": "explanation", "rule": "platform-matrix-systemic", "variant": "6 packages [p]",
+                    "fix_in": "the PR, a shared dependency, or the CI"}
+        self.assertEqual(v(self.pr([systemic], **draft)), "other")
+        # ... unless every package fails through one dependency: the fix goes there.
+        self.assertEqual(v(self.pr([dict(systemic, failing_dep="dep.1")])), "blocked")
+        own_sources = {"class": "elsewhere", "rule": "sources", "failing": "x.1", "fix_in": "x.1 (upstream archive)",
+                       "variant": "v"}
+        self.assertEqual(v(self.pr([own_sources], **draft)), "other")
+        llm_upstream = {"class": "elsewhere", "rule": "llm", "failing": "x.1", "variant": "v",
+                        "fix_in": "upstream (the package's source)"}
+        self.assertEqual(v(self.pr([self.day10, llm_upstream], **draft)), "other")
+        # Failures beyond --max were not analysed: they may be anything.
+        unanalysed = self.pr([self.day10], **draft)
+        unanalysed["result"]["unanalysed"] = 2
+        self.assertEqual(v(unanalysed), "other")
+
+    def test_unknown_is_an_explanation(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import suggest
+        self.assertEqual(suggest.classify({"rule": "unrecognised", "fix_in": "unknown"}), "explanation")
+        self.assertEqual(suggest.classify({"rule": "platform-matrix-systemic",
+                                           "fix_in": "the PR, a shared dependency, or the CI"}), "explanation")
+        self.assertEqual(suggest.classify({"rule": "platform-matrix-systemic", "failing_dep": "d.1",
+                                           "fix_in": "the PR, a shared dependency, or the CI"}), "elsewhere")
+        self.assertEqual(suggest.classify({"rule": "builder-specific-systemic",
+                                           "fix_in": "the CI environment (day10 builder)"}), "elsewhere")
 
     def test_verdict_counts_add_up(self):
         prs = [self.pr([self.day10], number=1), self.pr([self.lint, self.revdep], number=2),

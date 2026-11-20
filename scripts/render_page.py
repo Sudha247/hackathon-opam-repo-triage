@@ -35,8 +35,9 @@ VERDICT_HELP = {
     "change": "A change to this PR's opam files is suggested: a fix, or a workaround that skips platforms or "
               "tests",
     "blocked": "At least one failure must be fixed in another package",
-    "ci": "Nothing points at this PR or at another package: problems of the CI, network errors, cancelled jobs",
-    "other": "Failures in this PR's packages, without a suggested change",
+    "ci": "Every failure comes from the CI: the day10 builder, network errors, cancelled jobs",
+    "other": "Failures of this PR's packages without a suggested change, failures whose cause is not known, or "
+             "failures the tool cannot explain",
     "error": "The analysis is pending or failed"}
 CHANGE_CLASSES = ("fix", "workaround")
 # Labels of ocaml/opam-repository: "consider for merge" is a filter, and a PR
@@ -44,15 +45,20 @@ CHANGE_CLASSES = ("fix", "workaround")
 # be stale (the author acted after it was added, see triage_open_prs.py).
 MERGE_LABEL, NO_MERGE_LABEL = "consider for merge", "do not merge"
 NOT_READY_LABELS = {NO_MERGE_LABEL, "needs reporter action"}
-# Rules whose failures come from the CI, not from the PR.
-CI_SIDE = {"builder-specific", "builder-specific-systemic", "accept-failures-ignored", "rerun",
-           "opam-same-version-reinstall", "health-check-preexisting", "lint-ci-error",
-           "bounded-out"}
+# Where the fix goes (`where_kind`, see triage/where.py) for failures that
+# do not come from the PR: the CI (or its opam), jobs to rerun, nothing to fix
+# (a bound the PR adds on purpose).
+CI_SIDE = {"ci", "rerun", "none"}
+# The places that make a PR "CI only".
+CI_ONLY = {"ci", "rerun"}
+# Rules whose failures also happen on master (opam-health-check).
+PREEXISTING_RULES = {"health-check-preexisting"}
 # Job categories (from `summary`), in words.
 JOB_CATEGORIES = {"build": "build failed", "build-or-test": "build or tests failed",
                   "dependency": "a dependency failed", "solver": "no solution", "network": "network error",
                   "cancelled": "cancelled", "sources": "sources not unpacked", "lint": "lint",
-                  "not-available": "skipped (not installable there)", "ignored": "ignored (accepted failure)"}
+                  "not-available": "skipped (not installable there)", "ignored": "ignored (accepted failure)",
+                  "analysis": "analysis failed"}
 NOISE = {"passed", "network", "cancelled", "not-available", "ignored"}
 MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 
@@ -107,7 +113,7 @@ def not_this_pr(r):
     or also failing in other open PRs), comes from the CI, or is on an
     experimental platform, whose failures do not block a PR."""
     return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or r.get("also_failing_in")
-                or r.get("experimental") or r.get("rule") in CI_SIDE)
+                or r.get("experimental") or where_kind(r) in CI_SIDE or r.get("rule") in PREEXISTING_RULES)
 
 
 def seems_ready(pr):
@@ -128,8 +134,9 @@ def seems_ready(pr):
 def verdict(pr):
     """The one verdict of a failing PR (a key of VERDICTS), the first that
     applies: not this PR's fault (`seems_ready`), a change to this PR is
-    suggested, another package must be fixed, nothing points at this PR (CI
-    only), or failures of this PR without a suggestion (needs a look)."""
+    suggested, another package must be fixed, every failure comes from the
+    CI (CI only), or anything else (needs a look): failures of this PR without
+    a suggestion, of unknown cause, or not explained at all."""
     if pr.get("pending") or pr.get("result") is None:
         return "error"
     if seems_ready(pr):
@@ -140,7 +147,7 @@ def verdict(pr):
     # A failure that is not the PR's (it happens on master too, say) does not block it.
     if any(other_package(r) and not not_this_pr(r) for r in sugg):
         return "blocked"
-    if all(where_kind(r) != "pr" for r in sugg):
+    if sugg and not pr["result"].get("unanalysed") and all(where_kind(r) in CI_ONLY for r in sugg):
         return "ci"
     return "other"
 
@@ -284,7 +291,8 @@ def headline(pr, v=None, as_html=True):
                  else "the analysis failed")
     sugg = pr["result"].get("suggestions", [])
     if not sugg:
-        return t("no build or test failure to analyse")
+        jobs = unexplained_jobs(pr)
+        return t(f"no explanation for the failed jobs ({jobs})" if jobs else "no build or test failure to analyse")
     g = groups(pr)
     parts = []
     if v == "change":
@@ -354,6 +362,13 @@ def copy_block(pr):
             f'<details class="mdv"><summary>Show the Markdown</summary>'
             f'<textarea id="md-{n}" readonly rows="14" spellcheck="false" aria-label="PR comment, Markdown">'
             f'{e(md)}</textarea></details>')
+
+
+def unexplained_jobs(pr):
+    """The failed jobs of a PR in words ("1 analysis failed"), network errors,
+    cancelled and skipped jobs left out; None if there are none."""
+    failed = sorted(((pr.get("jobs") or {}).get("failed") or {}).items(), key=lambda kv: -kv[1])
+    return ", ".join(f"{n} {JOB_CATEGORIES.get(c, c)}" for c, n in failed if c not in NOISE) or None
 
 
 def failed_count(pr):
@@ -634,7 +649,9 @@ def render_pr(pr, year=None, max_failures=None):
             body.append(f'<p class="note">{e(left)} more failure{"s were" if left != 1 else " was"} not '
                         f'analysed: each page update analyses{per} per PR. See the CI results.</p>')
         if not pr["result"].get("suggestions"):
-            body.append('<p class="note">No build or test failure to analyse.</p>')
+            jobs = unexplained_jobs(pr)
+            body.append(f'<p class="note">No explanation for the failed jobs ({e(jobs)}): see the CI results.</p>'
+                        if jobs else '<p class="note">No build or test failure to analyse.</p>')
         change = merge_similar(g["fix"]) + merge_similar(g["workaround"])
         if change:
             body.append(f'<h4 class="g-change">Change this PR ({len(change)})</h4>')

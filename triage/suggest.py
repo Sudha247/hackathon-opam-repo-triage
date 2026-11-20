@@ -46,6 +46,7 @@ from .matrix import (  # noqa: F401
 )
 from .context import (  # noqa: F401
     accepted_but_failing,
+    analysis_rules,
     health_summary,
     lint_rules,
     preexisting_failures,
@@ -238,6 +239,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     results += sources_rules(data, cache_dir, match)
     if not match or re.search(match, "(lint)"):
         results += lint_rules(data, src, sha, cache_dir)
+    results += analysis_rules(data, cache_dir, match)
     results += skipped_rules(data, src, cache_dir, pr_packages, pr_added_bounds(base, sha, cache_dir))
     check_changes(results, src, sha, set(pr_packages))
     accepted_elsewhere(results, src, set(pr_packages))
@@ -408,7 +410,7 @@ RULE_TITLES = {
     "builder-specific": "Fails only on the day10 builder",
     "builder-specific-systemic": "Fails only on the day10 builder",
     "pr-relaxed-available": "`available` relaxed by this PR", "lint": "opam lint error",
-    "lint-ci-error": "Lint job failed (CI error)",
+    "lint-ci-error": "Lint job failed (CI error)", "analysis": "CI could not analyse the PR",
     "uninstallable": "Not installable anywhere",
     "bounded-out": "This PR's bound excludes every tested platform", "newer-c-compiler": "Newer C compiler",
     "system-library-version": "System library version", "rerun": "Jobs to rerun",
@@ -504,9 +506,9 @@ def classify(r):
     (`advice`) counts as a change."""
     has_change = bool(r.get("new") or r.get("candidates") or r.get("advice"))
     k = where_kind(r)
-    if r.get("rule") == "rule-error":
+    if r.get("rule") == "rule-error" or k == "unknown":
         return "explanation"
-    if r.get("rule", "").endswith("-systemic") or k != "pr":
+    if k != "pr":
         return "elsewhere"
     if not has_change:
         return "explanation"

@@ -27,6 +27,7 @@ from .net import (  # noqa: F401
 from .ci import (  # noqa: F401
     CLASSIC_DISTRO,
     FAILING_CATS,
+    excerpt,
     failure_key,
     job_dims,
     log_text,
@@ -589,6 +590,41 @@ def relaxed_available_rules(data, sha, base, cache_dir, pr_packages):
                     "jobs": [j["variant"] for j in failing],
                     "note": "The previous filter excluded each of these platforms." if exact else
                             "Check that the previous filter excluded these platforms."})
+    return out
+
+
+# A job that failed because of the CI rather than what it checks.
+CI_FAILURE = re.compile(r"Cancelled|curl failed|HTTP error code|Could not resolve|Connection (?:refused|reset|timed out)"
+                        r"|exited with status 128")
+
+
+def analysis_rules(data, cache_dir, match=None):
+    """A failed analysis job: opam-repo-ci could not work out which packages
+    the PR changes, so no build job ran. Its reason comes from the CI page,
+    or from the end of its log."""
+    out = []
+    for j in data["jobs"]:
+        if j["kind"] != "analysis" or j["status"] != "failed" or (match and not re.search(match, j["variant"])):
+            continue
+        why = j.get("reason") or next((m for m in j.get("messages") or [] if m.strip()), "")
+        if not why:
+            try:
+                ex = excerpt(log_text(fetch(j["url"], cache_dir)))
+                why = ex.get("job_failed") or ex.get("final") or ""
+            except Exception:
+                pass
+        r = {"variant": j["variant"], "url": j["url"], "rule": "analysis", "jobs": [j["variant"]],
+             "experimental": j["experimental"], "confidence": "medium",
+             "error": " ".join(why.split())[:300] or "The CI page gives no reason"}
+        if CI_FAILURE.search(why):
+            r.update(fix_where("rerun", "CI (rerun)"),
+                     note="The analysis job failed because of the CI, so no build job ran. Rerun it.")
+        else:
+            r.update(fix_where("pr", "this PR"),
+                     note="opam-repo-ci could not analyse this PR, so no build job ran. The cause is usually in "
+                          "the PR's files (an opam file that cannot be read, or a file in an unexpected place): "
+                          "see the reason above, or the job's log.")
+        out.append(r)
     return out
 
 
