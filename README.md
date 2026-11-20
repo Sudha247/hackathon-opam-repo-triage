@@ -74,7 +74,7 @@ failures" entry listing their jobs.
 
 | Failure | Suggestion | Confidence |
 |---|---|---|
-| Unbound value / module / constructor / record field / type from a library | `>=` the version that introduced it, or `<` the version that removed it, found from per-version API docs; `{= version}` when both packages come from the same repository | high |
+| Unbound value / module / constructor / record field / type / module type / class from a library | `>=` the version that introduced it, or `<` the version that removed it, found from ocaml.org's API history of the item (per-version docs, upstream sources for versions without docs); `{= version}` when both packages come from the same repository | high |
 | Same, from the OCaml stdlib | `"ocaml" {>= "X"}` / `{< "X"}` from the stdlib `.mli` of each release | high |
 | `string` used where `bytes` is expected | `"ocaml" {< "4.06"}` (safe-string) | high |
 | Test output diff (cram/mdx) | `"dep" {with-test & < "X"}` for dependencies whose version differs from a passing job, or that were released after the failing package | low (possible causes) |
@@ -143,7 +143,7 @@ API change in a dependency: ortools_solvers.9.15.0-3 (lower bounds) on OCaml 4.1
   same failure on : 3 other jobs: ortools_solvers.9.15.0-3 (lower bounds) on OCaml 5.2, …
   failing package : ortools_solvers.9.15.0-3   fix in this PR
   error           : Unbound value Ortools.Sat.proto_solve
-  looked up in    : ocaml.org docs
+  looked up in    : ocaml.org API history
   defined in      : ortools 9.15.0 (used by CI) no, 9.15.0-1 no, 9.15.0-2 yes
   suggested change (high confidence):
     - "ortools"	{>= "9.15"}
@@ -382,9 +382,24 @@ job's summary.
 ## Data sources, cheapest first
 
 1. The CI commit page and job logs (opam.ci.ocaml.org).
-2. The ocaml.org MCP endpoint (`https://ocaml.org/mcp`, JSON-RPC, no session, no token): module lists and plain-text signatures for every documented package version; the versions of a package with their release dates (`ocaml_package_versions`, kept a day in the cache); and, for a test-output failure, the changelog sections of each suspect dependency between the passing version and the first release after it (`ocaml_package_changelog`).
+2. The ocaml.org MCP endpoint (`https://ocaml.org/mcp`, JSON-RPC, no session, no token): for an unbound identifier of a library, its API history (`ocaml_module_changes`: in one call, whether each version in a range of up to 60 has the item, from the HTML odoc generates for it, not from matching the text of signatures; kept a day in the cache); module lists and plain-text signatures for every documented package version (`ocaml_package_documentation`, `ocaml_module_documentation`), read version by version only for what the API history could not tell (see below); the versions of a package with their release dates (`ocaml_package_versions`, kept a day in the cache); and, for a test-output failure, the changelog sections of each suspect dependency between the passing version and the first release after it (`ocaml_package_changelog`).
 3. Raw files: opam files of opam-repository, `stdlib/*.mli` of each OCaml release.
 4. A shallow, blob-less `git fetch` of one upstream tag, only when ocaml.org has no docs for a version.
+
+For an unbound identifier `M.x` of a dependency, the tool asks `ocaml_module_changes` once for the versions
+around the one the failing job used (10 on each side, within the package's existing bounds), as the module
+path is written in the code (`Term` finds why3's `Why3.Term`). A version where the item is present or absent
+is answered by it (a documented version without the module counts as absent); a version without docs is
+looked up in the upstream sources (git); a version the tool could not read whole (a page too large, docs-ci
+not answering) is looked up in its docs page by page, then in git. The tool's errors are answers, cached for
+a day: an unknown package or version, or an item found in no documented version, after which every version
+is looked up one by one as before (the item may be in versions without docs, a release whose docs are not
+built yet). A partial answer (docs-ci failed for some versions, or the call ran out of time) is used for the
+versions it has, not cached, and counted in `mcp-errors`. When ocaml.org does not have the tool (`unknown
+tool`), the version-by-version lookup is used, without counting a failure. An unbound top-level module
+(`Unbound module Foo`) and the standard library (the stdlib `.mli` of each OCaml release, from git: ocaml.org
+documents the stdlib in `ocaml-base-compiler`, not in the `ocaml` package the bounds are on) keep their own
+lookups.
 5. The GitHub REST API, only for `--pr` and for `compare`'s baseline lookup (2–3 calls). It works without a token (60 requests per hour); `GITHUB_TOKEN`, `GH_TOKEN` or a logged-in `gh` are used if present.
 
 Results are cached in `.opam-ci-cache/` (the tool's own errors from ocaml.org,

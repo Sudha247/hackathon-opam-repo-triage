@@ -762,6 +762,12 @@ def http_json(v):
             % len(body)) + body
 
 
+def tool_error(message):
+    """A tool's error, as ocaml.org's MCP server sends it (plain text)."""
+    return http_json({"jsonrpc": "2.0", "id": 1,
+                      "result": {"isError": True, "content": [{"type": "text", "text": message}]}})
+
+
 def mcp_answer(v, error=False):
     return http_json({"jsonrpc": "2.0", "id": 1,
                       "result": {"isError": error, "content": [{"type": "text", "text": json.dumps(v)}]}})
@@ -894,6 +900,258 @@ class McpRobustnessTest(NetTestBase):
             r = rules.log_rules(Src(["1"]), err, "foo", 'depends: [\n  "ocaml"\n]\n',
                                 {"installed": {}, "ocaml": "5.3"}, job)
             self.assertIn(f'"{pkg}"', r["new"])
+
+
+def history_answer(statuses, module="M", partial=False, **extra):
+    """An ocaml_module_changes answer (identifier mode) for {version: status}."""
+    return {"package": "foo", "module": "M", "resolved_module": module, "identifier": "x",
+            "resolved_identifier": "x" if "present" in statuses.values() else None, "kind": "value",
+            "versions": [dict({"version": v, "status": s}, **({"signature": "val x : int"} if s == "present" else {}))
+                         for v, s in statuses.items()],
+            "versions_truncated": False, "partial": partial, "deadline_reached": False, **extra}
+
+
+class ApiHistoryTest(NetTestBase):
+    """Sources.api_history: ocaml_module_changes's answer mapped to each
+    version's presence; its errors are answers, its failures are counted."""
+
+    def serve(self, answer):
+        srv = Serve(lambda body: answer(json.loads(body)["params"]))
+        self.addCleanup(srv.close)
+        return srv
+
+    def src(self, srv):
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = srv.url
+        return src
+
+    def test_mapping_and_cache(self):
+        from triage.sources import history_presence as pres, history_has_module as has_mod
+        statuses = {"1.0": "absent", "1.1": "present", "1.2": "present", "1.3": "absent",
+                    "1.4": "page-truncated", "1.5": "no-docs", "1.6": "docs-failed", "1.7": "module-not-found"}
+        srv = self.serve(lambda p: mcp_answer(history_answer(statuses, introduced_in="1.1", removed_in="1.3",
+                                                             changed_in=["1.2"])))
+        before = self.errors()
+        h = self.src(srv).api_history("foo", ["M"], "value", "x", ["1.3", "1.0", "1.7", "1.2"])
+        args = json.loads(srv.requests[0])["params"]
+        self.assertEqual(args, {"name": "ocaml_module_changes", "arguments": {
+            "package": "foo", "module": "M", "identifier": "x", "kind": "value", "from_version": "1.0",
+            "to_version": "1.7", "max_versions": 60}})
+        self.assertEqual({v: pres(h, v) for v in statuses},
+                         {"1.0": False, "1.1": True, "1.2": True, "1.3": False, "1.4": None,
+                          "1.5": "no-docs", "1.6": "no-docs", "1.7": False})   # module missing there: absent
+        self.assertIsNone(pres(h, "0.9"))                       # not checked by the tool
+        self.assertIsNone(pres(None, "1.0"))                    # no history
+        self.assertEqual([has_mod(h, v) for v in ("1.0", "1.1", "1.4", "1.5", "1.7", "0.9")],
+                         [True, True, True, None, False, None])
+        self.assertFalse(h["partial"])
+        self.assertEqual(self.errors(), before)
+        # Cached on disk, for a day (new releases, docs built since).
+        self.assertEqual(self.src(srv).api_history("foo", ["M"], "value", "x", ["1.0", "1.7"]), h)
+        self.assertEqual(len(srv.requests), 1)
+        for f in os.listdir(self.tmp):
+            self.age(os.path.join(self.tmp, f), 2)
+        self.src(srv).api_history("foo", ["M"], "value", "x", ["1.0", "1.7"])
+        self.assertEqual(len(srv.requests), 2)
+
+    def test_module_in_no_version(self):
+        # No documented version has the module: the docs cannot tell, the sources may.
+        from triage.sources import history_presence as pres, history_has_module as has_mod
+        srv = self.serve(lambda p: mcp_answer(history_answer({"1.0": "module-not-found", "1.1": "no-docs"},
+                                                             module=None)))
+        h = self.src(srv).api_history("foo", ["Foo", "Bar"], "type", "t", ["1.0", "1.1"])
+        self.assertEqual(json.loads(srv.requests[0])["params"]["arguments"]["module"], "Foo.Bar")
+        self.assertEqual([pres(h, "1.0"), pres(h, "1.1"), has_mod(h, "1.0")], ["no-docs", "no-docs", False])
+
+    def test_partial_is_a_failure(self):
+        # docs-ci could not be read for a version: what was read is used, the
+        # rest is unknown, the call counts as failed and is not cached.
+        from triage.sources import history_presence as pres
+        srv = self.serve(lambda p: mcp_answer(history_answer({"1.0": "absent", "1.1": "docs-unavailable",
+                                                              "1.2": "skipped", "1.3": "present"}, partial=True)))
+        before = self.errors()
+        src = self.src(srv)
+        h = src.api_history("foo", ["M"], "value", "x", ["1.0", "1.3"])
+        self.assertEqual([pres(h, v) for v in ("1.0", "1.1", "1.2", "1.3")], [False, None, None, True])
+        self.assertTrue(h["partial"])
+        self.assertEqual(self.errors(), before + 1)
+        self.assertEqual(os.listdir(self.tmp), [])
+        self.assertEqual(src.api_history("foo", ["M"], "value", "x", ["1.0", "1.3"]), h)
+        self.assertEqual((len(srv.requests), self.errors()), (1, before + 1))     # once per process
+        self.src(srv).api_history("foo", ["M"], "value", "x", ["1.0", "1.3"])
+        self.assertEqual(len(srv.requests), 2)                                    # asked again later
+        # Marked partial only in the result's _meta: the same.
+        srv2 = Serve(lambda body: http_json({"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": False, "_meta": {"org.ocaml/partial": True},
+            "content": [{"type": "text", "text": json.dumps(history_answer({"1.0": "error"}))}]}}))
+        self.addCleanup(srv2.close)
+        self.assertIsNotNone(self.src(srv2).api_history("foo", ["M"], "value", "x", ["1.0"]))
+        self.assertEqual(self.errors(), before + 3)
+
+    def test_errors_are_answers(self):
+        not_found = 'constructor "Foo" not found in M in versions 1.0 to 2.0'
+        answers = {"constructor": tool_error(not_found),
+                   "exception": mcp_answer(history_answer({"1.0": "absent", "2.0": "present"}))}
+        srv = self.serve(lambda p: answers[p["arguments"]["kind"]])
+        before = self.errors()
+        # A constructor may be an exception's: asked as one when no constructor has that name.
+        h = self.src(srv).api_history("foo", ["M"], "constructor", "Foo", ["1.0", "2.0"])
+        self.assertEqual([json.loads(r)["params"]["arguments"]["kind"] for r in srv.requests],
+                         ["constructor", "exception"])
+        self.assertEqual(h["versions"], {"1.0": "absent", "2.0": "present"})
+        # In no documented version: no history (the callers look version by
+        # version, versions without docs included); the error is cached, not counted.
+        answers["exception"] = tool_error(not_found.replace("constructor", "exception"))
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+        self.assertIsNone(self.src(srv).api_history("foo", ["M"], "constructor", "Foo", ["1.0", "2.0"]))
+        self.assertIsNone(self.src(srv).api_history("foo", ["M"], "constructor", "Foo", ["1.0", "2.0"]))
+        self.assertEqual(len(srv.requests), 4)
+        self.assertEqual(self.errors(), before)
+        # Another error (an unknown package): no history, not asked as another kind.
+        srv2 = self.serve(lambda p: tool_error('unknown package: "foo"'))
+        self.assertIsNone(self.src(srv2).api_history("foo", ["M"], "constructor", "Foo", ["1.0"]))
+        self.assertEqual((len(srv2.requests), self.errors()), (1, before))
+
+    def test_failures(self):
+        before = self.errors()
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = "http://127.0.0.1:9/mcp"                   # nothing listens there
+        self.assertIsNone(src.api_history("foo", ["M"], "value", "x", ["1.0"]))
+        self.assertEqual(self.errors(), before + 1)
+        self.assertEqual(os.listdir(self.tmp), [])
+        # No module path (an unbound top-level module), no version: no call.
+        self.assertIsNone(src.api_history("foo", [], "module", "M", ["1.0"]))
+        self.assertIsNone(src.api_history("foo", ["M"], "value", "x", []))
+        self.assertEqual(self.errors(), before + 1)
+
+    def test_tool_not_deployed(self):
+        # A server without the tool: no history, not a failure, not asked again.
+        self.addCleanup(self.sources.MCP_UNAVAILABLE.discard, "ocaml_module_changes")
+        srv = Serve(lambda body: http_json({"jsonrpc": "2.0", "id": 1, "error": {
+            "code": -32602, "message": "unknown tool: ocaml_module_changes"}}))
+        self.addCleanup(srv.close)
+        before = self.errors()
+        src = self.src(srv)
+        self.assertIsNone(src.api_history("foo", ["M"], "value", "x", ["1.0"]))
+        self.assertIsNone(src.api_history("foo", ["M"], "value", "y", ["1.0"]))
+        self.assertEqual((len(srv.requests), self.errors(), self.sources.MCP_FAILURES["n"]), (1, before, 0))
+        # Other tools: still a failure.
+        self.assertIsNone(src.mcp("ocaml_package_versions", package="foo"))
+        self.assertEqual(self.errors(), before + 1)
+
+
+class ApiHistoryRuleTest(unittest.TestCase):
+    """The library rule with ocaml.org's API history: its answer where it has
+    one, the docs and git for the versions it could not check."""
+
+    LOG = ("-> installed foo.1.0\n#=== ERROR while compiling x.1 ===#\n# exit-code 1\n### output ###\n"
+           "# File \"x.ml\", line 1, characters 0-7:\n# Error: Unbound value Foo.bar\n")
+    JOB = {"variant": "compilers,5.3,x.1", "url": "u", "kind": "build", "experimental": False,
+           "platform": ["compilers", "5.3"], "target": "x.1", "revdep": None}
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import rules
+        self.rules = rules
+
+    def suggest(self, statuses, docs=None, git=None, log=None, dep="foo"):
+        """The library rule's result, with the tool's `statuses` (None: no
+        history), ocaml.org's docs per version and git's (upstream sources)."""
+        calls = []
+
+        class Src:
+            def opam_file(self, *a):
+                return f'opam-version: "2.0"\ndepends: [\n  "ocaml"\n  "{dep}"\n]\n'
+
+            def raw(self, url, max_age=None):
+                return None                             # not the stdlib
+
+            def tags(self, url):
+                return []
+
+            def versions(self, name):
+                return ["0.9", "1.0", "1.1", "1.2", "1.3"]
+
+            def api_history(self, pkg, mods, kind, ident, versions):
+                calls.append(("history", pkg, tuple(mods), kind, ident, tuple(sorted(versions))))
+                return statuses and {"versions": statuses, "module": "Foo", "partial": False}
+
+            def doc_present(self, pkg, v, mods, kind, ident):
+                calls.append(("docs", v))
+                return (docs or {}).get(v)
+
+            def upstream(self, name, version, ref="master"):
+                return "https://github.com/x/foo"
+
+            def tag_for(self, repo, name, v):
+                calls.append(("git", v))
+                return f"v{v}" if v in (git or {}) else None
+
+            def tree(self, repo, ref, is_tag=True):
+                return ["src/foo.mli"]
+
+            def file_at(self, repo, ref, path, is_tag=True):
+                return "val bar : int\n" if git[ref[1:]] else "val baz : int\n"
+        r = self.rules.suggest_for_job(Src(), self.JOB, log or self.LOG, ["x.1"], "a" * 40)
+        return r, calls
+
+    def test_history_answers(self):
+        r, calls = self.suggest({"0.9": "absent", "1.0": "absent", "1.1": "present", "1.2": "present",
+                                 "1.3": "present"})
+        self.assertEqual((r["rule"], r["new"]), ("library-api", '"foo" {>= "1.1"}'))
+        self.assertEqual(r["evidence"], {"foo 1.1": True, "foo 1.0 (installed in failing job)": False})
+        self.assertEqual(r["source"], "ocaml.org API history")
+        # One call for every version the search may check; no docs read, no git.
+        self.assertEqual(calls, [("history", "foo", ("Foo",), "value", "bar", ("0.9", "1.0", "1.1", "1.2", "1.3"))])
+
+    def test_combined_with_docs_and_git(self):
+        # 1.1 has no docs: git only; 1.2's page is too large: its docs read another way.
+        r, calls = self.suggest({"1.0": "absent", "1.1": "no-docs", "1.2": "page-truncated", "1.3": "present"},
+                                docs={"1.2": True}, git={"1.1": False})
+        self.assertEqual(r["new"], '"foo" {>= "1.2"}')
+        self.assertEqual(r["evidence"], {"foo 1.1": False, "foo 1.2": True,
+                                         "foo 1.0 (installed in failing job)": False})
+        self.assertEqual(r["source"], "git https://github.com/x/foo, ocaml.org API history, ocaml.org docs")
+        self.assertEqual([c for c in calls if c[0] != "history"], [("git", "1.1"), ("docs", "1.2")])
+
+    def test_removed(self):
+        # Removed in the version used: the bound is below it.
+        r, calls = self.suggest({"0.9": "present", "1.0": "absent", "1.1": "absent", "1.2": "absent",
+                                 "1.3": "absent"})
+        self.assertEqual(r["new"], '"foo" {< "1.0"}')
+        self.assertEqual(r["source"], "ocaml.org API history")
+
+    def test_without_history(self):
+        # No history (not deployed, a failure, the item in no documented
+        # version): the docs version by version, then git, as before.
+        r, calls = self.suggest(None, docs={"1.0": False, "1.1": False}, git={"1.2": True})
+        self.assertEqual(r["new"], '"foo" {>= "1.2"}')
+        self.assertEqual(r["source"], "git https://github.com/x/foo, ocaml.org docs")
+        self.assertEqual([c for c in calls if c[0] != "history"],
+                         [("docs", "1.0"), ("docs", "1.1"), ("docs", "1.2"), ("git", "1.2")])
+
+    def test_module_through_an_open(self):
+        # The module (why's Why.Term, opened) does not name the package: a
+        # dependency is a candidate only if the version used has the module.
+        log = self.LOG.replace("foo.1.0", "why.1.0").replace("Foo.bar", "Term.bar")
+        r, calls = self.suggest({"1.0": "module-not-found", "1.1": "present"}, log=log, dep="why")
+        self.assertNotIn("new", r)
+        self.assertEqual([c[0] for c in calls], ["history"])
+        r, calls = self.suggest({"1.0": "absent", "1.1": "present"}, log=log, dep="why")
+        self.assertEqual((r["new"], r["source"]), ('"why" {>= "1.1"}', "ocaml.org API history"))
+        self.assertEqual(calls, [("history", "why", ("Term",), "value", "bar", ("0.9", "1.0", "1.1", "1.2", "1.3"))])
+
+    def test_kinds(self):
+        self.assertEqual(self.rules.find_unbound(["Error: Unbound module type Foo.S"]), ("module-type", ["Foo"], "S"))
+        self.assertEqual(self.rules.find_unbound(["Error: Unbound class Foo.c"]), ("class", ["Foo"], "c"))
+        self.assertEqual(self.rules.find_unbound(["Error: Unbound class type Foo.c"]), ("class-type", ["Foo"], "c"))
+        self.assertEqual(self.rules.find_unbound(["Error: Unbound module Foo"]), ("module", [], "Foo"))
+        from triage.sources import defines
+        self.assertTrue(defines("module type S = sig end", "module-type", "S"))
+        self.assertFalse(defines("module S : sig end", "module-type", "S"))
+        self.assertTrue(defines("class virtual ['a] c : object end", "class", "c"))
+        self.assertTrue(defines("exception E of int", "exception", "E"))
 
 
 class NetErrorTest(NetTestBase):

@@ -30,10 +30,14 @@ from .ci import (  # noqa: F401
 )
 from .where import fix_where, pr_or_other
 from .sources import (  # noqa: F401
+    API_HISTORY,
+    BISECT_CAP,
     bisect_presence,
     constraint_edit,
     defines,
     existing_bounds,
+    history_has_module,
+    history_presence,
     module_files,
     norm,
     ocaml_releases,
@@ -83,7 +87,10 @@ UNBOUND_RES = [
     (re.compile(r"Unbound constructor [`\"']?([\w.']+)"), "constructor"),
     (re.compile(r"Unbound record field [`\"']?([\w.']+)"), "field"),
     (re.compile(r"Unbound type constructor [`\"']?([\w.']+)"), "type"),
-    (re.compile(r"Unbound module [`\"']?([\w.']+)"), "module"),
+    (re.compile(r"Unbound module type [`\"']?([\w.']+)"), "module-type"),
+    (re.compile(r"Unbound class type [`\"']?([\w.']+)"), "class-type"),
+    (re.compile(r"Unbound class (?!type )[`\"']?([\w.']+)"), "class"),
+    (re.compile(r"Unbound module (?!type )[`\"']?([\w.']+)"), "module"),
 ]
 
 
@@ -226,7 +233,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
     unb = find_unbound(pre_diff)
     if unb:
         kind, mods, ident = unb
-        out["error"] = f"Unbound {kind} {'.'.join(mods + [ident])}"
+        out["error"] = f"Unbound {kind.replace('-', ' ')} {'.'.join(mods + [ident])}"
         top = mods[0] if mods else (ident if kind == "module" else None)
         if top is None:
             out["note"] = "The identifier has no module path, so the tool cannot tell which package it comes from."
@@ -284,14 +291,35 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
             doc_mods = mods if mods else []          # full path, e.g. ['Ortools', 'Sat']
             git_path = mods[1:] if mods and norm(mods[0]).startswith(norm(pkg)) and len(mods) > 1 else mods
             used = set()
+            bounds = existing_bounds(opam_text, pkg)
 
-            def check(v, pkg=pkg, doc_mods=doc_mods, git_path=git_path, used=used):
-                # 1. ocaml.org docs for pkg.v (no git, no token, any upstream host)
-                r = src.doc_present(pkg, v, doc_mods, kind, ident)
-                if r is not None:
-                    used.add("ocaml.org docs")
-                    return r
-                # 2. fallback: shallow blob-less git fetch of the matching tag
+            def allowed(v, b=bounds):
+                return satisfies(v, [x for x in b if x[0] != "="])
+            # ocaml.org's API history of the item: one call for every version
+            # bisect_presence may check (not for a top-level module: the tool
+            # tracks the items of a module).
+            hist = None
+            if doc_mods:
+                vs = src.versions(pkg) or []
+                window = ([bad] + [v for v in vs if opam_vcmp(v, bad) > 0 and allowed(v)][:BISECT_CAP]
+                          + [v for v in vs if opam_vcmp(v, bad) < 0 and allowed(v)][-BISECT_CAP:])
+                hist = src.api_history(pkg, doc_mods, kind, ident, window)
+
+            def check(v, pkg=pkg, doc_mods=doc_mods, git_path=git_path, used=used, hist=hist):
+                # 1. ocaml.org's API history (ocaml_module_changes), for the
+                # versions it could tell
+                h = history_presence(hist, v)
+                if h in (True, False):
+                    used.add(API_HISTORY)
+                    return h
+                # 2. ocaml.org docs for pkg.v (no git, no token, any upstream
+                # host), unless the history says it has none
+                if h != "no-docs":
+                    r = src.doc_present(pkg, v, doc_mods, kind, ident)
+                    if r is not None:
+                        used.add("ocaml.org docs")
+                        return r
+                # 3. fallback: shallow blob-less git fetch of the matching tag
                 repo = src.upstream(pkg, v) or src.upstream(pkg, bad)
                 t = repo and src.tag_for(repo, pkg, v)
                 if not t:
@@ -303,7 +331,11 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
 
             if not by_name:
                 # Accept a dependency only if it actually provides that module.
-                has_mod = src.doc_present(pkg, bad, [], "module", top)
+                # (The history tells about the module path of the call: `top`
+                # only when that path is `top` alone.)
+                has_mod = history_has_module(hist, bad) if len(doc_mods) == 1 else None
+                if has_mod is None:
+                    has_mod = src.doc_present(pkg, bad, [], "module", top)
                 if has_mod is None:
                     repo = src.upstream(pkg, bad)
                     t = repo and src.tag_for(repo, pkg, bad)
@@ -318,9 +350,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                 out.setdefault("tried", []).append(f"{pkg}.{bad} defines it ({', '.join(sorted(used))}): "
                                                    f"not a version problem of {pkg}")
                 continue
-            bounds = existing_bounds(opam_text, pkg)
-            res, ev = bisect_presence(check, src.versions(pkg) or [], bad,
-                                      allowed=lambda v, b=bounds: satisfies(v, [x for x in b if x[0] != "="]))
+            res, ev = bisect_presence(check, src.versions(pkg) or [], bad, allowed=allowed)
             out["evidence"] = {f"{pkg} {v}": r for v, r in sorted(ev.items(), key=lambda kv: functools.cmp_to_key(opam_vcmp)(kv[0]))}
             out["evidence"][f"{pkg} {bad} (installed in failing job)"] = False
             out["source"] = ", ".join(sorted(used))

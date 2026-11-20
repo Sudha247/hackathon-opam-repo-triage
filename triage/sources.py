@@ -71,6 +71,10 @@ def find_publication(name, version, cache_dir=".opam-ci-cache"):
 # Failed ocaml.org MCP calls in this process (see Sources.MCP_MAX_FAILURES).
 MCP_FAILURES = {"n": 0}
 
+# Tools of Sources.MCP_STRICT_TOOLS that ocaml.org's MCP server said it does
+# not have ("unknown tool"): not asked again in this process.
+MCP_UNAVAILABLE = set()
+
 
 class Sources:
     """Cached, token-free access to opam-repository and upstream repositories."""
@@ -285,9 +289,22 @@ class Sources:
         "failed"...), which changes when ocaml.org builds it."""
         return v is None or (isinstance(v, dict) and v.get("documentation_status") not in (None, "success"))
 
+    # Tools whose callers need to know more than "no answer" (see _mcp): their
+    # errors are answers kept as {"tool_error": message}; a partial answer
+    # (docs-ci could not be read for some versions, or the call ran out of
+    # time) is returned but neither cached nor counted as answered; a server
+    # that does not have the tool yet makes it unavailable (MCP_UNAVAILABLE),
+    # which is not a failure: the callers have another way.
+    MCP_STRICT_TOOLS = ("ocaml_module_changes",)
+
     def _mcp(self, tool, max_age, args):
         """mcp(): (value, answered), `answered` False when the call failed
-        (as opposed to the tool answering with an error)."""
+        (as opposed to the tool answering with an error). For the tools of
+        MCP_STRICT_TOOLS, a partial answer is returned with `answered`
+        False, and counted in NET["mcp-errors"]."""
+        strict = tool in self.MCP_STRICT_TOOLS
+        if strict and tool in MCP_UNAVAILABLE:
+            return None, False
         key = json.dumps([tool, args], sort_keys=True)
         if key in self.mem:
             return self.mem[key], True
@@ -311,10 +328,24 @@ class Sources:
                 "Accept": "application/json, text/event-stream"})
             try:
                 with urllib.request.urlopen(req, timeout=self.MCP_TIMEOUT) as r:
-                    res = json.loads(r.read())["result"]
+                    msg = json.loads(r.read())
+                err = msg.get("error") if strict and isinstance(msg, dict) else None
+                if isinstance(err, dict) and str(err.get("message", "")).startswith("unknown tool"):
+                    MCP_UNAVAILABLE.add(tool)     # not deployed (yet): the callers do without it
+                    return None, False
+                res = msg["result"]
                 if not isinstance(res, dict):
                     raise ValueError(f"no result: {res!r:.100}")
-                v = None if res.get("isError") else json.loads(res["content"][0]["text"])
+                if res.get("isError"):
+                    v = {"tool_error": str(res["content"][0]["text"])} if strict else None
+                else:
+                    v = json.loads(res["content"][0]["text"])
+                if strict and ((res.get("_meta") or {}).get("org.ocaml/partial") is True
+                               or (isinstance(v, dict) and v.get("partial") is True)):
+                    # Some versions could not be read: what was read is
+                    # used, and the analysis is incomplete (asked again later).
+                    NET["mcp-errors"] = NET.get("mcp-errors", 0) + 1
+                    return v, False
             except NET_ERRORS + (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
                 NET["mcp-errors"] = NET.get("mcp-errors", 0) + 1
                 MCP_FAILURES["n"] += 1
@@ -413,6 +444,64 @@ class Sources:
         self.mem[("docpath", pkg, top0)] = base
         return defines(page, kind, ident)
 
+    # API histories change when a release is published or its docs are built.
+    API_HISTORY_MAX_AGE = 24 * 3600
+    # The most versions ocaml_module_changes checks in one call.
+    API_HISTORY_MAX_VERSIONS = 60
+    # ocaml_module_changes's kinds for the identifier kinds of find_unbound;
+    # a constructor may be an exception's (asked second).
+    API_KINDS = {"value": ["value"], "type": ["type"], "constructor": ["constructor", "exception"],
+                 "field": ["field"], "module": ["module"], "module-type": ["module-type"],
+                 "exception": ["exception"], "class": ["class"], "class-type": ["class-type"]}
+    # The tool's error when the module is documented but the item is in none
+    # of the versions checked: '... "x" not found in M in versions 1.0 to 2.0'.
+    API_NOT_FOUND = re.compile(r'^[\w-]+ ".*" not found in \S+ in (versions? |no version)')
+
+    def api_history(self, pkg, mods, kind, ident, versions):
+        """Whether the item `ident` (of `kind`, in module path `mods` as written
+        in the code) is in each of `versions` of `pkg`, from ocaml.org's API
+        history (ocaml_module_changes, one call for the range of `versions`):
+        {"versions": {version: status}, "module": the module's full path or
+        None if no documented version has it, "partial": bool}. A status is
+        the tool's: "present", "absent", "module-not-found" (documented, the
+        module missing), "page-truncated", "no-docs", "docs-failed", or a
+        failure ("docs-unavailable", "error", "skipped": the answer is partial,
+        counted in NET["mcp-errors"]); a version the tool did not check has
+        none. See history_presence. None when the tool gives no history: not
+        deployed, a failed call (counted in NET["mcp-errors"]), no module path
+        (an unbound top-level module), or its error (an unknown package or
+        version, the item in no documented version: then the callers look
+        version by version, which also covers the versions without docs)."""
+        if not mods or not versions:
+            return None
+        cmp = functools.cmp_to_key(opam_vcmp)
+        lo, hi = min(versions, key=cmp), max(versions, key=cmp)
+        key = ("api-history", pkg, tuple(mods), kind, ident, lo, hi)
+        if key in self.mem:
+            return self.mem[key]
+        out = None
+        for k in self.API_KINDS.get(kind, ["any"]):
+            args = {"package": pkg, "module": ".".join(mods), "identifier": ident, "kind": k,
+                    "from_version": lo, "to_version": hi, "max_versions": self.API_HISTORY_MAX_VERSIONS}
+            d, answered = self._mcp("ocaml_module_changes", self.API_HISTORY_MAX_AGE, args)
+            if not isinstance(d, dict):
+                break                       # not deployed, or the call failed
+            if "tool_error" in d:
+                if self.API_NOT_FOUND.match(str(d["tool_error"])):
+                    continue                # maybe of the next kind
+                break
+            if not isinstance(d.get("versions"), list):
+                break
+            statuses = {e["version"]: e["status"] for e in d["versions"]
+                        if isinstance(e, dict) and isinstance(e.get("version"), str)
+                        and isinstance(e.get("status"), str)}
+            out = {"versions": statuses,
+                   "module": d["resolved_module"] if isinstance(d.get("resolved_module"), str) else None,
+                   "partial": not answered}
+            break
+        self.mem[key] = out
+        return out
+
     def published(self, pkg, version):
         """Release date (YYYY-MM-DD) of pkg.version, from ocaml_package_versions,
         or None."""
@@ -471,6 +560,10 @@ def defines(text, kind, ident):
         "field": [rf"(?m)(^|[{{;])[ \t]*(mutable\s+)?{i}\s*:(?!:)"],
         "type": [rf"\btype\s+(nonrec\s+)?([^=]*\s)?{i}\b"],
         "module": [rf"\bmodule\s+(type\s+)?{i}\b"],
+        "module-type": [rf"\bmodule\s+type\s+{i}\b"],
+        "class": [rf"\bclass\s+(virtual\s+)?(\[[^]]*\]\s*)?{i}\b"],
+        "class-type": [rf"\bclass\s+type\s+(virtual\s+)?(\[[^]]*\]\s*)?{i}\b"],
+        "exception": [rf"\bexception\s+{i}\b"],
     }[kind]
     return any(re.search(p, text) for p in pats)
 
@@ -501,7 +594,45 @@ def present(src, repo, ref, path_mods, kind, ident, stdlib=False):
     return False
 
 
-def bisect_presence(check, versions, bad, allowed=lambda v: True, cap=10):
+def history_presence(hist, version):
+    """From an api_history answer: True or False when ocaml.org's docs of
+    `version` say whether it has the item (a module missing from a version
+    makes the item absent there, if another version has it); "no-docs" when
+    the version has no docs, or none of the versions has the module (the docs
+    cannot tell: only the upstream sources can); None when the tool could not
+    tell (a page too large, docs-ci not read, a version not checked): the
+    docs of that version may still be read another way."""
+    s = (hist or {}).get("versions", {}).get(version)
+    if s == "present":
+        return True
+    if s == "absent":
+        return False
+    if s == "module-not-found":
+        return False if hist.get("module") else "no-docs"
+    if s in ("no-docs", "docs-failed"):
+        return "no-docs"
+    return None
+
+
+def history_has_module(hist, version):
+    """From an api_history answer: whether the module is documented in
+    `version` (True, False), or None when unknown."""
+    s = (hist or {}).get("versions", {}).get(version)
+    if s in ("present", "absent", "page-truncated"):
+        return True
+    if s == "module-not-found":
+        return False
+    return None
+
+
+# How many versions bisect_presence checks on each side of the failing one.
+BISECT_CAP = 10
+
+# The `source` of a lookup answered by ocaml.org's ocaml_module_changes.
+API_HISTORY = "ocaml.org API history"
+
+
+def bisect_presence(check, versions, bad, allowed=lambda v: True, cap=BISECT_CAP):
     """`check(v)` -> True/False/None. The identifier is missing at version `bad`.
     Walk outwards from `bad` (history is not always monotonic): the first newer
     version that has it gives ('>=', v); otherwise the closest older version
