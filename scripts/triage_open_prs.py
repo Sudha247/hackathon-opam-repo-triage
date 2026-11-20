@@ -47,6 +47,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       nodes {
         number title url isDraft updatedAt headRefOid
         author { login }
+        labels(first: 20) { nodes { name } }
         commits(last: 1) { nodes { commit { oid status { contexts { context state targetUrl } } } } }
       }
     }
@@ -96,6 +97,7 @@ def list_open_prs(token):
             prs.append({"number": n["number"], "title": n["title"], "url": n["url"], "draft": n["isDraft"],
                         "updated": n["updatedAt"], "sha": n["headRefOid"],
                         "author": (n.get("author") or {}).get("login"),
+                        "labels": [lb["name"] for lb in (n.get("labels") or {}).get("nodes") or []],
                         "ci_state": (ci or {}).get("state"), "ci_url": (ci or {}).get("targetUrl")})
         if not conn["pageInfo"]["hasNextPage"]:
             return prs, calls
@@ -249,7 +251,7 @@ def main():
         key = str(p["number"])
         prev = old.get(key)
         entry = dict(prev or {})
-        entry.update({k: p[k] for k in ("number", "title", "url", "draft", "updated", "sha", "author")})
+        entry.update({k: p[k] for k in ("number", "title", "url", "draft", "updated", "sha", "author", "labels")})
         entry["ci_url"] = p["ci_url"] or BASE + p["sha"]
         # A PR whose CI is running is analysed again on every run, until its CI finishes.
         same = (prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
@@ -318,7 +320,11 @@ def main():
             "limit": args.limit, "max_failures_per_pr": args.max,
             "llm": {"enabled": llm, "calls": net_total.get("llm", 0)},
             "run": {"github_api_calls": list_calls, "tool_requests": dict(net_total), **stats},
-            "prs": sorted(new_state.values(), key=lambda e: e["updated"], reverse=True)}
+            "prs": sorted(new_state.values(), key=lambda e: e["updated"], reverse=True),
+            # PRs whose CI passes: nothing to analyse, listed so that the page
+            # can say which PRs seem ready.
+            "passing": [{k: p[k] for k in ("number", "title", "url", "draft", "updated", "author", "labels")}
+                        for p in prs if p["ci_state"] == "SUCCESS"]}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(data, f, indent=1)

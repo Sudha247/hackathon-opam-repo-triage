@@ -307,6 +307,70 @@ for _case in CASES:
     setattr(TriageTest, "test_" + _case.replace("-", "_"), make_test(_case))
 
 
+class PageTest(unittest.TestCase):
+    """The triage page: which PRs seem ready, labels, the Markdown comment."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import render_page
+        self.r = render_page
+
+    def pr(self, suggestions, **kw):
+        base = {"number": 1, "title": "t", "sha": "a" * 40, "ci_state": "FAILURE", "labels": [],
+                "jobs": {"total": 10, "failed": {"build": 1}}, "ci_unfinished": 0,
+                "result": {"suggestions": suggestions, "ci_unfinished": 0}}
+        base.update(kw)
+        return base
+
+    day10 = {"class": "elsewhere", "rule": "builder-specific", "fix_in": "the CI environment (day10 builder)",
+             "failing": "x.1", "variant": "v", "title": "Fails only on the day10 builder"}
+    revdep = {"class": "elsewhere", "rule": "library-api", "fix_in": "y.1 (other package)",
+              "failing": "y.1", "variant": "v", "title": "API change"}
+    lint = {"class": "fix", "rule": "lint", "fix_in": "this PR", "failing": "x.1", "variant": "v", "title": "Lint"}
+
+    def test_seems_ready(self):
+        self.assertTrue(self.r.seems_ready(self.pr([self.day10])))
+        # A revdep failure is the PR's, unless it happens without the PR.
+        self.assertFalse(self.r.seems_ready(self.pr([self.day10, self.revdep])))
+        self.assertTrue(self.r.seems_ready(self.pr([self.day10, dict(self.revdep, preexisting="on master")])))
+        self.assertTrue(self.r.seems_ready(self.pr([dict(self.revdep, also_failing_in=[2, 3])])))
+        self.assertTrue(self.r.seems_ready(self.pr([dict(self.lint, experimental=True)])))
+        self.assertFalse(self.r.seems_ready(self.pr([self.lint])))
+        # Unexplained failures (only skipped jobs), CI not finished, drafts, labels.
+        self.assertFalse(self.r.seems_ready(self.pr([])))
+        self.assertFalse(self.r.seems_ready(self.pr([self.day10], ci_unfinished=2)))
+        self.assertFalse(self.r.seems_ready(self.pr([self.day10], draft=True)))
+        self.assertFalse(self.r.seems_ready(self.pr([self.day10], labels=["needs reporter action"])))
+        self.assertTrue(self.r.seems_ready(self.pr([self.day10], labels=["consider for merge"])))
+
+    def test_ready_section_and_labels(self):
+        data = {"prs": [self.pr([self.day10], number=5, labels=["question"]), self.pr([self.lint], number=6)],
+                "passing": [{"number": 7, "title": "p", "labels": ["consider for merge"], "updated": "2026-01-01"},
+                            {"number": 8, "title": "d", "labels": [], "draft": True},
+                            {"number": 9, "title": "n", "labels": ["do not merge"]}]}
+        html_ = self.r.ready_section(data)
+        self.assertIn("(2)", html_)
+        self.assertLess(html_.index("/pull/7"), html_.index("/pull/5"))   # labelled first
+        for n in (6, 8, 9):
+            self.assertNotIn(f"/pull/{n}", html_)
+        self.assertEqual(self.r.pr_cats(self.pr([self.day10], labels=["consider for merge"])) & {"ready", "merge"},
+                         {"ready", "merge"})
+        self.assertIn("&lt;b&gt;", self.r.label_badges(["<b>"]))
+
+    def test_comment_markdown(self):
+        md = self.r.comment_markdown(self.pr([self.day10]))
+        self.assertIn("No failure seems to come from this PR", md)
+        llm_low = {"class": "fix", "rule": "llm", "confidence": "low", "fix_in": "this PR", "failing": "z.1",
+                   "variant": "v", "title": "LLM diagnosis (unchecked)"}
+        md = self.r.comment_markdown(self.pr([self.lint, llm_low]))
+        self.assertNotIn("No failure seems", md)
+        self.assertNotIn("z.1", md)
+        page = self.r.render_pr(self.pr([self.lint]))
+        self.assertIn('data-for="md-1"', page)
+        self.assertIn("</textarea>", page)
+        self.assertEqual(page.count("<textarea"), 1)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--record":
         record(sys.argv[2:] or list(CASES))

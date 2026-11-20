@@ -18,14 +18,22 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from opam_repo_ci_triage import BASE, RULE_TITLES, describe_job  # noqa: E402
+from opam_repo_ci_triage import BASE, RULE_TITLES, describe_job, render_comment  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
 CLASSES = [("fix", "Changes to this PR", "change"),
            ("workaround", "Workarounds: restrict where this PR is built or tested", "workaround"),
            ("elsewhere", "Problems in other packages or in the CI", "elsewhere"),
            ("explanation", "Other findings, no change suggested", "other finding")]
-CATEGORIES = [("fix", "Has a fix for the PR"), ("blocked", "Blocked by other packages"),
-              ("ci", "CI problems only"), ("other", "Needs a look"), ("error", "Not analysed")]
+CATEGORIES = [("ready", "Seems ready"), ("fix", "Has a fix for the PR"), ("blocked", "Blocked by other packages"),
+              ("ci", "CI problems only"), ("other", "Needs a look"), ("error", "Not analysed"),
+              ("merge", 'Labelled "consider for merge"')]
+# Labels of ocaml/opam-repository: "consider for merge" is a filter, and a PR
+# with one of NOT_READY_LABELS is never listed as ready.
+MERGE_LABEL, NO_MERGE_LABEL = "consider for merge", "do not merge"
+NOT_READY_LABELS = {NO_MERGE_LABEL, "needs reporter action"}
+# Rules whose failures come from the CI, not from the PR.
+CI_SIDE = {"builder-specific", "builder-specific-systemic", "accept-failures-ignored", "rerun",
+           "opam-same-version-reinstall", "health-check-preexisting"}
 # Job categories (from `summary`), in words.
 JOB_CATEGORIES = {"build": "build failed", "build-or-test": "build or tests failed",
                   "dependency": "a dependency failed", "solver": "no solution", "network": "network error",
@@ -72,6 +80,78 @@ def categorise(pr):
     if not cats:
         cats.add("other")
     return cats, groups
+
+
+def not_this_pr(r):
+    """Whether a failure is not the PR's: it happens without the PR (pre-existing,
+    or also failing in other open PRs), comes from the CI, or is on an
+    experimental platform, whose failures do not block a PR."""
+    return bool(r.get("preexisting") or r.get("also_failing_in") or r.get("experimental")
+                or r.get("rule") in CI_SIDE)
+
+
+def seems_ready(pr):
+    """A PR whose CI fails, but no failure points at the PR. Its CI must have
+    finished, and its failures must have been explained: a PR whose only
+    "failures" are skipped jobs may not be installable anywhere."""
+    res = pr.get("result")
+    if pr.get("pending") or res is None or pr.get("ci_state") == "PENDING" or pr.get("draft"):
+        return False
+    if NOT_READY_LABELS & set(pr.get("labels") or []) or pr.get("ci_unfinished") or res.get("ci_unfinished"):
+        return False
+    sugg = res.get("suggestions", [])
+    return bool(sugg) and all(not_this_pr(r) for r in sugg)
+
+
+def pr_cats(pr):
+    """The categories of a PR, for the badges and the filters."""
+    cats = set(categorise(pr)[0])
+    if seems_ready(pr):
+        cats.add("ready")
+    if MERGE_LABEL in (pr.get("labels") or []):
+        cats.add("merge")
+    return cats
+
+
+def label_badges(labels):
+    """The PR's labels, "consider for merge" first."""
+    def cls(lb):
+        return {MERGE_LABEL: "b-merge", NO_MERGE_LABEL: "b-nomerge"}.get(lb, "b-label")
+    order = sorted(labels, key=lambda lb: lb != MERGE_LABEL)
+    return "".join(f'<span class="badge {cls(lb)}" title="Label">{e(lb)}</span>' for lb in order)
+
+
+def comment_markdown(pr):
+    """The PR comment of the `comment` command, from the stored analysis. Low-
+    confidence LLM answers are left out, as they are folded on the page."""
+    res = pr.get("result") or {}
+    results = [r for r in res.get("suggestions", []) if r.get("class")
+               and not (r.get("rule") == "llm" and str(r.get("confidence") or "").startswith("low"))]
+    total = (pr.get("jobs") or {}).get("total") or 0
+    data = {"unfinished": pr.get("ci_unfinished") or 0, "jobs": [None] * total}
+    md = render_comment(pr.get("sha") or "", data, results)
+    if seems_ready(pr):
+        # After the paragraph on where the results come from.
+        lines = md.split("\n")
+        i = next((k for k, x in enumerate(lines) if x.startswith("From the [CI results]")), 1)
+        lines[i + 1:i + 1] = ["", "**No failure seems to come from this PR**: each one also happens without it, "
+                              "comes from the CI, or is on an experimental platform (details below)."]
+        md = "\n".join(lines)
+    return md
+
+
+def copy_block(pr):
+    """A button copying the Markdown comment, and the Markdown itself, folded."""
+    n = int(pr["number"])
+    try:
+        md = comment_markdown(pr)
+    except Exception as ex:          # a malformed entry must not break the page
+        print(f"#{n}: no Markdown comment ({ex!r})", file=sys.stderr)
+        return ""
+    return (f'<div class="md"><button type="button" class="copy" data-for="md-{n}">'
+            f'Copy as a PR comment (Markdown)</button>'
+            f'<details class="mdv"><summary>Show the Markdown</summary>'
+            f'<textarea id="md-{n}" readonly rows="14" spellcheck="false">{e(md)}</textarea></details></div>')
 
 
 def failed_count(pr):
@@ -171,14 +251,52 @@ def render_suggestion(r, sha=None):
     return html_
 
 
+READY_TITLE = (' title="No failure points at this PR: each one also happens without it (pre-existing, or in '
+               'other open PRs), comes from the CI, or is on an experimental platform. Check the details '
+               'before merging."')
+
+
+def ready_section(data):
+    """The PRs that seem ready: CI passes, or no failure points at the PR.
+    Drafts and PRs with one of NOT_READY_LABELS are left out."""
+    rows = []
+    for p in data.get("passing") or []:
+        if not p.get("draft") and not NOT_READY_LABELS & set(p.get("labels") or []):
+            rows.append((p, "CI passes"))
+    for p in data.get("prs", []):
+        if seems_ready(p):
+            rows.append((p, None))
+    # Those labelled "consider for merge" first, then the most recently updated.
+    rows.sort(key=lambda pw: pw[0].get("updated") or "", reverse=True)
+    rows.sort(key=lambda pw: MERGE_LABEL not in (pw[0].get("labels") or []))
+    html_rows = []
+    for p, why in rows:
+        n = int(p["number"])
+        why_html = e(why) if why else f'CI fails, not because of this PR (<a href="#pr-{n}">details</a>)'
+        html_rows.append(f'<tr><td class="nw">{link(f"{REPO_URL}/pull/{n}", f"#{n}")}</td>'
+                         f'<td>{e(p.get("title"))} {label_badges(p.get("labels") or [])}</td>'
+                         f'<td>{e(p.get("author") or "?")}</td><td>{why_html}</td>'
+                         f'<td class="nw">{e((p.get("updated") or "")[:10])}</td></tr>')
+    if not html_rows:
+        return ""
+    return ('<section id="ready"><h2>PRs that seem ready (' + str(len(html_rows)) + ')</h2>'
+            '<p class="meta">Their CI passes, or no failure points at the PR. Drafts and PRs labelled '
+            '"do not merge" or "needs reporter action" are left out. Only CI is checked here: reviews and '
+            'discussions are not.</p>'
+            + table(["PR", "Title", "Author", "CI", "Updated"], html_rows, shown=15) + "</section>")
+
+
 def render_pr(pr):
-    cats, groups = categorise(pr)
+    _, groups = categorise(pr)
+    cats = pr_cats(pr)
     n = int(pr["number"])
     real, total = failed_count(pr)
     counts = [f'<span class="cnt c-{k}" title="{e(label)}">{len(groups[k])} {e(word)}'
               f'{"s" if len(groups[k]) != 1 and k != "elsewhere" else ""}</span>'
               for k, label, word in CLASSES if groups.get(k)]
-    badges = "".join(f'<span class="badge b-{c}">{e(label)}</span>' for c, label in CATEGORIES if c in cats)
+    badges = "".join(f'<span class="badge b-{c}"{READY_TITLE if c == "ready" else ""}>{e(label)}</span>'
+                     for c, label in CATEGORIES if c in cats and c != "merge")
+    badges += label_badges(pr.get("labels") or [])
     if pr.get("ci_state") == "PENDING":
         left = pr.get("ci_unfinished")
         badges = (f'<span class="badge b-running" title="These are the failures so far; the page is updated '
@@ -217,6 +335,7 @@ def render_pr(pr):
         body.append(f'<p class="note">The analysis failed ({e(pr.get("attempts"))} attempts): '
                     f'<code>{e(pr.get("error"))}</code></p>')
     else:
+        body.append(copy_block(pr))
         if not pr["result"].get("suggestions"):
             body.append('<p class="note">No build or test failure to analyse.</p>')
         for k, label, _ in CLASSES:
@@ -339,6 +458,15 @@ th,td{border-bottom:1px solid var(--bd);padding:5px 8px;text-align:left;vertical
 td:last-child{overflow-wrap:anywhere}.nw{white-space:nowrap}
 details.more>summary{cursor:pointer;color:var(--acc);margin:6px 0}
 .hidden{display:none}
+.b-ready{color:var(--fix);border-color:var(--fix);font-weight:600}.b-merge{color:var(--acc);border-color:var(--acc)}
+.b-nomerge{color:var(--err);border-color:var(--err)}.b-label{color:var(--mut)}
+.md{margin:8px 0}.md button{font:inherit;font-size:.85rem;padding:4px 10px;border-radius:6px;border:1px solid var(--bd);
+background:var(--card);color:var(--fg);cursor:pointer}
+details.mdv{display:inline-block;margin-left:8px;font-size:.85rem;color:var(--mut);vertical-align:top}
+details.mdv>summary{cursor:pointer}
+details.mdv[open]{display:block;margin:6px 0 0}
+details.mdv textarea{width:100%;font:.8rem/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);
+color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:6px 8px}
 """
 
 JS = """
@@ -363,18 +491,40 @@ JS = """
     prs.forEach(function(d){if(!d.classList.contains('hidden'))d.open=open;});
   });
   apply();
+  [].forEach.call(document.querySelectorAll('button.copy'),function(b){
+    var label=b.textContent;
+    function done(ok){
+      b.textContent=ok?'Copied':'Select the text below and copy it';
+      setTimeout(function(){b.textContent=label;},2000);
+    }
+    b.addEventListener('click',function(){
+      var t=document.getElementById(b.getAttribute('data-for'));
+      function fallback(){
+        var d=t.closest('details'); if(d)d.open=true;
+        t.focus(); t.select();
+        var ok=false; try{ok=document.execCommand('copy');}catch(e){}
+        done(ok);
+      }
+      if(navigator.clipboard&&window.isSecureContext){
+        navigator.clipboard.writeText(t.value).then(function(){done(true);},fallback);
+      } else fallback();
+    });
+  });
 })();
 """
 
 
 def render(data):
     prs = data.get("prs", [])
-    cats = {int(p["number"]): categorise(p)[0] for p in prs}
+    cats = {int(p["number"]): pr_cats(p) for p in prs}
     analysed = sum(1 for p in prs if p.get("result") is not None and not p.get("pending"))
     count = collections.Counter(c for s in cats.values() for c in s)
     gen = data.get("generated") or ""
     run = data.get("run") or {}
-    stats = [("PRs analysed", analysed)] + [(label, count[c]) for c, label in CATEGORIES if c != "error"]
+    passing = [p for p in data.get("passing") or [] if not p.get("draft")]
+    stats = ([("PRs analysed", analysed)] + [(label, count[c]) for c, label in CATEGORIES
+                                              if c not in ("error", "merge")]
+             + [("CI passes (not on this list)", len(passing))])
     if count["error"]:
         stats.append(("Not analysed", count["error"]))
     limit = f" (limited to {e(data['limit'])})" if data.get("limit") else ""
@@ -393,6 +543,8 @@ def render(data):
         f'For each one, the failures are read from the CI logs and matched against known causes, with a '
         f'suggested change when one can be derived. Nothing is rebuilt, so check a suggestion before '
         f'applying it.</p>'
+        + (f'<p class="meta">{e(len(passing))} other open PRs (not drafts) pass CI: they are listed with '
+           f'the PRs that <a href="#ready">seem ready</a>.</p>' if passing else "")
         + (f'<p class="meta">Failures that no rule recognises get a diagnosis from an LLM (Claude), shown as '
            f'"LLM diagnosis (unchecked)"; {e((data.get("llm") or {}).get("calls", 0))} new LLM calls in this '
            f'update.</p>' if (data.get("llm") or {}).get("enabled") else "")
@@ -405,6 +557,7 @@ def render(data):
         + "".join(f'<button data-f="{c}">{e(label)} ({count[c]})</button>' for c, label in CATEGORIES if count[c])
         + '<input id="q" type="search" placeholder="Search number, title, author" aria-label="Search">'
         '<button id="expand" type="button">Expand / collapse</button><span id="shown" class="meta"></span></nav>',
+        ready_section(data),
         '<section id="prs">',
     ]
     parts.extend(render_pr(p) for p in prs)
@@ -414,6 +567,15 @@ def render(data):
     parts.append(chronic([p for p in prs if not p.get("pending")]))
     parts.append('''<section id="help"><h2>How to read this page</h2>
 <dl class="help">
+<dt>Seems ready</dt><dd>No failure points at the PR: each one also happens without it (pre-existing, or
+failing in other open PRs too), comes from the CI, or is on an experimental platform. Together with the PRs
+whose CI passes, they are listed under "PRs that seem ready". Only CI is checked: not the reviews, nor whether
+a maintainer asked for changes.</dd>
+<dt>Labels</dt><dd>The PR's labels on GitHub, set by the opam-repository maintainers. "consider for merge"
+has a filter; a PR labelled "do not merge" or "needs reporter action" is never listed as ready.</dd>
+<dt>Copy as a PR comment</dt><dd>Copies a summary of the analysis, as Markdown, to paste in a comment on
+the PR. Check it before posting: low-confidence LLM answers are left out, other suggestions are not
+checked.</dd>
 <dt>Has a fix for the PR</dt><dd>A change to the PR's opam files is suggested (a fix, or a restriction of the
 platforms it is built or tested on).</dd>
 <dt>Blocked by other packages</dt><dd>At least one failure comes from another package, which needs the fix.</dd>
@@ -461,7 +623,8 @@ def render_feed(data):
         if pr.get("pending") or pr.get("result") is None:
             continue
         n = int(pr["number"])
-        cats, groups = categorise(pr)
+        _, groups = categorise(pr)
+        cats = pr_cats(pr)
         lines = [", ".join(label for c, label in CATEGORIES if c in cats)]
         if pr.get("ci_state") == "PENDING":
             lines.append(f"CI still running ({pr.get('ci_unfinished') or '?'} jobs left).")
