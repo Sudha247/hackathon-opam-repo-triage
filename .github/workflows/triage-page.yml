@@ -49,10 +49,19 @@ jobs:
           key: triage-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: triage-
 
+      # The git mirrors (.opam-ci-cache/git/<hash>/) are pruned whole, by the
+      # time of their last use (a file the tool touches): most of their files
+      # are never rewritten, and a mirror missing some of them is broken.
       - name: Prune cache entries older than 30 days
         run: |
           if [ -d .opam-ci-cache ]; then
-            find .opam-ci-cache -type f -mtime +30 -delete
+            find .opam-ci-cache -path .opam-ci-cache/git -prune -o -type f -mtime +30 -print0 | xargs -0 -r rm -f
+            for d in .opam-ci-cache/git/*/; do
+              [ -d "$d" ] || continue
+              if [ -z "$(find "$d" -maxdepth 1 -name opam-ci-last-used -mtime -30)" ]; then
+                rm -rf "$d"
+              fi
+            done
             du -sh .opam-ci-cache
           fi
 

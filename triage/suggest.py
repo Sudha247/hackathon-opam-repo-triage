@@ -91,13 +91,17 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
                             "jobs": merged[group_key(j)]})
             continue
         base = base or excerpt(text).get("base")      # the master commit the PR was merged with
-        r = suggest_for_job(src, j, text, pr_packages, sha)
-        if r.get("rule") == "test-output":
-            complete_test_output(src, r, j, text, data, cache_dir)
-        lb = lower_bounds_rule(src, j, text, r, pr_packages, sha)
-        info = log_info(text)
-        r["_installed"] = info["installed"]
-        pb = previous_release_bound(src, j, text, info, pr_packages, sha, prev_cache)
+        try:
+            r = suggest_for_job(src, j, text, pr_packages, sha)
+            if r.get("rule") == "test-output":
+                complete_test_output(src, r, j, text, data, cache_dir)
+            lb = lower_bounds_rule(src, j, text, r, pr_packages, sha)
+            info = log_info(text)
+            r["_installed"] = info["installed"]
+            pb = previous_release_bound(src, j, text, info, pr_packages, sha, prev_cache)
+        except Exception as e:      # a bug in a rule: this job only, the others are still analysed
+            results.append(rule_error(j, e, merged[group_key(j)]))
+            continue
         if pb and not any(x.get("failing") == pb["failing"] and x.get("new") == pb["new"] for x in results + [r]):
             pb.update(_key=failure_key(j), jobs=merged[group_key(j)], keep=True)
             results.append(pb)
@@ -209,6 +213,15 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     for r in results:
         r.pop("_installed", None)
     return readable(merge_versions(merge_unrecognised(results)))
+
+
+def rule_error(job, e, jobs):
+    """The result for a job whose rules raised `e`."""
+    return {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"],
+            "failing": job.get("revdep") or job.get("target"), "rule": "rule-error", "fix_in": "unknown",
+            "confidence": "low", "error": f"{type(e).__name__}: {str(e)[:300]}",
+            "note": "The tool failed while analysing this log (a bug in the tool): read the log.",
+            "_key": failure_key(job), "jobs": jobs, "keep": True}
 
 
 VERSION_TERM = re.compile(r'(<=|>=|!=|<|>|=)\s*"([^"]+)"')
@@ -364,6 +377,7 @@ RULE_TITLES = {
     "system-library-version": "System library version", "rerun": "Jobs to rerun",
     "sources": "Source archive cannot be unpacked", "accept-failures-ignored": "Accepted failure not ignored",
     "unrecognised": "Not recognised", "llm": "LLM diagnosis (unchecked)",
+    "rule-error": "Analysis failed (tool error)",
     "opam-same-version-reinstall": "opam reinstalls at the same version",
     "needs-git-checkout": "Build needs a git checkout", "install-outside-prefix": "Installs outside the switch",
     "unsupported-arch": "Architecture not supported", "platform-unsupported": "Platform not supported",
@@ -407,6 +421,8 @@ def classify(r):
     """'fix' (change in this PR), 'workaround' (restricts where it is built or
     tested), 'elsewhere' (another package, CI, systemic), or 'explanation'."""
     has_change = bool(r.get("new") or r.get("candidates"))
+    if r.get("rule") == "rule-error":
+        return "explanation"
     if r.get("rule", "").endswith("-systemic") or (r.get("fix_in") and r.get("fix_in") != "this PR"):
         return "elsewhere"
     if not has_change:

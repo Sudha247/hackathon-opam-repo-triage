@@ -210,7 +210,8 @@ publishes the results on the repository's GitHub Pages site:
    PRs. PR titles, logs and suggestions are HTML-escaped.
 
 `.opam-ci-cache/` and `state/` are kept between runs with `actions/cache`
-(files older than 30 days are pruned). Rules only: the LLM fallback is not
+(files older than 30 days are pruned; the git mirrors of `.opam-ci-cache/git/`
+are pruned whole, a month after their last use). Rules only: the LLM fallback is not
 enabled (see the comment in the workflow).
 
 ```sh
@@ -277,11 +278,16 @@ job's summary.
 4. A shallow, blob-less `git fetch` of one upstream tag, only when ocaml.org has no docs for a version.
 5. The GitHub REST API, only for `--pr` and for `compare`'s baseline lookup (2–3 calls). It works without a token (60 requests per hour); `GITHUB_TOKEN`, `GH_TOKEN` or a logged-in `gh` are used if present.
 
-Results are cached in `.opam-ci-cache/`. `suggest` prints the number of
-network requests it actually sent, and `mcp-errors`, the ocaml.org MCP calls
-that failed: an analysis with such failures lacks some versions, docs or
-health-check results, and the triage page does it again in its next runs
-(three attempts at most).
+Results are cached in `.opam-ci-cache/` (the tool's own errors from ocaml.org,
+pages that do not exist and opam files of master are asked again after a day).
+`suggest` prints the number of network requests it actually sent, with
+`mcp-errors`, the ocaml.org MCP calls that failed (after three, ocaml.org is
+not called again in that run), and `net-errors`, the other requests that
+failed; `suggest --json` then says `"incomplete": true`. Such an analysis lacks
+some versions, docs or health-check results, and states what it could not
+check instead of concluding; the triage page does it again in its next runs
+(three attempts a day at most, as for a failed or timed-out analysis). A rule
+that crashes on a log gives a `rule-error` result for that job only.
 
 Limitations:
 

@@ -14,14 +14,19 @@ The expectations are fixes checked by hand against the CI logs, upstream
 history, or the change the PR author actually made.
 """
 
+import datetime
 import gzip
+import http.client
+import io
 import json
 import re
 import os
 import shutil
 import subprocess
 import sys
+import time
 import unittest
+import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "..", "opam_repo_ci_triage.py")
@@ -363,7 +368,8 @@ class McpFailureTest(unittest.TestCase):
         sys.path.insert(0, os.path.join(HERE, ".."))
         import tempfile
         import opam_repo_ci_triage as t
-        from triage import net
+        from triage import net, sources
+        sources.MCP_FAILURES["n"] = 0
         if net.OFFLINE:
             self.skipTest("offline")
         with tempfile.TemporaryDirectory() as d:
@@ -373,7 +379,7 @@ class McpFailureTest(unittest.TestCase):
             self.assertIsNone(src.mcp("ocaml_package_versions", package="x"))
             self.assertEqual(t.NET.get("mcp-errors", 0), before + 1)
             self.assertEqual(os.listdir(d), [])             # not cached
-            self.assertEqual(src.versions("x"), [])
+            self.assertIsNone(src.versions("x"))           # unknown, not "not a package"
 
     def test_reuse(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -385,6 +391,413 @@ class McpFailureTest(unittest.TestCase):
         self.assertEqual(T.reuse(dict(prev, mcp_errors=2, attempts=T.MAX_ATTEMPTS), p, "v", False),
                          (True, True, False))
         self.assertEqual(T.reuse(prev, dict(p, sha="b"), "v", False), (False, False, False))
+
+
+def run_patched(case, patch, extra=()):
+    """Run `suggest --json` on a fixture (offline) in a process where `patch`
+    (Python code) has been run first."""
+    sha, args, _ = CASES[case]
+    code = ("import sys; sys.path.insert(0, %r)\n" % os.path.join(HERE, "..") + patch +
+            "\nimport triage.cli\nsys.argv = ['opam_repo_ci_triage.py'] + %r\ntriage.cli.main()\n"
+            % (["suggest", sha, "--json", "--cache-dir", os.path.join(FIXTURES, case)] + list(args) + list(extra)))
+    env = {**os.environ, "OPAM_CI_OFFLINE": "1", "OPAM_CI_RECORD": "0"}
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=900)
+
+
+class Serve:
+    """A local TCP server for one test: `answer(request bytes) -> response
+    bytes` (None: close the connection without answering)."""
+
+    def __init__(self, answer):
+        import socket
+        import threading
+        self.answer, self.requests = answer, []
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.url = "http://127.0.0.1:%d/mcp" % self.sock.getsockname()[1]
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        while True:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
+            with c:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                head, _, body = data.partition(b"\r\n\r\n")
+                n = int((re.search(rb"(?i)content-length: (\d+)", head) or [0, b"0"])[1])
+                while len(body) < n:
+                    body += c.recv(65536)
+                self.requests.append(body)
+                out = self.answer(body)
+                if out is not None:
+                    c.sendall(out)
+
+    def close(self):
+        self.sock.close()
+
+
+def http_json(v):
+    body = json.dumps(v).encode()
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: %d\r\n\r\n"
+            % len(body)) + body
+
+
+def mcp_answer(v, error=False):
+    return http_json({"jsonrpc": "2.0", "id": 1,
+                      "result": {"isError": error, "content": [{"type": "text", "text": json.dumps(v)}]}})
+
+
+class NetTestBase(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import opam_repo_ci_triage as t
+        from triage import net, sources
+        if net.OFFLINE:
+            self.skipTest("offline")
+        self.t, self.net, self.sources = t, net, sources
+        sources.MCP_FAILURES["n"] = 0
+        self.addCleanup(sources.MCP_FAILURES.update, n=0)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def errors(self, k="mcp-errors"):
+        return self.t.NET.get(k, 0)
+
+    def age(self, path, days):
+        t = time.time() - days * 86400
+        os.utime(path, (t, t))
+
+
+class McpRobustnessTest(NetTestBase):
+    """ocaml.org's MCP server failing in various ways: counted as failures, not
+    cached, not raised; after a few failures it is not called any more."""
+
+    def test_malformed_answers(self):
+        answers = [http_json({"jsonrpc": "2.0", "id": 1, "result": None}),     # "result": null
+                   http_json({"jsonrpc": "2.0", "id": 1, "error": {"code": -1}}),
+                   b"HELLO\r\n\r\n",                                               # not HTTP
+                   None]                                                           # connection closed
+        for a in answers:
+            self.sources.MCP_FAILURES["n"] = 0
+            srv = Serve(lambda body, a=a: a)
+            self.addCleanup(srv.close)
+            src = self.t.Sources(self.tmp)
+            src.MCP_URL = srv.url
+            before = self.errors()
+            self.assertIsNone(src.mcp("ocaml_package_versions", package="x"), a)
+            self.assertEqual(self.errors(), before + 1, a)
+            self.assertEqual(os.listdir(self.tmp), [], a)          # not cached
+
+    def test_circuit_breaker(self):
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = "http://127.0.0.1:9/mcp"                   # nothing listens there
+        sent, before = self.t.NET["mcp"], self.errors()
+        for i in range(6):
+            self.assertIsNone(src.mcp("ocaml_package_versions", package=f"p{i}"))
+        self.assertEqual(self.t.NET["mcp"] - sent, src.MCP_MAX_FAILURES)    # then no more calls
+        self.assertEqual(self.errors(), before + 6)                          # each one counted
+        self.assertLessEqual(src.MCP_TIMEOUT, 30)
+
+    def test_versions_unknown_vs_no_answer(self):
+        srv = Serve(lambda body: mcp_answer("Package not found", error=True))
+        self.addCleanup(srv.close)
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = srv.url
+        self.assertEqual(src.versions("not-a-package"), [])       # the tool's answer: not a package
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = "http://127.0.0.1:9/mcp"
+        self.assertIsNone(src.versions("x"))                      # no answer: unknown
+        srv2 = Serve(lambda body: mcp_answer({"versions": [{"version": "1.0"}, {"version": "0.9"}]}))
+        self.addCleanup(srv2.close)
+        src.MCP_URL = srv2.url
+        self.assertEqual(src.versions("y"), ["0.9", "1.0"])
+
+    def test_cached_error_expires(self):
+        srv = Serve(lambda body: mcp_answer("no docs yet", error=True))
+        self.addCleanup(srv.close)
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = srv.url
+        self.assertIsNone(src.mcp("ocaml_package_documentation", package="x", version="1"))
+        self.assertIsNone(self.t.Sources(self.tmp).mcp("ocaml_package_documentation", package="x", version="1"))
+        self.assertEqual(len(srv.requests), 1)                    # the error is cached...
+        for f in os.listdir(self.tmp):
+            self.age(os.path.join(self.tmp, f), 2)
+        src = self.t.Sources(self.tmp)
+        src.MCP_URL = srv.url
+        src.mcp("ocaml_package_documentation", package="x", version="1")
+        self.assertEqual(len(srv.requests), 2)                    # ...for a day
+
+    def test_rules_do_not_assert_on_no_answer(self):
+        from triage import rules
+
+        class Src:
+            def __init__(self, vs):
+                self.vs = vs
+
+            def versions(self, name):
+                return self.vs
+        job = {"platform": ["compilers", "5.3"], "variant": "compilers,5.3,foo.1", "kind": "build"}
+        cases = [(["bash: frobnicate: command not found"], "conf-frobnicate"),
+                 (["Package libfoo was not found in the pkg-config search path."], "conf-libfoo"),
+                 (['Error: Library "barlib" not found.'], "barlib")]
+        for err, pkg in cases:
+            r = rules.log_rules(Src(None), err, "foo", 'depends: [\n  "ocaml"\n]\n',
+                                {"installed": {}, "ocaml": "5.3"}, job)
+            self.assertIn("could not check", r["note"], err)
+            self.assertNotIn(f"no {pkg} package", r["note"])
+            self.assertNotIn("is not an opam package", r["note"])
+            self.assertFalse(r.get("new"))
+            r = rules.log_rules(Src(["1"]), err, "foo", 'depends: [\n  "ocaml"\n]\n',
+                                {"installed": {}, "ocaml": "5.3"}, job)
+            self.assertIn(f'"{pkg}"', r["new"])
+
+
+class NetErrorTest(NetTestBase):
+    """Network errors of the plain HTTP and GitHub API fetches: None, counted,
+    not cached."""
+
+    ERRORS = [ConnectionResetError(104, "reset"), TimeoutError("timed out"),
+              urllib.error.URLError("no route"), http.client.BadStatusLine("x"),
+              http.client.IncompleteRead(b"")]
+
+    def test_raw_and_gh_api(self):
+        from unittest import mock
+        for e in self.ERRORS:
+            with mock.patch("urllib.request.urlopen", side_effect=e), \
+                    mock.patch.dict(os.environ, {"GITHUB_TOKEN": "x"}):     # no `gh auth token`
+                before = self.errors("net-errors")
+                self.assertIsNone(self.t.Sources(self.tmp).raw("https://example.invalid/a"), e)
+                self.t._GH_CACHE.clear()
+                self.assertIsNone(self.t.gh_api("repos/x/y/pulls/1", self.tmp), e)
+                self.assertEqual(self.errors("net-errors"), before + 2, e)
+            self.assertEqual(os.listdir(self.tmp), [], e)
+
+    def test_not_found_and_master_files_expire(self):
+        from unittest import mock
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+        url = "https://example.invalid/missing"
+        open(self.t.cache_path(url, self.tmp) + ".404", "w").close()
+        with mock.patch("urllib.request.urlopen", side_effect=lambda *a, **k: Resp(b"now here")) as m:
+            with self.assertRaises(urllib.error.HTTPError):
+                self.t.fetch(url, self.tmp)
+            self.age(self.t.cache_path(url, self.tmp) + ".404", 2)
+            self.assertEqual(self.t.fetch(url, self.tmp), "now here")
+            # An opam file on master is fetched again after a day; one at a commit is not.
+            src = self.t.Sources(self.tmp)
+            for ref in ("master", "a" * 40):
+                with open(self.t.cache_path(f"https://raw.githubusercontent.com/{self.t.REPO}/{ref}/packages/"
+                                            f"x/x.1/opam", self.tmp), "w") as f:
+                    f.write("old")
+            for f in os.listdir(self.tmp):
+                self.age(os.path.join(self.tmp, f), 2)
+            self.assertEqual(self.t.Sources(self.tmp).opam_file("x", "1"), "now here")
+            self.assertEqual(self.t.Sources(self.tmp).opam_file("x", "1", "a" * 40), "old")
+            self.assertEqual(m.call_count, 2)
+
+
+class CacheWriteTest(NetTestBase):
+    """Cache files are written whole or not at all, and a damaged one is a miss."""
+
+    def test_truncated_cache_is_a_miss(self):
+        p = os.path.join(self.tmp, "a.json")
+        with open(p, "w") as f:
+            f.write('{"versions": [')
+        self.assertIsNone(self.t.cached_json(p))
+        with open(p + "x", "wb") as f:
+            f.write(gzip.compress(b'["a", "b"]')[:-6])
+        os.rename(p + "x", os.path.join(self.tmp, "b.json.gz"))
+        os.remove(p)
+        self.assertIsNone(self.t.cached_json(os.path.join(self.tmp, "b.json")))
+
+    def test_killed_write_leaves_no_file(self):
+        from unittest import mock
+        from triage import sources
+        url = "https://example.invalid/repo"
+        ok = subprocess.CompletedProcess([], 0, "abc\trefs/tags/v1.0\n", "")
+        with mock.patch.object(sources, "git", return_value=ok), \
+                mock.patch("os.replace", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.t.Sources(self.tmp).tags(url)
+        self.assertEqual(os.listdir(self.tmp), [])
+        p = os.path.join(self.tmp, "c.json")
+        self.t.write_atomic(p, '"old"')
+        with mock.patch("os.replace", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.t.write_atomic(p, '"new"')
+        self.assertEqual(self.t.cached_json(p), {"value": "old"})
+        self.assertEqual(os.listdir(self.tmp), ["c.json"])
+
+
+class TagsTest(NetTestBase):
+    """A failed `git ls-remote` is not cached: the next run asks again."""
+
+    def test_failed_listing_not_cached(self):
+        from unittest import mock
+        from triage import sources
+        url = "https://example.invalid/repo"
+        bad = subprocess.CompletedProcess([], 128, "", "fatal: unable to access")
+        good = subprocess.CompletedProcess([], 0, "abc\trefs/tags/v1.0\n", "")
+        with mock.patch.object(sources, "git", return_value=bad) as g:
+            self.assertEqual(self.t.Sources(self.tmp).tags(url), [])
+            self.assertEqual(self.t.Sources(self.tmp).tags(url), [])
+            self.assertEqual(g.call_count, 2)
+        self.assertEqual(os.listdir(self.tmp), [])
+        with mock.patch.object(sources, "git", return_value=good):
+            self.assertEqual(self.t.Sources(self.tmp).tags(url), ["v1.0"])
+        with mock.patch.object(sources, "git", return_value=bad) as g:
+            self.assertEqual(self.t.Sources(self.tmp).tags(url), ["v1.0"])     # cached
+            self.assertEqual(g.call_count, 0)
+
+    def test_unbound_stdlib_value_without_tags(self):
+        out = run_patched("colibri2-stdlib", "import triage.sources as s\ns.Sources.tags = lambda self, url: []")
+        self.assertEqual(out.returncode, 0, out.stderr[-1500:])
+        sugg = json.loads(out.stdout)["suggestions"]
+        # Was an IndexError (no OCaml release): now the identifier is looked up in the libraries.
+        self.assertFalse([s for s in sugg if s.get("rule") == "rule-error"], sugg)
+        self.assertTrue(any(s.get("failing") == "colibri2.0.7" for s in sugg), sugg)
+
+
+class RuleErrorTest(unittest.TestCase):
+    """An exception in the rules for one job does not lose the other jobs."""
+
+    def test_one_job_fails(self):
+        out = run_patched("lwt-revdeps", """
+import triage.suggest as s
+_orig = s.suggest_for_job
+def boom(src, job, *a):
+    if "kinetic-client" in job["variant"]:
+        raise ValueError("boom " + "x" * 1000)
+    return _orig(src, job, *a)
+s.suggest_for_job = boom
+import triage.net
+triage.net.NET["mcp-errors"] = 2
+""")
+        self.assertEqual(out.returncode, 0, out.stderr[-1500:])
+        data = json.loads(out.stdout)
+        sugg = data["suggestions"]
+        err = [s for s in sugg if s.get("rule") == "rule-error"]
+        self.assertEqual(len(err), 1, sugg)
+        self.assertTrue(err[0]["error"].startswith("ValueError: boom"))
+        self.assertLess(len(err[0]["error"]), 400)
+        self.assertEqual((err[0]["class"], err[0]["fix_in"], err[0]["title"]),
+                         ("explanation", "unknown", "Analysis failed (tool error)"))
+        self.assertTrue(any(s.get("failing") == "passage.0.1.7" for s in sugg))
+        self.assertEqual((data["incomplete"], data["errors"]), (True, {"mcp-errors": 2}))
+
+
+class GitMirrorTest(NetTestBase):
+    """A git mirror whose files were deleted (cache pruning) is made again, and
+    git never runs in a repository found in a parent directory."""
+
+    def test_broken_mirror_reinitialised(self):
+        url = "https://example.invalid/repo"
+        cache = os.path.join(self.tmp, "checkout", ".opam-ci-cache")
+        os.makedirs(cache)
+        subprocess.run(["git", "init", "-q", os.path.join(self.tmp, "checkout")], check=True)
+        d = self.t.Sources(cache)._gitdir(url)
+        self.assertTrue(os.path.exists(os.path.join(d, "opam-ci-last-used")))
+        for f in ("HEAD", "config"):
+            os.remove(os.path.join(d, f))
+        d2 = self.t.Sources(cache)._gitdir(url)
+        self.assertEqual(d, d2)
+        cfg = subprocess.run(["git", "config", "--get", "remote.origin.url"], capture_output=True, text=True,
+                             env={**os.environ, "GIT_DIR": d})
+        self.assertEqual(cfg.stdout.strip(), url)
+        self.assertTrue(os.path.exists(os.path.join(d, "HEAD")))
+
+    def test_prune_step(self):
+        with open(os.path.join(HERE, "..", ".github", "workflows", "triage-page.yml")) as f:
+            wf = f.read()
+        m = re.search(r"- name: Prune cache[^\n]*\n(\s+)run: \|\n((?:\1  .*\n|\s*\n)+)", wf)
+        script = "\n".join(line[len(m.group(1)) + 2:] for line in m.group(2).splitlines())
+        c = os.path.join(self.tmp, ".opam-ci-cache")
+        files = {"old.json": 40, "new.json": 1, "git/used/HEAD": 40, "git/used/opam-ci-last-used": 2,
+                 "git/unused/HEAD": 40, "git/unused/opam-ci-last-used": 40, "git/nostamp/HEAD": 40}
+        for f, days in files.items():
+            p = os.path.join(c, f)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").close()
+            self.age(p, days)
+        subprocess.run(["bash", "-e", "-c", script], cwd=self.tmp, check=True, capture_output=True)
+        left = sorted(os.path.relpath(os.path.join(r, f), c) for r, _, fs in os.walk(c) for f in fs)
+        self.assertEqual(left, ["git/used/HEAD", "git/used/opam-ci-last-used", "new.json"])
+
+
+class PageRunTest(unittest.TestCase):
+    """scripts/triage_open_prs.py: retries, timeouts and GitHub errors."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+        self.T = T
+
+    def test_attempts_expire(self):
+        T = self.T
+        p = {"sha": "a", "ci_state": "FAILURE"}
+        now = time.time()
+        recent = datetime.datetime.fromtimestamp(now - 3600, datetime.timezone.utc).isoformat()
+        old = datetime.datetime.fromtimestamp(now - 2 * 86400, datetime.timezone.utc).isoformat()
+        prev = {"sha": "a", "ci_state": "FAILURE", "tool_version": "v", "result": {}, "attempts": T.MAX_ATTEMPTS,
+                "mcp_errors": 2, "analysed_at": recent}
+        self.assertEqual(T.reuse(prev, p, "v", False, now), (True, True, False))
+        self.assertEqual(T.reuse(dict(prev, analysed_at=old), p, "v", False, now), (False, True, True))
+        self.assertEqual(T.reuse(dict(prev, mcp_errors=0, net_errors=1, attempts=1), p, "v", False, now),
+                         (False, True, True))
+        self.assertEqual(T.attempts_used(dict(prev, analysed_at=old), now), 0)
+        failed = dict(prev, result=None, mcp_errors=0)
+        self.assertTrue(T.keep_failed(failed, now))
+        self.assertFalse(T.keep_failed(dict(failed, analysed_at=old), now))
+        self.assertFalse(T.keep_failed(dict(failed, attempts=1), now))
+
+    def test_timeout_keeps_counts(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            tool = os.path.join(d, "slow_tool.py")
+            with open(tool, "w") as f:
+                f.write("import sys, time\nsys.path.insert(0, %r)\nfrom triage.net import NET\n"
+                        "NET['llm'] = 1\nNET['mcp-errors'] = 2\ntime.sleep(60)\n" % os.path.join(HERE, ".."))
+            t0 = time.monotonic()
+            result, err, net = self.T.run_tool([], 3, tool=tool)
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertIsNone(result)
+        self.assertIn("timeout", err)
+        self.assertEqual((net.get("llm"), net.get("mcp-errors"), net.get("timeout")), (1, 2, 1))
+
+    def test_graphql_errors(self):
+        from unittest import mock
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+        data = {"repository": {"pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": [None]}}}
+        answers = [{"errors": [{"message": "Something went wrong"}]},
+                   {"data": {"repository": None}, "errors": [{"message": "timeout"}]},
+                   {"data": data, "errors": [{"message": "one node failed"}]}]
+        with mock.patch.object(self.T.urllib.request, "urlopen",
+                               side_effect=[Resp(json.dumps(a).encode()) for a in answers]), \
+                mock.patch.object(self.T.time, "sleep"):
+            self.assertEqual(self.T.graphql("q", {}, "tok"), data)
+        with mock.patch.object(self.T, "graphql", return_value=data):
+            self.assertEqual(self.T.list_open_prs("tok"), ([], 1))
 
 
 class PageTest(unittest.TestCase):

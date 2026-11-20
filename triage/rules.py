@@ -230,12 +230,16 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
             out["note"] = "The identifier has no module path, so the tool cannot tell which package it comes from."
             return out
         # Stdlib?
-        rel = ocaml_releases(src)
-        latest, t414 = rel[-1], "4.14.0"
+        rel = ocaml_releases(src)              # [] if the OCaml tags could not be listed
+        latest, t414 = (rel[-1] if rel else None), "4.14.0"
         top_m = mods[1] if top == "Stdlib" and len(mods) > 1 else top
         def stdlib_mli(r, m):
             return src.raw(f"https://raw.githubusercontent.com/ocaml/ocaml/{r}/stdlib/{m.lower()}.mli")
-        if stdlib_mli(latest, top_m) or stdlib_mli(t414, top_m):
+        if (latest and stdlib_mli(latest, top_m)) or stdlib_mli(t414, top_m):
+            if not rel:
+                out["note"] = ("Standard library identifier, but the OCaml releases could not be listed "
+                               "(git ls-remote failed): the tool could not check which releases have it.")
+                return out
             inner = mods[2:] if top == "Stdlib" else mods[1:]
 
             def check(r):
@@ -312,7 +316,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                                                    f"not a version problem of {pkg}")
                 continue
             bounds = existing_bounds(opam_text, pkg)
-            res, ev = bisect_presence(check, src.versions(pkg), bad,
+            res, ev = bisect_presence(check, src.versions(pkg) or [], bad,
                                       allowed=lambda v, b=bounds: satisfies(v, [x for x in b if x[0] != "="]))
             out["evidence"] = {f"{pkg} {v}": r for v, r in sorted(ev.items(), key=lambda kv: functools.cmp_to_key(opam_vcmp)(kv[0]))}
             out["evidence"][f"{pkg} {bad} (installed in failing job)"] = False
@@ -387,7 +391,7 @@ def complete_test_output(src, r, job, text, data, cache_dir):
     r["candidates"] = []
     for p, good_v, bad_v in diffs[:4]:
         if opam_vcmp(bad_v, good_v) > 0:
-            vs = [v for v in src.versions(p) if opam_vcmp(v, good_v) > 0]
+            vs = [v for v in src.versions(p) or [] if opam_vcmp(v, good_v) > 0]
             first = vs[0] if vs else bad_v
             # Test-only: keep the main constraint, add a separate with-test line.
             c = {"dep": p, "passing": good_v, "failing": bad_v, "old": None,
@@ -660,8 +664,12 @@ def log_rules(src, err, fname, opam_text, info, job):
         elif conf in deps:
             r.update(note=f"{conf} is a dependency, but `{tool}` is missing on {platform}: {conf} lacks a depext for it.",
                      confidence="medium")
-        elif src.versions(conf):
+        elif vs := src.versions(conf):
             r.update(dep=conf, old=None, new=f'"{conf}" {{build}}   (new line in depends)', confidence="medium")
+        elif vs is None:
+            r.update(note=f"`{tool}` is missing on {platform}. The tool could not check whether a {conf} package "
+                          f"exists (ocaml.org did not answer): if it does, add it to depends; otherwise add a "
+                          f"depext providing `{tool}`.", confidence="low")
         else:
             r.update(note=f"There is no {conf} package: add a depext providing `{tool}` on {platform}.", confidence="low")
         return r
@@ -673,8 +681,12 @@ def log_rules(src, err, fname, opam_text, info, job):
         if conf in deps:
             r.update(note=f"{conf} is a dependency, but its pkg-config file is missing on {platform}: {conf} lacks a depext for it.",
                      confidence="medium")
-        elif src.versions(conf):
+        elif vs := src.versions(conf):
             r.update(dep=conf, old=None, new=f'"{conf}"   (new line in depends)', confidence="medium")
+        elif vs is None:
+            r.update(note=f"{m.group(1)}.pc is missing on {platform}. The tool could not check whether a {conf} "
+                          f"package exists (ocaml.org did not answer): if it does, add it to depends; otherwise "
+                          f"add a depext providing {m.group(1)}.pc.", confidence="low")
         else:
             r.update(note=f"Add a depext providing {m.group(1)}.pc on {platform}.", confidence="low")
         return r
@@ -703,9 +715,14 @@ def log_rules(src, err, fname, opam_text, info, job):
         elif pkg in deps or pkg == fname:
             r.update(note=f"{pkg} is already a dependency: `{lib}` may only exist in other versions of {pkg}, "
                           f"or be an optional sub-library.", confidence="low")
-        elif src.versions(pkg):
+        elif vs := src.versions(pkg):
             filt = " {with-test}" if in_tests else ""
             r.update(dep=pkg, old=None, new=f'"{pkg}"{filt}   (new line in depends)', confidence="medium")
+        elif vs is None:
+            r.update(note=f"The tool could not check whether {pkg} is an opam package (ocaml.org did not "
+                          f"answer): if it is, add it to depends; otherwise `{lib}` is probably an internal "
+                          f"library missing from the release archive, or excluded by `-p {fname}`.",
+                     confidence="low")
         else:
             r.update(note=f"`{lib}` is not an opam package. It is probably an internal library missing from the "
                           f"release archive, or excluded by `-p {fname}`.", confidence="medium")
@@ -771,7 +788,7 @@ def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
     cands = []
     for _, dv, d, v in newer[:3]:
         # first version released after `day`: binary search on release dates
-        vs = [w for w in src.versions(d) if opam_vcmp(w, v) <= 0]
+        vs = [w for w in src.versions(d) or [] if opam_vcmp(w, v) <= 0]
         lo, hi = 0, len(vs) - 1                  # vs[hi] == v is after `day`
         while lo < hi:
             mid = (lo + hi) // 2
@@ -937,7 +954,7 @@ def previous_release_bound(src, job, text, info, pr_packages, pr_sha, cache):
     if pkg not in pr_packages:
         return None
     if pkg not in cache:
-        older = [v for v in src.versions(fname) if opam_vcmp(v, fver) < 0]
+        older = [v for v in src.versions(fname) or [] if opam_vcmp(v, fver) < 0]
         prev = max(older, key=functools.cmp_to_key(opam_vcmp)) if older else None
         cur = src.opam_file(fname, fver, pr_sha)
         prev_text = src.opam_file(fname, prev) if prev else None

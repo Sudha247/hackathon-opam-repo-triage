@@ -22,6 +22,7 @@ from .net import (  # noqa: F401
     NET,
     cached_json,
     fetch,
+    write_atomic,
 )
 from .ci import (  # noqa: F401
     NEUTRAL,
@@ -166,9 +167,7 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
         return {"llm_error": f"stopped: {resp.stop_reason}"}
     out = json.loads(next(b.text for b in resp.content if b.type == "text"))
     out["llm_usage"] = {"input": resp.usage.input_tokens, "output": resp.usage.output_tokens, "model": resp.model}
-    os.makedirs(cache_dir, exist_ok=True)
-    with open(disk, "w") as f:
-        json.dump(out, f)
+    write_atomic(disk, json.dumps(out))
     return out
 
 

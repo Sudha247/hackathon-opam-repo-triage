@@ -7,12 +7,14 @@ import functools
 import gzip
 import hashlib
 import html
+import http.client
 import html.parser
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -23,7 +25,28 @@ import urllib.request
 BASE = "https://opam.ci.ocaml.org/github/ocaml/opam-repository/commit/"
 
 
-NET = {"http": 0, "mcp": 0, "git": 0, "github-api": 0}   # requests actually sent (cache misses)
+class _Counts(dict):
+    """Request counts. With OPAM_CI_NET_FILE set, they are also written to
+    that file (JSON) on every change: a caller that kills the tool (a
+    timeout) still knows what it did, LLM calls included."""
+
+    def __setitem__(self, k, v):
+        super().__setitem__(k, v)
+        path = os.environ.get("OPAM_CI_NET_FILE")
+        if path:
+            try:
+                write_atomic(path, json.dumps(self))
+            except OSError:
+                pass
+
+
+# Requests actually sent (cache misses). "mcp-errors" and "net-errors" count
+# the failed ones (transient: not cached); the analysis is then incomplete.
+NET = _Counts({"http": 0, "mcp": 0, "git": 0, "github-api": 0})
+
+
+# Network failures treated as transient: not cached, counted.
+NET_ERRORS = (OSError, http.client.HTTPException)
 
 
 # OPAM_CI_OFFLINE=1 (used by the tests): everything must come from the cache;
@@ -46,16 +69,47 @@ USER_AGENT = "opam-ci-triage"
 # Fetching
 
 
+def write_atomic(path, data):
+    """Write `data` (str) to `path` through a temporary file in the same
+    directory, renamed over it: a killed process leaves the old file or none,
+    never a truncated one. Nothing is written offline (the tests use their
+    fixtures as the cache), except the request counts' file."""
+    if OFFLINE and path != os.environ.get("OPAM_CI_NET_FILE"):
+        return
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def fresh(path, max_age):
+    """Is the file at `path` younger than `max_age` seconds (None: no limit;
+    offline, everything is)?"""
+    return max_age is None or OFFLINE or time.time() - os.path.getmtime(path) < max_age
+
+
 def cached_json(path, max_age=None):
     """The JSON stored at `path`, or in its gzip-compressed copy (test
     fixtures), or None if there is neither (or it is older than `max_age`
-    seconds, except offline)."""
+    seconds, except offline, or unreadable)."""
     for p, opener in ((path, open), (path + ".gz", gzip.open)):
         if os.path.exists(p):
-            if max_age is not None and not OFFLINE and time.time() - os.path.getmtime(p) >= max_age:
+            if not fresh(p, max_age):
                 return None
-            with opener(p, "rt", encoding="utf-8") as f:
-                return {"value": json.load(f)}
+            try:
+                with opener(p, "rt", encoding="utf-8") as f:
+                    return {"value": json.load(f)}
+            except (OSError, ValueError, EOFError):    # truncated or corrupt: a miss
+                return None
     return None
 
 
@@ -63,15 +117,22 @@ def cache_path(url, cache_dir):
     return os.path.join(cache_dir, hashlib.sha256(url.encode()).hexdigest()[:32] + ".html")
 
 
-def fetch(url, cache_dir, refresh=False):
+# A page that did not exist (404) is fetched again after a day.
+NOT_FOUND_MAX_AGE = 24 * 3600
+
+
+def fetch(url, cache_dir, refresh=False, max_age=None):
+    """The body of `url`, cached on disk (fetched again when the cached copy
+    is older than `max_age` seconds, except offline)."""
     path = cache_path(url, cache_dir)
-    if not refresh and os.path.exists(path):
+    if not refresh and os.path.exists(path) and fresh(path, max_age):
         with open(path, encoding="utf-8") as f:
             return f.read()
     if not refresh and os.path.exists(path + ".gz"):       # compressed test fixtures
         with gzip.open(path + ".gz", "rt", encoding="utf-8") as f:
             return f.read()
-    if not refresh and os.path.exists(path + ".404"):      # known not to exist (e.g. a file in a tag)
+    if (not refresh and os.path.exists(path + ".404")      # known not to exist (e.g. a file in a tag)
+            and fresh(path + ".404", min(max_age or NOT_FOUND_MAX_AGE, NOT_FOUND_MAX_AGE))):
         raise urllib.error.HTTPError(url, 404, "Not Found (cached)", None, None)
     if OFFLINE:
         offline_miss(url)
@@ -85,17 +146,14 @@ def fetch(url, cache_dir, refresh=False):
             break
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                os.makedirs(cache_dir, exist_ok=True)
-                open(path + ".404", "w").close()
+                write_atomic(path + ".404", "")
             if e.code not in (429, 502, 503) or attempt == 5:
                 raise
             delay = int(e.headers.get("Retry-After") or 0) or 2 ** (attempt + 1)
             time.sleep(min(delay, 60))
     if not body:
         raise RuntimeError(f"empty response for {url}")
-    os.makedirs(cache_dir, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(body)
+    write_atomic(path, body)
     return body
 
 
@@ -150,11 +208,14 @@ def gh_api(path, cache_dir=".opam-ci-cache", cache=True):
         if e.code in (403, 429) and not tok:
             print("note: GitHub API rate limit reached (60/hour without a token); "
                   "set GITHUB_TOKEN to raise it", file=sys.stderr)
+        if e.code != 404:
+            NET["net-errors"] = NET.get("net-errors", 0) + 1
+        return None
+    except NET_ERRORS + (ValueError,):         # network error, unreadable answer: transient
+        NET["net-errors"] = NET.get("net-errors", 0) + 1
         return None
     if cache or os.environ.get("OPAM_CI_RECORD") == "1":     # recording fixtures keeps everything
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(disk, "w") as f:
-            json.dump(v, f)
+        write_atomic(disk, json.dumps(v))
     _GH_CACHE[path] = v
     return v
 
@@ -184,13 +245,17 @@ def safe_git_url(url):
     return bool(url) and SAFE_GIT_URL.fullmatch(url) is not None
 
 
-def git(args, cwd=None, check=True):
+def git(args, cwd=None, check=True, git_dir=None):
+    """Run git. With `git_dir`, on that repository only (GIT_DIR): git never
+    falls back to a repository found in a parent directory."""
     if args[0] in ("fetch", "ls-remote") and OFFLINE:
         offline_miss("git " + " ".join(args[:4]))
         return subprocess.CompletedProcess(args, 1, "", "offline")
     if args[0] in ("fetch", "ls-remote", "cat-file"):
         NET["git"] += 1
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if git_dir:
+        env["GIT_DIR"] = git_dir
     if OFFLINE:
         env["GIT_NO_LAZY_FETCH"] = "1"          # a partial clone must not fetch missing objects
     timeout = GIT_FETCH_TIMEOUT if args[0] == "fetch" else GIT_TIMEOUT

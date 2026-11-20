@@ -466,7 +466,7 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                     r.update(note="Use an SPDX identifier (https://spdx.org/licenses/).", confidence="medium")
             elif "warning 68" in text and "license" in text:
                 lic, origin = None, None
-                for v in [v for v in reversed(src.versions(name)) if v != ver][:2]:
+                for v in [v for v in reversed(src.versions(name) or []) if v != ver][:2]:
                     lic = opam_field(src.opam_file(name, v), "license")
                     if lic:
                         origin = f"{name}.{v} in opam-repository"
@@ -646,7 +646,7 @@ def accepted_elsewhere(results, src, pr_packages, max_versions=3):
         else:
             continue
         if name not in cache:
-            others = [v for v in reversed(src.versions(name)) if v != ver][:max_versions]
+            others = [v for v in reversed(src.versions(name) or []) if v != ver][:max_versions]
             cache[name] = {v: accepted_platforms(src.opam_file(name, v)) for v in others}
         found = {v: sorted(acc & wanted) for v, acc in cache[name].items() if acc & wanted}
         if not found:
