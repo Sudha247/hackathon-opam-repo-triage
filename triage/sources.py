@@ -231,12 +231,21 @@ class Sources:
     def mcp(self, tool, _max_age=None, **args):
         """Call an ocaml.org MCP tool; parsed JSON result, or None on error.
         Answers are cached on disk, including the tool's own errors (an unknown
-        package, a version without docs), as None, for a day; with `_max_age`
+        package, a version without docs), as None, and documentation answers
+        whose status is not success, for a day; with `_max_age`
         (seconds), an older answer is fetched again (for data that changes,
         like health-check results). A call that fails (network error, timeout,
         HTTP error, unreadable answer) is not cached and is counted in
         NET["mcp-errors"]: the analysis is then incomplete."""
         return self._mcp(tool, _max_age, args)[0]
+
+    @staticmethod
+    def _short_lived(v):
+        """Whether an MCP answer is kept a day only (MCP_ERROR_MAX_AGE): the
+        tool's error (None), or documentation not built (yet): a
+        `documentation_status` other than success ("unknown", "pending",
+        "failed"...), which changes when ocaml.org builds it."""
+        return v is None or (isinstance(v, dict) and v.get("documentation_status") not in (None, "success"))
 
     def _mcp(self, tool, max_age, args):
         """mcp(): (value, answered), `answered` False when the call failed
@@ -246,7 +255,7 @@ class Sources:
             return self.mem[key], True
         disk = os.path.join(self.cache_dir, "mcp-" + hashlib.sha256(key.encode()).hexdigest()[:24] + ".json")
         hit = cached_json(disk, max_age=max_age)
-        if hit and hit["value"] is None:
+        if hit and self._short_lived(hit["value"]):
             hit = cached_json(disk, max_age=min(max_age or self.MCP_ERROR_MAX_AGE, self.MCP_ERROR_MAX_AGE))
         if hit:
             v = hit["value"]

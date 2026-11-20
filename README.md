@@ -123,7 +123,7 @@ Failures that would happen without the PR are marked "Pre-existing" in the note:
 
 - packages the PR only modifies by adding an upper bound that excludes a version it adds (their dependency solution is the same as on master; read from the PR's diff, the same GitHub call as above);
 - jobs that also failed in the CI run of the PR that published the previous release of the package (same platform, same job, and the same failure: category and reason, the version left out; 2 GitHub calls and one page per package, skipped when the old run has been purged). When the release's own build fails at the same step but the reason does not show the error (`The compilation of … failed at "dune build …"`), the note says so, and the triage page does not count the failure as happening without the PR;
-- reverse dependencies that opam-health-check also sees failing on master (from ocaml.org's MCP `ocaml_package_build_information`; same version and OCaml version, build only, as opam-health-check builds the newest version of each package without tests; one request per package, cached for a day).
+- reverse dependencies that opam-health-check also sees failing on master (from ocaml.org's MCP `ocaml_package_build_information`; same version and OCaml version, build only, as opam-health-check builds the newest version of each package without tests; one request per package, cached for a day). A run older than 7 days (a stuck service) is not used, and the tool says so (`note:` on stderr).
 
 Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Broken by this PR (builds on master)": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready).
 
@@ -331,7 +331,8 @@ job's summary.
 5. The GitHub REST API, only for `--pr` and for `compare`'s baseline lookup (2–3 calls). It works without a token (60 requests per hour); `GITHUB_TOKEN`, `GH_TOKEN` or a logged-in `gh` are used if present.
 
 Results are cached in `.opam-ci-cache/` (the tool's own errors from ocaml.org,
-pages that do not exist and opam files of master are asked again after a day).
+documentation answers whose status is not `success` (not built yet), pages
+that do not exist and opam files of master are asked again after a day).
 `suggest` prints the number of network requests it actually sent, with
 `mcp-errors`, the ocaml.org MCP calls that failed (after three, ocaml.org is
 not called again in that run), and `net-errors`, the other requests that

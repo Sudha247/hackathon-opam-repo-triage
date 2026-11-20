@@ -455,6 +455,39 @@ class RulesTest(unittest.TestCase):
         self.assertFalse(render_page.not_this_pr({"preexisting": "x", "preexisting_unverified": True}))
         self.assertTrue(render_page.not_this_pr({"preexisting": "x"}))
 
+    def test_old_health_check_run_ignored(self):
+        # An opam-health-check run older than a week describes an older
+        # master: neither "pre-existing" nor "Broken by this PR" from it.
+        from unittest import mock
+        import contextlib
+        from triage import context
+        today = datetime.date.today()
+        jobs = [job("compilers,4.14,x.2,revdeps,r.1"), job("compilers,4.14,x.2,revdeps,g.1")]
+
+        class Src:
+            def __init__(self, date):
+                self.date = date
+
+            def mcp(self, tool, _max_age=None, package=None, **a):
+                status = "bad" if package == "r" else "good"
+                return {"run": {"date": self.date}, "results": [
+                    {"package": package, "version": "1", "builds": [{"compiler": "4.14", "status": status}]}]}
+
+            def versions(self, name):
+                return []
+        for days, used in ((2, True), (30, False)):
+            notes, err = {}, io.StringIO()
+            date = (today - datetime.timedelta(days=days)).isoformat()
+            with mock.patch.object(context, "OFFLINE", False), contextlib.redirect_stderr(err), \
+                    mock.patch.object(context, "find_baseline_commit", lambda *a: None):
+                pre = context.preexisting_failures({"jobs": jobs}, "s", None, "d", Src(date), notes)
+            self.assertEqual(bool(pre), used, days)
+            self.assertEqual(bool(notes.get("new")), used, days)
+            self.assertEqual("not used" in err.getvalue(), not used, err.getvalue())
+        self.assertFalse(context.health_run_stale(None))
+        self.assertTrue(context.health_run_stale("2026-11-01", today=datetime.date(2026, 11, 20)))
+        self.assertFalse(context.health_run_stale("2026-11-14", today=datetime.date(2026, 11, 20)))
+
     def test_unanalysed_count(self):
         # Failures beyond --max are counted in the JSON output.
         env = {**os.environ, "OPAM_CI_OFFLINE": "1", "OPAM_CI_RECORD": "0"}
@@ -664,6 +697,28 @@ class McpRobustnessTest(NetTestBase):
         src.MCP_URL = srv.url
         src.mcp("ocaml_package_documentation", package="x", version="1")
         self.assertEqual(len(srv.requests), 2)                    # ...for a day
+
+    def test_docs_not_built_expire(self):
+        # Documentation not built (yet) is an answer, not an error, but it
+        # changes when ocaml.org builds the docs: kept a day; built docs are kept.
+        answers = {"1": {"documentation_status": "unknown"}, "2": {"documentation_status": "success",
+                                                                    "libraries": []}}
+        srv = Serve(lambda body: mcp_answer(answers[json.loads(body)["params"]["arguments"]["version"]]))
+        self.addCleanup(srv.close)
+
+        def ask(version):
+            src = self.t.Sources(self.tmp)
+            src.MCP_URL = srv.url
+            return src.mcp("ocaml_package_documentation", package="x", version=version)
+        for v in ("1", "2"):
+            self.assertEqual(ask(v), answers[v])
+            ask(v)
+        self.assertEqual(len(srv.requests), 2)                    # cached
+        for f in os.listdir(self.tmp):
+            self.age(os.path.join(self.tmp, f), 2)
+        ask("1")
+        ask("2")
+        self.assertEqual(len(srv.requests), 3)                    # only the one without docs asked again
 
     def test_rules_do_not_assert_on_no_answer(self):
         from triage import rules

@@ -3,6 +3,7 @@
 import argparse
 import collections
 import concurrent.futures
+import datetime
 import functools
 import gzip
 import hashlib
@@ -20,6 +21,7 @@ import urllib.request
 
 from .net import (  # noqa: F401
     BASE,
+    OFFLINE,
     REPO,
     fetch,
     gh_api,
@@ -137,6 +139,25 @@ def health_check(src, name, cache):
         cache[name] = res and ({b["compiler"]: (b["status"], b.get("log_url")) for b in res.get("builds", [])},
                                res.get("version"), ((r or {}).get("run") or {}).get("date"))
     return cache[name]
+
+
+# opam-health-check runs about daily: a run older than this (the service is
+# stuck, or ocaml.org's copy is) describes an older master, and its results
+# are not used.
+HEALTH_MAX_AGE_DAYS = 7
+
+
+def health_run_stale(date, today=None):
+    """Whether an opam-health-check run of `date` (YYYY-MM-DD...) is older than
+    HEALTH_MAX_AGE_DAYS. An undated run is used; offline, the test fixtures
+    are snapshots: never stale."""
+    if OFFLINE or not date:
+        return False
+    try:
+        d = datetime.date.fromisoformat(str(date)[:10])
+    except ValueError:
+        return False
+    return ((today or datetime.date.today()) - d).days > HEALTH_MAX_AGE_DAYS
 
 
 def health_summary(notes, src=None):
@@ -269,7 +290,7 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
             notes["added"] = {m.group(1) for f in d.get("files", []) if f.get("status") == "added"
                               for m in [re.match(r"packages/[^/]+/([^/]+)/opam$", f.get("filename", ""))] if m}
     if src is not None:
-        cache, asked, newest = {}, set(), {}
+        cache, asked, newest, stale = {}, set(), {}, set()
 
         def is_newest(target):
             # opam-health-check builds a reverse dependency with the newest
@@ -291,6 +312,9 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
             asked.add(name)
             hc = health_check(src, name, cache)
             if not hc or hc[1] != ver or d["ocaml"] not in hc[0]:
+                continue
+            if health_run_stale(hc[2]):
+                stale.add(hc[2])
                 continue
             status, log = hc[0][d["ocaml"]]
             when = (f"opam-health-check, OCaml {d['ocaml']}, {short_date(hc[2])}" if hc[2]
@@ -314,6 +338,10 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
             if status == "good" and notes is not None:
                 notes.setdefault("new", {})[failure_key(j)] = (
                     f"{rd} builds on master ({when}), so this PR probably causes this failure.")
+        if stale:
+            print(f"note: opam-health-check's latest results are from {short_date(max(stale))}, more than "
+                  f"{HEALTH_MAX_AGE_DAYS} days ago: not used to tell pre-existing failures from new ones",
+                  file=sys.stderr)
     out = {}
     for j in failing:
         out.setdefault(failure_key(j), []).append(per_job.get(j["variant"]))
