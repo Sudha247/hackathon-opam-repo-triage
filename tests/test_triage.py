@@ -979,6 +979,53 @@ class ApiHistoryTest(NetTestBase):
         h = self.src(srv2).api_history("foo", ["Stdlib", "List"], "value", "x", ["1.0", "1.1"])
         self.assertEqual(h["versions"], {"1.0": "absent", "1.1": "present"})
 
+    def test_ambiguous_module_chosen_by_identifier(self):
+        # Newer servers check the modules of that name for the identifier: the
+        # only one that has it, when all of them could be checked, is the code's.
+        def answer(**extra):
+            return lambda p: mcp_answer(history_answer({"1.0": "absent", "1.1": "present"},
+                                                       module="Stdlib.List",
+                                                       ambiguous_with=["Parameter.List"], **extra))
+        h = self.src(self.serve(answer(resolved_by="identifier"))).api_history(
+            "foo", ["List"], "value", "x", ["1.0", "1.1"])
+        self.assertEqual((h["versions"], h["module"]), ({"1.0": "absent", "1.1": "present"}, "Stdlib.List"))
+        # Another module of that name could not be checked (its page unread, or past
+        # the first 5), or the tool chose by name or order: maybe not the code's.
+        for extra in ({"resolved_by": "identifier", "unchecked": ["Parameter.List"]},
+                      {"resolved_by": "stdlib"}, {"resolved_by": "order"}):
+            for f in os.listdir(self.tmp):
+                os.remove(os.path.join(self.tmp, f))
+            self.assertIsNone(self.src(self.serve(answer(**extra))).api_history(
+                "foo", ["List"], "value", "x", ["1.0", "1.1"]), extra)
+
+    def test_found_false(self):
+        # Newer servers answer an item in no version checked with each version's
+        # status ("found": false) rather than an error: it is absent where documented.
+        from triage.sources import history_presence as pres
+        none = {"1.0": "absent", "1.1": "no-docs", "2.0": "absent"}
+        answers = {"constructor": mcp_answer(history_answer(none, found=False)),
+                   "exception": mcp_answer(history_answer({"1.0": "absent", "1.1": "no-docs", "2.0": "present"},
+                                                          found=True))}
+        srv = self.serve(lambda p: answers[p["arguments"]["kind"]])
+        before = self.errors()
+        # A constructor may be an exception's: asked as one too.
+        h = self.src(srv).api_history("foo", ["M"], "constructor", "Foo", ["1.0", "2.0"])
+        self.assertEqual([json.loads(r)["params"]["arguments"]["kind"] for r in srv.requests],
+                         ["constructor", "exception"])
+        self.assertEqual(h["versions"]["2.0"], "present")
+        # Of no kind: the first answer's statuses; the versions without docs are left to the callers.
+        answers["exception"] = mcp_answer(history_answer(none, found=False))
+        for f in os.listdir(self.tmp):
+            os.remove(os.path.join(self.tmp, f))
+        h = self.src(srv).api_history("foo", ["M"], "constructor", "Foo", ["1.0", "2.0"])
+        self.assertEqual([pres(h, v) for v in none], [False, "no-docs", False])
+        self.assertEqual((len(srv.requests), self.errors()), (4, before))
+        # Not found in an ambiguous module chosen by order: maybe in the code's.
+        srv2 = self.serve(lambda p: mcp_answer(history_answer(none, found=False, module="Parameter.List",
+                                                              ambiguous_with=["Stdlib.List"],
+                                                              resolved_by="order")))
+        self.assertIsNone(self.src(srv2).api_history("foo", ["List"], "value", "x", ["1.0", "2.0"]))
+
     def test_partial_is_a_failure(self):
         # docs-ci could not be read for a version: what was read is used, the
         # rest is unknown, the call counts as failed and is not cached.

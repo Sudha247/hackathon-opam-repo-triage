@@ -467,13 +467,19 @@ class Sources:
         module missing), "page-truncated", "no-docs", "docs-failed", or a
         failure ("docs-unavailable", "error", "skipped": the answer is partial,
         counted in NET["mcp-errors"]); a version the tool did not check has
-        none. See history_presence. None when the tool gives no history: not
-        deployed, a failed call (counted in NET["mcp-errors"]), no module path
-        (an unbound top-level module), or its error (an unknown package or
-        version, the item in no documented version: then the callers look
-        version by version, which also covers the versions without docs), and
-        when the module path names several modules ("ambiguous_with"): the
-        tool's answer may be about another module than the code's."""
+        none. See history_presence. An item in no version checked (and of no
+        other kind it may be: a constructor may be an exception's) is
+        "absent" in each documented version ("found": false; older servers
+        answer with an error instead, which gives no history). None when the
+        tool gives no history: not deployed, a failed call (counted in
+        NET["mcp-errors"]), no module path (an unbound top-level module), its
+        error (an unknown package or version; on older servers, the item in no
+        documented version: then the callers look version by version, which
+        also covers the versions without docs), and when the module path names
+        several modules ("ambiguous_with") and the tool may have used another
+        module than the code's: unless it chose the only one that has the item
+        and could check them all ("resolved_by": "identifier", none
+        "unchecked")."""
         if not mods or not versions:
             return None
         cmp = functools.cmp_to_key(opam_vcmp)
@@ -481,7 +487,7 @@ class Sources:
         key = ("api-history", pkg, tuple(mods), kind, ident, lo, hi)
         if key in self.mem:
             return self.mem[key]
-        out = None
+        out = absent = None
         for k in self.API_KINDS.get(kind, ["any"]):
             args = {"package": pkg, "module": ".".join(mods), "identifier": ident, "kind": k,
                     "from_version": lo, "to_version": hi, "max_versions": self.API_HISTORY_MAX_VERSIONS}
@@ -497,16 +503,24 @@ class Sources:
             # The module path names several modules ("List" in ocaml-base-compiler's
             # docs: compiler-libs' Parameter.List and Stdlib.List): the tool used one
             # of them, maybe not the code's. No answer: the callers look version by
-            # version, through the module path as written.
-            if d.get("ambiguous_with") and d.get("resolved_module") != ".".join(mods):
+            # version, through the module path as written. Unless the tool checked
+            # them all and only one has the item: that one is the code's.
+            if (d.get("ambiguous_with") and d.get("resolved_module") != ".".join(mods)
+                    and not (d.get("resolved_by") == "identifier" and not d.get("unchecked"))):
+                absent = None
                 break
             statuses = {e["version"]: e["status"] for e in d["versions"]
                         if isinstance(e, dict) and isinstance(e.get("version"), str)
                         and isinstance(e.get("status"), str)}
-            out = {"versions": statuses,
-                   "module": d["resolved_module"] if isinstance(d.get("resolved_module"), str) else None,
-                   "partial": not answered}
+            hist = {"versions": statuses,
+                    "module": d["resolved_module"] if isinstance(d.get("resolved_module"), str) else None,
+                    "partial": not answered}
+            if d.get("found") is False:
+                absent = absent or hist     # in no version checked: maybe of the next kind
+                continue
+            out = hist
             break
+        out = out or absent
         self.mem[key] = out
         return out
 
