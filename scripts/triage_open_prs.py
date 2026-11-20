@@ -411,10 +411,10 @@ def main():
         t0 = time.monotonic()
         summary = None
         # Jobs rebuilt since the previous analysis: the first run of the tool
-        # fetches the CI page again and drops the cached logs of its jobs. A
-        # page is not cached while CI runs, and the logs of jobs finished by
-        # then are final: nothing to refresh after a PENDING analysis.
-        refresh = ["--refresh"] if ci_changed(prev, p) and prev.get("ci_state") != "PENDING" else []
+        # fetches the CI page again and drops the cached logs of its jobs. Also
+        # after an analysis made while CI was running: a job whose log was read
+        # then may have been rebuilt since ("Rebuild failed" during the run).
+        refresh = ["--refresh"] if ci_changed(prev, p) else []
         if refresh:
             stats["refreshed"] += 1
         if p["ci_state"] == "PENDING":
