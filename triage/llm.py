@@ -33,6 +33,9 @@ from .ci import (  # noqa: F401
 from .rules import (  # noqa: F401
     log_info,
 )
+from .md import (  # noqa: F401
+    md_code,
+)
 
 
 # --------------------------------------------------------------------------
@@ -250,7 +253,9 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         if change and LLM_UNSAFE_CHANGE.search(change):
             # Version bounds and depext package names were the model's wrong
             # changes in the evaluation: shown as text to check, not as a diff.
-            r["note"] += f" Possible change, not checked: `{change.strip()}`."
+            # A code span (on one line, fenced by more backticks than it has):
+            # the Markdown comment shows it as code, never as Markdown.
+            r["note"] += f" Possible change, not checked: {md_code(change)}."
         elif change:
             r.update(old=res.get("change_old") or None, new=change)
     if len(seen) < len({re.sub(r"\d+", "N", (r.get("error") or r.get("failing") or r["variant"]))[:120]

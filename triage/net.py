@@ -171,6 +171,19 @@ def gh_api(path, cache_dir=".opam-ci-cache", cache=True):
 # file list, and single files are read from raw.githubusercontent.com (GitHub)
 # or fetched on demand by git (other hosts). Each suggestion carries its evidence.
 
+# Upstream git URLs come from the dev-repo and src fields of opam files
+# (untrusted): only plain https URLs reach git, after `--` where git takes
+# it, and git may only use the https transport (no ssh://, file://, ext::).
+SAFE_GIT_URL = re.compile(r"https://[A-Za-z0-9][A-Za-z0-9.-]*/[^\s]+")
+GIT_PROTOCOLS = ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always"]
+GIT_TIMEOUT = 60
+GIT_FETCH_TIMEOUT = 180          # a shallow blob-less fetch of a large repository
+
+
+def safe_git_url(url):
+    return bool(url) and SAFE_GIT_URL.fullmatch(url) is not None
+
+
 def git(args, cwd=None, check=True):
     if args[0] in ("fetch", "ls-remote") and OFFLINE:
         offline_miss("git " + " ".join(args[:4]))
@@ -180,7 +193,12 @@ def git(args, cwd=None, check=True):
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     if OFFLINE:
         env["GIT_NO_LAZY_FETCH"] = "1"          # a partial clone must not fetch missing objects
-    out = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, env=env)
+    timeout = GIT_FETCH_TIMEOUT if args[0] == "fetch" else GIT_TIMEOUT
+    try:
+        out = subprocess.run(["git"] + GIT_PROTOCOLS + args, cwd=cwd, capture_output=True, text=True, env=env,
+                             timeout=timeout)
+    except subprocess.TimeoutExpired:
+        out = subprocess.CompletedProcess(args, 124, "", f"timed out after {timeout} s")
     if check and out.returncode != 0:
         raise RuntimeError(f"git {' '.join(args[:3])}...: {out.stderr.strip()[:200]}")
     return out
@@ -196,4 +214,5 @@ def repo_url(dev_repo):
     if m:          # also archive URLs: https://github.com/o/r/releases/... -> repo
         return m.group(1)
     u = re.sub(r"/-/(archive|tags|tree)/.*$", "", u)   # GitLab archive URLs (nested groups kept)
-    return u.removesuffix("/")
+    u = u.removesuffix("/")
+    return u if safe_git_url(u) else None

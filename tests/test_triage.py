@@ -26,6 +26,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "..", "opam_repo_ci_triage.py")
 FIXTURES = os.path.join(HERE, "fixtures")
+BASE_URL = "https://opam.ci.ocaml.org/github/ocaml/opam-repository/commit/"
 
 # name: (commit, extra arguments, expectations)
 # An expectation matches a suggestion whose fields contain the given strings.
@@ -494,6 +495,211 @@ class PageTest(unittest.TestCase):
         self.assertIn('data-for="md-1"', page)
         self.assertIn("</textarea>", page)
         self.assertEqual(page.count("<textarea"), 1)
+
+
+HOSTILE = "@ocaml/maintainers ![x](https://evil.example/x.png) <img src=x> see #123, ocaml/dune#4 GH-5 www.evil.example"
+ALLOWED_TAGS = re.compile(r"</?(details|summary|sub|br)>")
+TRUSTED_LINK = re.compile(r"\]\(https://opam\.ci\.ocaml\.org/[\w.~,+%/=-]+\)")
+
+
+def outside_code(md):
+    """What GitHub would parse as Markdown in `md`: without fenced code blocks,
+    code spans and backslash-escaped characters (a rough CommonMark reading)."""
+    out, fence = [], None
+    for line in md.split("\n"):
+        m = re.match(r"\s*(`{3,})", line)
+        if fence:
+            if m and line.strip() == m.group(1) and len(m.group(1)) >= len(fence):
+                fence = None
+            continue
+        if m:
+            fence = m.group(1)
+            continue
+        out.append(line)
+    text, res, i = "\n".join(out), [], 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and not text[i + 1].isalnum():
+            i += 2
+            continue
+        if text[i] == "`":
+            run = re.match(r"`+", text[i:]).group(0)
+            m = re.compile(r"(?<!`)" + run + r"(?!`)").search(text, i + len(run))
+            if m:
+                i = m.end()
+                continue
+            res.append(run)
+            i += len(run)
+            continue
+        res.append(text[i])
+        i += 1
+    return "".join(res)
+
+
+class EscapingTest(unittest.TestCase):
+    """Untrusted text (logs, opam files, LLM answers) in the Markdown posted on
+    GitHub: no link, image, HTML, mention or reference, and no way out of a
+    code block."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import opam_repo_ci_triage as t
+        self.t = t
+
+    def assertInert(self, md):
+        rest = TRUSTED_LINK.sub("]", outside_code(md))
+        rest = ALLOWED_TAGS.sub("", rest)
+        for bad in (r"@\w", r"#\d", r"<", r"\]\(", r"://", r"www\.", r"GH-\d"):
+            self.assertIsNone(re.search(bad, rest), f"{bad!r} in:\n{rest}\n--- from:\n{md}")
+
+    def test_md_text(self):
+        from triage.md import md_text, md_code, md_fence
+        for s in (HOSTILE, "a `b` c", "x@y`z` ``a`b``", "tick ` alone", "line1\n```\n@x", "\\`@x`",
+                  "[a](javascript:x) | *b* _c_ &#64;d", "`` ` `` @e"):
+            md = md_text(s)
+            self.assertNotIn("\n", md)
+            self.assertInert(md)
+        self.assertEqual(md_text("see #123."), "see `#123`.")
+        self.assertEqual(md_text("Add a `license:` field"), "Add a `license:` field")
+        self.assertEqual(md_text("ppx_deriving < 6"), "ppx\\_deriving \\< 6")
+        self.assertTrue(md_text("x" * 50, 10).endswith("…"))
+        self.assertEqual(md_code("a`b"), "``a`b``")
+        self.assertEqual(md_code("`x"), "`` `x ``")
+        self.assertEqual(md_fence("a\n````\nb"), "`````\na\n````\nb\n`````")
+
+    def hostile(self, **kw):
+        r = {"rule": "lint", "class": "fix", "confidence": "high", "fix_in": "this PR", "failing": "x.1",
+             "variant": "v", "title": HOSTILE, "error": HOSTILE, "note": HOSTILE,
+             "old": 'depends: "a" @old', "new": 'depends: "b"\n```\n' + HOSTILE + "\n```",
+             "alternative": "`@x` [y](https://e)  (" + HOSTILE + ")"}
+        r.update(kw)
+        return r
+
+    def test_render_comment(self):
+        sha = "a" * 40
+        rs = [self.hostile(),
+              self.hostile(failing=HOSTILE, new="x-ci-accept-failures: [" + HOSTILE + "]   " + HOSTILE),
+              self.hostile(**{"class": "workaround"}),
+              self.hostile(**{"class": "elsewhere", "fix_in": HOSTILE, "rule": "rerun",
+                              "jobs": ["day10,debian-13,x86_64,5.5,x.1", "x)[evil](https://e.x", HOSTILE]}),
+              self.hostile(**{"class": "explanation", "failing": None, "variant": HOSTILE,
+                              "url": "https://evil.example/log", "rule": "unrecognised", "jobs": [HOSTILE]}),
+              self.hostile(**{"class": "explanation", "url": BASE_URL + "a" * 40 + "/variant/v,1"}),
+              self.hostile(evidence={"x 1.0": True, HOSTILE: False}),
+              self.hostile(candidates=[{"dep": HOSTILE, "new": HOSTILE, "changelog": {
+                  "text": HOSTILE, "versions": [HOSTILE, "1.0"]}}], compared_with=HOSTILE)]
+        md = self.t.render_comment(sha, {"jobs": []}, rs)
+        self.assertInert(md)
+        # Our own links stay.
+        self.assertIn(f"]({BASE_URL}{sha}/variant/day10,debian-13,x86_64,5.5,x.1)", md)
+        self.assertIn(f"([log]({BASE_URL}{sha}/variant/v,1))", md)
+        self.assertNotIn("](https://e", outside_code(md))
+        # A hostile commit is not linked.
+        self.assertInert(self.t.render_comment("x)[a](https://e", {"jobs": []}, rs[:1]))
+
+    def test_build_review(self):
+        from unittest import mock
+        sha = "b" * 40
+        text = 'opam-version: "2.0"\ndepends: "a" @old\nlicense: "x"\n'
+        patch = "@@ -0,0 +1,3 @@\n+" + "\n+".join(text.splitlines())
+
+        def gh_api(path, cache=True):
+            return ([{"filename": "packages/x/x.1/opam", "patch": patch}] if path.endswith("files?per_page=100")
+                    else {"head": {"sha": sha}})
+
+        class Src:
+            def raw(self, url):
+                return text
+        ok = self.hostile(new='depends: "b" `@x` ```', alternative=None)
+        llm = self.hostile(rule="llm", new='depends: "c"')
+        multi = self.hostile(new='depends: "d"\n```\n@x')
+        with mock.patch("triage.render.gh_api", gh_api):
+            review = self.t.build_review(sha, {"pr": 1, "jobs": []}, [ok, llm, multi], Src())
+        self.assertEqual(len(review["comments"]), 1)     # not the LLM answer, not a multi-line change
+        body = review["comments"][0]["body"]
+        self.assertIn('\n````suggestion\ndepends: "b" `@x` ```\n````', body)
+        self.assertInert(body)
+        self.assertInert(review["body"])
+        self.assertFalse(llm.get("_placed"))
+        self.assertIn('+ depends: "c"', review["body"])   # the LLM change stays in the summary, as a diff
+
+    def test_llm_change_is_code(self):
+        from unittest import mock
+        import triage.llm as L
+        r = {"variant": "v", "url": "https://opam.ci.ocaml.org/x", "note": "no rule matched", "error": "E"}
+        res = {"fix_in": "this-pr", "confidence": "low", "diagnosis": "d", "verify": "v",
+               "change_new": 'depexts: ["a"] {os-distribution = "debian"}\n```\n@x `y`', "package": "x.1"}
+        with mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \
+                mock.patch.object(L, "excerpt", lambda *a, **k: {"error_block": "e"}), \
+                mock.patch.object(L, "key_error_line", lambda t: "e"), \
+                mock.patch.object(L, "llm_suggest", lambda *a: dict(res)):
+            L.apply_llm([r], {"jobs": [{"variant": "v"}]}, None, None, {"x.1"}, 5, "m", False)
+        self.assertIn('not checked: ```` depexts: ["a"] {os-distribution = "debian"} ``` @x `y` ````.', r["note"])
+        self.assertNotIn("new", r)
+        self.assertInert(self.t.render_comment("c" * 40, {"jobs": []}, [dict(r, **{"class": "explanation"})]))
+
+    def test_checksum_command(self):
+        from triage.context import checksum_command
+        good = "https://github.com/o/r/releases/download/v1.0/r-1.0.tbz"
+        self.assertEqual(checksum_command(good), f"curl -sL '{good}' | sha256sum")
+        for bad in (None, "<archive URL>", "http://e.x/a.tgz", "https://e.x/a.tgz; rm -rf ~",
+                    "https://e.x/$(id).tgz", "https://e.x/a'b.tgz", "https://e.x/`id`", "https://e.x/a b",
+                    "https://e.x/a|b", "https://e.x/a&b", "https://-e.x/a", "file:///etc/passwd"):
+            self.assertIsNone(checksum_command(bad), bad)
+
+    def test_git_urls(self):
+        from triage import net
+        for url, exp in [("https://github.com/o/r.git", "https://github.com/o/r"),
+                         ("git+https://gitlab.com/g/s/r.git#main", "https://gitlab.com/g/s/r.git"),
+                         ("git@github.com:o/r.git", "https://github.com/o/r"),
+                         ("git://git.example.org/r", "https://git.example.org/r"),
+                         ("--upload-pack=touch /tmp/x", None), ("ssh://git@e.x/r", None),
+                         ("file:///tmp/r", None), ("ext::sh -c id", None), ("https://e.x/a b", None),
+                         ("https://-e.x/r", None), ("http://e.x/r", None)]:
+            self.assertEqual(net.repo_url(url), exp, url)
+
+    def test_git_command(self):
+        import tempfile
+        from unittest import mock
+        from triage import net, sources
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append((cmd, kw))
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        with mock.patch.object(net.subprocess, "run", run):
+            r = net.git(["rev-parse", "HEAD"], check=False)
+            self.assertNotEqual(r.returncode, 0)
+            with self.assertRaises(RuntimeError):
+                net.git(["rev-parse", "HEAD"])
+        cmd, kw = calls[0]
+        self.assertEqual(cmd[:5], ["git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always"])
+        self.assertTrue(kw.get("timeout"))
+        # An unsafe URL never reaches git.
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(sources, "git", side_effect=AssertionError):
+            src = sources.Sources(d)
+            self.assertEqual(src.tags("--upload-pack=x"), [])
+            self.assertIsNone(src.file_at("ssh://e.x/r", "v1", "a"))
+            self.assertEqual(src.tree("file:///r", "v1"), [])
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(sources, "git") as g:
+            g.return_value = subprocess.CompletedProcess([], 0, "", "")
+            sources.Sources(d).tags("https://e.x/r")
+            self.assertEqual(g.call_args[0][0], ["ls-remote", "--tags", "--refs", "--", "https://e.x/r"])
+
+    def test_llm_digest(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import llm_digest as D
+        r = {"rule": "llm", "log_error": "Error: `x` " + HOSTILE, "diagnosis": HOSTILE, "failing": HOSTILE,
+             "fix_in": HOSTILE, "confidence": HOSTILE, "new": "a ``` " + HOSTILE,
+             "url": "https://evil.example/" + HOSTILE}
+        good = dict(r, url=BASE_URL + "a" * 40 + "/variant/v")
+        items = [(123, r), (456, good), (789, dict(r, log_error="other " + HOSTILE))]
+        for page in (None, "https://x.github.io/triage/"):
+            md = D.report(items, 2, *([page] if page else []))
+            self.assertInert(re.sub(r"\[`#\d+`\]\(https://x\.github\.io/triage/#pr-\d+\)", "", md))
+            self.assertNotIn("github.com/ocaml/opam-repository/pull", md)
+        self.assertIn("`ocaml/opam-repository#123`", D.report(items, 2))
+        self.assertIn("[`#123`](https://x.github.io/triage/#pr-123)", md)
+        self.assertIn(f"[log]({BASE_URL}", md)
 
 
 if __name__ == "__main__":

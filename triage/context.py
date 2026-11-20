@@ -48,6 +48,20 @@ from .rules import (  # noqa: F401
 )
 
 
+# A URL that can be pasted in a shell command between single quotes: https,
+# no space, quote, `;|&$`, backtick, parenthesis, `<>`, `!`, `#`...
+SHELL_SAFE_URL = re.compile(r"https://[A-Za-z0-9][A-Za-z0-9.-]*(?::\d{1,5})?(?:/[A-Za-z0-9._~%+=,:/?-]*)?")
+
+
+def checksum_command(url):
+    """`curl -sL '<url>' | sha256sum` for the archive URL of a PR's opam file
+    (untrusted: its `src:` can hold any character but `"`), or None if the
+    URL is not a plain https URL."""
+    if url and SHELL_SAFE_URL.fullmatch(url):
+        return f"curl -sL '{url}' | sha256sum"
+    return None
+
+
 def accepted_platforms(opam_text):
     """The platforms listed in x-ci-accept-failures."""
     m = re.search(r"x-ci-accept-failures:\s*\[([^\]]*)\]", opam_text or "")
@@ -481,9 +495,11 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                     r.update(note="Start the synopsis with a capital letter, without a final dot.", confidence="high")
             elif "warning 59" in text or ("Weak checksum" in text and "field url" in text):
                 opam = src.opam_file(name, ver, sha) if sha else None
-                u = url_src(opam) or "<archive URL>"
+                cmd = checksum_command(url_src(opam))
                 r.update(new='checksum: ["sha256=<hash>" "sha512=<hash>"]   (in the url section)',
-                         note=f"Compute it with: curl -sL {u} | sha256sum (or sha512sum).", confidence="high")
+                         note=(f"Compute it with `{cmd}` (or sha512sum)." if cmd else
+                               "Download the archive and compute its checksum with sha256sum (or sha512sum)."),
+                         confidence="high")
             elif "extra-files" in text or "Unexpected file in packages/" in text:
                 opam = src.opam_file(name, ver, sha) if sha else None
                 section = (opam or "").split("extra-files:", 1)[1] if "extra-files:" in (opam or "") else ""
@@ -501,10 +517,11 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                          confidence="high")
             elif "error 60" in text:
                 opam = src.opam_file(name, ver, sha) if sha else None
-                u = url_src(opam) or "<archive URL>"
+                cmd = checksum_command(url_src(opam))
                 r.update(note="The upstream archive no longer matches the checksum (the tag moved, or the archive "
-                              f"was regenerated). Recompute it with curl -sL {u} | sha256sum, and check with "
-                              "upstream that the release did not change.", confidence="high")
+                              "was regenerated). " + (f"Recompute it with `{cmd}`" if cmd else
+                                                      "Download the archive and compute its checksum again")
+                              + ", and check with upstream that the release did not change.", confidence="high")
             elif "error 46" in text:
                 r.update(note='Flagged "conf" but has url, build or install, while conf packages only check for system '
                               'packages. Remove the `conf` flag (and the `conf-` prefix) if it really builds '

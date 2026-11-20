@@ -29,6 +29,7 @@ from .net import (  # noqa: F401
     git,
     offline_miss,
     repo_url,
+    safe_git_url,
 )
 from .ci import (  # noqa: F401
     opam_vcmp,
@@ -83,11 +84,13 @@ class Sources:
     # ---- git plumbing (bare, shallow, blob-less mirrors under cache_dir/git)
 
     def _gitdir(self, url):
+        if not safe_git_url(url):
+            raise RuntimeError(f"not a plain https git URL: {url[:100]!r}")
         d = os.path.join(self.cache_dir, "git", hashlib.sha256(url.encode()).hexdigest()[:16])
         if not os.path.isdir(d):
             os.makedirs(d)
             git(["init", "-q", "--bare", d])
-            git(["remote", "add", "origin", url], cwd=d)
+            git(["remote", "add", "--", "origin", url], cwd=d)
             git(["config", "remote.origin.promisor", "true"], cwd=d)
             git(["config", "remote.origin.partialclonefilter", "blob:none"], cwd=d)
             git(["config", "extensions.partialClone", "origin"], cwd=d)
@@ -98,6 +101,8 @@ class Sources:
         key = ("ensure", url, ref)
         if key in self.mem:
             return self.mem[key]
+        if not safe_git_url(url):
+            return None
         d = self._gitdir(url)
         rev = f"refs/tags/{ref}" if is_tag else ref
         if git(["rev-parse", "--verify", "-q", rev + "^{tree}"], cwd=d, check=False).returncode != 0:
@@ -115,8 +120,10 @@ class Sources:
             hit = cached_json(disk, max_age=86400)
             if hit:
                 tags = hit["value"]
+            elif not safe_git_url(url):
+                tags = []
             else:
-                r = git(["ls-remote", "--tags", "--refs", url], check=False)
+                r = git(["ls-remote", "--tags", "--refs", "--", url], check=False)
                 tags = [l.split("refs/tags/", 1)[1] for l in r.stdout.splitlines() if "refs/tags/" in l]
                 os.makedirs(self.cache_dir, exist_ok=True)
                 with open(disk, "w") as f:

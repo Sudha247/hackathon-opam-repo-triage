@@ -34,6 +34,15 @@ from .ci import (  # noqa: F401
 from .suggest import (  # noqa: F401
     rank,
 )
+from .md import (  # noqa: F401
+    SHA,
+    ci_job_url,
+    flat,
+    md_code,
+    md_fence,
+    md_text,
+    safe_ci_url,
+)
 
 
 def render_summary(sha, data, show_all):
@@ -161,24 +170,29 @@ def opam_path(pkg):
 
 
 def diff_block(r):
-    lines = []
-    if r.get("old"):
-        lines.append(f"- {r['old']}")
-    new = (r.get("new") or "").split("   ")
-    lines.append(f"+ {new[0]}")
-    hint = " ".join(x.strip() for x in new[1:] if x.strip())
-    return "```diff\n" + "\n".join(lines) + "\n```" + (f"\n<sub>{hint}</sub>" if hint else "")
+    """The change of a suggestion as a fenced diff (Markdown). `old` and `new`
+    are untrusted (they quote opam files, logs or an LLM answer): only ever
+    shown in the code block, whose fence no line of them can close."""
+    new = r.get("new") or ""
+    if "\n" in new.strip():                  # several lines (an LLM answer): no hint
+        new_lines, hint = new.strip("\n").splitlines(), ""
+    else:
+        parts = new.split("   ")
+        new_lines, hint = [parts[0]], " ".join(x.strip() for x in parts[1:] if x.strip())
+    lines = ["- " + l for l in (r.get("old") or "").strip("\n").splitlines()] + ["+ " + l for l in new_lines]
+    return md_fence("\n".join(lines), "diff") + (f"\n<sub>{md_text(hint)}</sub>" if hint else "")
 
 
-def evidence_line(r):
+def evidence_line(r, limit=400):
+    """The evidence of a suggestion (or its note), as Markdown."""
     ev = r.get("evidence")
     if not ev:
-        return r.get("note") or ""
+        return md_text(r.get("note"), limit)
     def vkey_of(k):
         return functools.cmp_to_key(opam_vcmp)(k.split(" ")[1] if " " in k else k)
     parts = [f"{k.replace(' (installed in failing job)', ' (used by CI)')}: {'yes' if v else 'no'}"
              for k, v in sorted(ev.items(), key=lambda kv: vkey_of(kv[0])) if v is not None]
-    return f"`{r.get('error', '')}`: present in " + ", ".join(parts)
+    return f"{md_code(flat(r.get('error'))[:150]) or '?'}: present in " + md_text(", ".join(parts), limit)
 
 
 def changelog_details(c):
@@ -187,22 +201,30 @@ def changelog_details(c):
     link, image or mention from it."""
     log = c["changelog"]
     text = log["text"] + ("\n…" if log.get("cut") else "")
-    fence = "`" * max(3, 1 + max((len(m) for m in re.findall(r"`+", text)), default=0))
     # The versions come from the changelog's headings: keep version-like ones only.
     versions = [v for v in log["versions"] if re.fullmatch(r"[\w.+~-]{1,40}", v)]
-    return ("<details><summary>" + f"Changelog of {c['dep']}: {', '.join(versions)}" + "</summary>\n\n"
-            + f"{fence}text\n{text}\n{fence}\n\n</details>")
+    # The summary is in an HTML block (no Markdown, no escaping): a package name or nothing.
+    dep = c["dep"] if re.fullmatch(r"[\w+.-]{1,80}", c.get("dep") or "") else "a dependency"
+    return ("<details><summary>" + f"Changelog of {dep}: {', '.join(versions)}" + "</summary>\n\n"
+            + md_fence(text, "text") + "\n\n</details>")
 
 
 def render_comment(sha, data, results, placed=0, placed_lines=0):
     """A draft PR comment (Markdown) from ranked suggestions. With `placed`,
-    the fixes already attached to lines by `review` are left out."""
+    the fixes already attached to lines by `review` are left out.
+
+    Every field of a suggestion is untrusted (it quotes CI logs, opam files,
+    lint messages or an LLM answer): prose goes through `md_text`, code
+    through `md_code` / `md_fence`, and links are only built from the CI
+    base URL with a checked commit and variant."""
     by = collections.defaultdict(list)
     for r in results:
         if not r.get("_placed"):
             by[r["class"]].append(r)
+    sha_ok = bool(SHA.fullmatch(sha or ""))
+    ci = f"[CI results]({BASE}{sha})" if sha_ok else "CI results"
     out = ["### Automated triage of the opam-repo-ci failures", "",
-           f"From the [CI results]({BASE}{sha}) for commit `{sha[:12]}`. Nothing was rebuilt: these "
+           f"From the {ci} for commit {md_code(sha[:12]) if sha_ok else '?'}. Nothing was rebuilt: these "
            "suggestions come from the CI logs, the documentation of each package version on ocaml.org, and "
            "the opam files. Please check them before applying them.", ""]
     if data.get("unfinished"):
@@ -217,13 +239,13 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
         out += [f"#### {'Other suggested' if placed else 'Suggested'} changes ({len(fixes)})", ""]
         for r in fixes:
             path = opam_path(r.get("failing"))
-            out.append(f"**`{path or r.get('failing')}`**: {r.get('title') or r.get('rule')} "
-                       f"({r.get('confidence')} confidence){jobs_note(r)}")
+            out.append(f"**{md_code(path or r.get('failing')) or '?'}**: {md_text(r.get('title') or r.get('rule'))} "
+                       f"({md_text(r.get('confidence'))} confidence){jobs_note(r)}")
             if r.get("error"):
-                out.append(f"> {r['error'][:300]}")
+                out.append(f"> {md_text(r['error'], 300)}")
             if r.get("candidates"):
-                out.append(f"Candidates ({r.get('compared_with', '')}):")
-                out.append("```diff\n" + "\n".join("+ " + c["new"].split("   ")[0] for c in r["candidates"]) + "\n```")
+                out.append(f"Candidates ({md_text(r.get('compared_with'))}):")
+                out.append(md_fence("\n".join("+ " + flat(c["new"].split("   ")[0]) for c in r["candidates"]), "diff"))
                 for c in r["candidates"]:
                     if c.get("changelog"):
                         out.append(changelog_details(c))
@@ -231,10 +253,10 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
                 out.append(diff_block(r))
                 if r.get("alternative"):
                     alt = re.split(r"\s{2,}(?=\()", r["alternative"], maxsplit=1)
-                    out.append(f"Or `{alt[0].strip()}`" + (f" {alt[1].strip()}" if len(alt) > 1 else ""))
+                    out.append(f"Or {md_code(alt[0])}" + (f" {md_text(alt[1])}" if len(alt) > 1 else ""))
             ev = evidence_line(r)
             if ev:
-                out.append(f"<sub>{ev[:400]}</sub>")
+                out.append(f"<sub>{ev}</sub>")
             out.append("")
     elif not placed:
         out += ["No change to this PR's opam files could be derived automatically.", ""]
@@ -249,31 +271,41 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
 
     def head(r, where=False):
         exp = " (experimental platform)" if r.get("experimental") else ""
-        what = [r.get("title") or r.get("rule")] + ([f"fix in {r.get('where') or r.get('fix_in')}"] if where else [])
+        what = [md_text(r.get("title") or r.get("rule"))]
+        if where:
+            what.append(f"fix in {md_text(r.get('where') or r.get('fix_in'))}")
         if r.get("failing"):
-            return f"- **{r['failing']}**{exp} ({'; '.join(what)}){jobs_note(r)}"
-        return f"- **{what[0]}**{exp} ({'; '.join([r.get('job') or r['variant']] + what[1:])})"
+            return f"- **{md_text(r['failing'])}**{exp} ({'; '.join(what)}){jobs_note(r)}"
+        return f"- **{what[0]}**{exp} ({'; '.join([md_text(r.get('job') or r['variant'])] + what[1:])})"
 
     def job_links(r, n=10):
         # For the entries whose content is the list of jobs (reruns, failures no rule recognises).
         if r.get("rule") not in ("rerun", "unrecognised"):
             return ""
         js = r.get("jobs") or []
-        links = [f"[{describe_job(v)}]({BASE}{sha}/variant/{v})" for v in js[:n]]
+        links = []
+        for v in js[:n]:
+            url = ci_job_url(BASE, sha, v)
+            links.append(f"[{md_text(describe_job(v))}]({url})" if url else md_text(describe_job(v)))
         return (f"<br>Jobs: {', '.join(links)}" + (f" and {len(js) - n} more" if len(js) > n else "")) if js else ""
 
+    def note(r):
+        return f"<br>{md_text(r['note'], 300)}" if r.get("note") else ""
+
+    def log_link(r):
+        url = safe_ci_url(r.get("url"))
+        return f" ([log]({url}))" if url else ""
+
     out += details("Workarounds: restrict where this PR is built or tested", by["workaround"], lambda r: [
-        f"{head(r)}: {(r.get('error') or '')[:220]}",
+        f"{head(r)}: {md_text(r.get('error'), 220)}",
         "  " + diff_block(r).replace("\n", "\n  ")])
     out += details("Problems in other packages or in the CI (nothing to change in this PR)", by["elsewhere"],
                    lambda r: [
-        f"{head(r, where=True)}: {(r.get('error') or '')[:200]}"
-        + (f"<br>Suggested change: `{(r.get('new') or '').split('   ')[0]}`" if r.get("new") else "")
-        + (f"<br>{r['note'][:300]}" if r.get("note") else "") + job_links(r)])
+        f"{head(r, where=True)}: {md_text(r.get('error'), 200)}"
+        + (f"<br>Suggested change: {md_code((r.get('new') or '').split('   ')[0])}" if r.get("new") else "")
+        + note(r) + job_links(r)])
     out += details("Other findings (no change suggested)", by["explanation"], lambda r: [
-        f"{head(r)}: {(r.get('error') or '')[:150]}"
-        + (f"<br>{r['note'][:300]}" if r.get("note") else "")
-        + (f" ([log]({r['url']}))" if r.get("url") else "") + job_links(r)])
+        f"{head(r)}: {md_text(r.get('error'), 150)}" + note(r) + log_link(r) + job_links(r)])
     out.append("<sub>Generated by opam_repo_ci_triage.py</sub>")
     return "\n".join(out)
 
@@ -343,6 +375,10 @@ def build_review(sha, data, results, src):
     for r in results:
         if r.get("class") != "fix" or head["head"]["sha"] != sha:
             continue
+        # An LLM answer is never a one-click suggestion (it stays in the summary,
+        # as a diff to check), and a change is one opam line.
+        if r.get("rule") == "llm" or any(c in (r.get(k) or "") for k in ("old", "new") for c in "\r\n"):
+            continue
         path = opam_path(r.get("failing"))
         if path not in files:
             continue
@@ -352,13 +388,13 @@ def build_review(sha, data, results, src):
         if not edits:
             continue
         r["_placed"] = True
-        why = f"**{r.get('rule')}** ({r.get('confidence')} confidence)"
+        why = f"**{md_text(r.get('rule'))}** ({md_text(r.get('confidence'))} confidence)"
         if r.get("error"):
-            why += f": {r['error'][:200]}"
-        ev = evidence_line(r)
+            why += f": {md_text(r['error'], 200)}"
+        ev = evidence_line(r, 300)
         for n, replacement in edits:
             comments.append({"path": path, "line": n, "side": "RIGHT",
-                             "body": f"{why}\n```suggestion\n{replacement}\n```" + (f"\n<sub>{ev[:300]}</sub>" if ev else "")})
+                             "body": f"{why}\n{md_fence(replacement, 'suggestion')}" + (f"\n<sub>{ev}</sub>" if ev else "")})
     body = render_comment(sha, data, results, placed=sum(1 for r in results if r.get("_placed")),
                           placed_lines=len(comments))
     return {"commit_id": sha, "event": "COMMENT", "body": body, "comments": comments}

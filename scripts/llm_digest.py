@@ -21,13 +21,16 @@ TITLE (created if needed, with `gh`; needs a token that can write issues).
 import argparse
 import collections
 import json
+import os
 import re
 import subprocess
 import sys
 import urllib.request
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from triage.md import md_code, md_text, safe_ci_url  # noqa: E402
+
 PAGE_DATA = "https://sudha247.github.io/hackathon-opam-repo-triage/data.json"
-REPO_URL = "https://github.com/ocaml/opam-repository"
 TITLE = "LLM diagnoses to turn into rules"
 MAX_BODY = 60000
 
@@ -77,7 +80,29 @@ def masked(line):
     return s
 
 
-def report(items, min_prs):
+def pr_ref(n, page=None):
+    """A reference to opam-repository PR `n` that GitHub does not turn into a
+    cross-reference (a "mentioned this" event on the PR): a link to the PR on
+    the triage page when it is known, else a code span."""
+    n = str(n or "")
+    if not n.isdigit():
+        return "?"
+    return f"[`#{n}`]({page}#pr-{n})" if page else md_code(f"ocaml/opam-repository#{n}")
+
+
+def page_url(sources):
+    """The triage page, when the data comes from its data.json."""
+    for s in sources:
+        m = re.fullmatch(r"(https://[A-Za-z0-9.-]+/(?:[A-Za-z0-9._~-]+/)*)data\.json", s)
+        if m:
+            return m.group(1)
+    return None
+
+
+def report(items, min_prs, page=None):
+    """The digest (GitHub Markdown). Everything in an answer is untrusted (the
+    model quotes CI logs and opam files): prose goes through `md_text`, log
+    lines and changes are code spans."""
     groups = collections.defaultdict(list)
     for n, r in items:
         line = r.get("log_error") or r.get("error") or r.get("diagnosis") or ""
@@ -85,7 +110,7 @@ def report(items, min_prs):
     conf = collections.Counter(str(r.get("confidence") or "?").split(" ")[0] for _, r in items)
     prs = {n for n, _ in items}
     out = [f"{len(items)} LLM answers in {len(prs)} PRs "
-           f"({', '.join(f'{v} {k}' for k, v in conf.most_common())} confidence), in {len(groups)} groups "
+           f"({md_text(', '.join(f'{v} {k}' for k, v in conf.most_common()))} confidence), in {len(groups)} groups "
            f"by error.", ""]
     multi = sorted(((k, v) for k, v in groups.items() if len({n for n, _, _ in v}) >= min_prs),
                    key=lambda kv: (-len({n for n, _, _ in kv[1]}), kv[0]))
@@ -95,21 +120,22 @@ def report(items, min_prs):
         out.append("None yet.")
     for key, v in multi:
         pr_list = sorted({n for n, _, _ in v if n})
-        pkgs = sorted({r.get("failing") or "?" for _, r, _ in v})
-        out += [f"### `{key[:200]}`", "",
-                f"- PRs: " + ", ".join(f"[#{n}]({REPO_URL}/pull/{n})" for n in pr_list),
-                f"- Failing packages: {', '.join(pkgs[:12])}" + (" …" if len(pkgs) > 12 else "")]
+        pkgs = sorted({str(r.get("failing") or "?") for _, r, _ in v})
+        out += [f"### {md_code(key[:200]) or '?'}", "",
+                f"- PRs: " + ", ".join(pr_ref(n, page) for n in pr_list),
+                f"- Failing packages: {md_text(', '.join(pkgs[:12]))}" + (" …" if len(pkgs) > 12 else "")]
         lines = sorted({line for _, _, line in v})
-        out.append("- Errors: " + "; ".join(f"`{l[:160]}`" for l in lines[:3]) + (" …" if len(lines) > 3 else ""))
+        out.append("- Errors: " + "; ".join(md_code(l[:160]) for l in lines[:3]) + (" …" if len(lines) > 3 else ""))
         diags = collections.Counter((r.get("diagnosis") or r.get("error") or "", r.get("confidence") or "?",
                                      r.get("where") or r.get("fix_in") or "?") for _, r, _ in v)
         out.append("- Diagnoses:")
         for (dg, c, w), k in diags.most_common(3):
-            out.append(f"  - ({c} confidence, fix in {w}{f', {k} times' if k > 1 else ''}) {dg[:400]}")
+            out.append(f"  - ({md_text(c)} confidence, fix in {md_text(w)}{f', {k} times' if k > 1 else ''}) "
+                       f"{md_text(dg, 400)}")
         changes = sorted({r.get("new") for _, r, _ in v if r.get("new")})
         if changes:
-            out.append("- Suggested changes: " + "; ".join(f"`{c[:120]}`" for c in changes[:3]))
-        logs = [r.get("url") for _, r, _ in v if r.get("url")][:2]
+            out.append("- Suggested changes: " + "; ".join(md_code(c[:120]) for c in changes[:3]))
+        logs = [u for u in (safe_ci_url(r.get("url")) for _, r, _ in v) if u][:2]
         if logs:
             out.append("- Logs: " + ", ".join(f"[log]({u})" for u in logs))
         out.append("")
@@ -119,13 +145,16 @@ def report(items, min_prs):
                 "<details><summary>Errors</summary>", ""]
         for key, v in single[:80]:
             n, r, _ = v[0]
-            out.append(f"- `{key[:160]}`: #{n} {r.get('failing') or ''}")
+            out.append(f"- {md_code(key[:160]) or '?'}: {pr_ref(n, page)} {md_text(r.get('failing'))}")
         out += ["", "</details>"]
     out += ["", "To turn a group into a rule: check the diagnosis on the logs, add the rule to `triage/` "
                 "(most go in `known_errors` in `triage/rules.py`), and a regression case in "
                 "`tests/test_triage.py`. The group then no longer reaches the LLM."]
     body = "\n".join(out)
-    return body if len(body) <= MAX_BODY else body[:MAX_BODY] + "\n\n(truncated)"
+    if len(body) <= MAX_BODY:
+        return body
+    # Cut at a line end: a cut line could leave a code span or a link open.
+    return body[:body.rfind("\n", 0, MAX_BODY)] + "\n\n(truncated)"
 
 
 def update_issue(repo, title, body):
@@ -149,7 +178,7 @@ def main():
     if not items:
         print("no LLM answer in the data (is ANTHROPIC_API_KEY set for the page?)", file=sys.stderr)
         return
-    body = report(items, args.min_prs)
+    body = report(items, args.min_prs, page_url(args.sources or [PAGE_DATA]))
     print(body)
     if args.issue:
         update_issue(args.issue, args.title, body)
