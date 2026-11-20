@@ -168,12 +168,17 @@ python3 opam_repo_ci_triage.py suggest --pr 29613 --llm-dry-run   # print the pr
 
 Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
 fallbacks enabled, a 120 s timeout per request and one retry. Responses are
-cached in `.opam-ci-cache/`, so re-runs cost nothing. The log and opam file are
+cached in `.opam-ci-cache/`, so re-runs cost nothing; `--llm-max` counts
+API calls only, not cached answers, so each run adds answers to the earlier
+ones. The log and opam file are
 passed as untrusted data. While CI is still running, the LLM is not asked: the
 prompt holds the job's results on the other platforms, which change as jobs
-finish, so each analysis would pay again. `suggest --json` says how many
+finish, so each analysis would pay again. Credentials refused (401, 403, no
+key), or two transient API failures in a row (an outage: each can cost two
+120 s timeouts), turn the LLM off for the rest of the run. `suggest --json` says how many
 unexplained failures were left without an answer that a later call may give
-(`llm_unanswered`: beyond `--llm-max`, a transient API error, or CI running).
+(`llm_unanswered`: beyond `--llm-max`, a transient API error, the LLM off,
+or CI running).
 
 The LLM gets the failures the rules flag as unexplained (also when a note was
 added since: pre-existing, or opam-health-check's "builds on master"). Its

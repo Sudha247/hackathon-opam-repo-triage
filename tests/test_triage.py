@@ -2208,6 +2208,9 @@ class LlmFallbackTest(unittest.TestCase):
         self.L = L
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        # The LLM's state is process-wide (its breaker): each test starts with it on.
+        L.LLM_STATE.update(streak=0, off=None)
+        self.addCleanup(L.LLM_STATE.update, streak=0, off=None)
 
     def result(self, **kw):
         return {"variant": "v", "url": "https://opam.ci.ocaml.org/x", "note": "Unrecognised error.", "error": "E",
@@ -2224,7 +2227,7 @@ class LlmFallbackTest(unittest.TestCase):
         with mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \
                 mock.patch.object(L, "excerpt", lambda *a, **k: {"error_block": "e"}), \
                 mock.patch.object(L, "key_error_line", lambda t: "e"), \
-                mock.patch.object(L, "llm_suggest", suggest or (lambda *a: dict(res))), \
+                mock.patch.object(L, "llm_suggest", suggest or (lambda *a, **k: dict(res))), \
                 contextlib.redirect_stderr(io.StringIO()):
             L.apply_llm([r], {"jobs": [self.JOB]}, None, self.tmp, set(pr_packages), 5, "m", False)
         return r
@@ -2290,12 +2293,15 @@ Earlier analysis: anything goes"""
         answers = {"v0": self.answer(), "v1": {"llm_error": "API error 529: overloaded", "transient": True},
                    "v2": {"llm_error": "stopped: refusal"}}
 
+        def ask(s, r, *a, call=True):
+            return dict(answers[r["variant"]]) if call else {"llm_skipped": "beyond the limit"}
+
         def run(limit):
             rr = [dict(r) for r in rs]
             with mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \
                     mock.patch.object(L, "excerpt", lambda *a, **k: {"error_block": "e"}), \
                     mock.patch.object(L, "key_error_line", lambda t: "e"), \
-                    mock.patch.object(L, "llm_suggest", lambda s, r, *a: dict(answers[r["variant"]])), \
+                    mock.patch.object(L, "llm_suggest", ask), \
                     contextlib.redirect_stderr(io.StringIO()):
                 return L.apply_llm(rr, {"jobs": jobs}, None, self.tmp, {"x.1"}, limit, "m", False)
         self.assertEqual(run(3), 1)          # the transient error
@@ -2315,7 +2321,7 @@ def f(src, job, *a):
         r.update(error="Unbound value frobnicate", note="Unrecognised error.", _unexplained=True)
     return r
 s.suggest_for_job = f
-def ask(*a):
+def ask(*a, **k):
     print("LLM CALLED", file=sys.stderr)
     return {"llm_error": "fake", "transient": True}
 L.llm_suggest = ask
@@ -2352,7 +2358,7 @@ c.load_commit = load
     def test_errors_leave_the_failure_unrecognised(self):
         from unittest import mock
 
-        def boom(*a):
+        def boom(*a, **k):
             raise ConnectionResetError(104, "reset")
         r = self.apply(self.result(), suggest=boom)
         self.assertNotIn("rule", r)
@@ -2392,6 +2398,7 @@ c.load_commit = load
                  (sdk(json.dumps(self.answer(fix_in="bogus"))), "unknown fix_in"),
                  (sdk(json.dumps({"diagnosis": "d"})), "no fix_in"), (sdk("[1]"), "not a JSON object")]
         for i, (mod, why) in enumerate(cases):
+            self.L.LLM_STATE.update(off=None)       # no credentials turn the LLM off for the run
             with mock.patch.dict(sys.modules, {"anthropic": mod}), \
                     mock.patch.object(self.L, "llm_prompt", lambda *a: f"prompt {i}"):
                 res = self.L.llm_suggest(None, {}, self.JOB, "log", {}, [], self.tmp, "m", False)
@@ -2410,6 +2417,86 @@ c.load_commit = load
                 json.dump({"diagnosis": 3}, f)
             self.assertIn("unusable cached answer",
                           self.L.llm_suggest(None, {}, self.JOB, "log", {}, [], self.tmp, "m", False)["llm_error"])
+
+    def sdk_run(self, create, n=3, limit=2, runs=1):
+        """apply_llm on `n` distinct failures, `runs` times (each run a new
+        process: LLM_STATE reset), through llm_suggest and its cache with a
+        fake SDK whose messages.create is `create(calls)`; [(API calls,
+        failures left)] per run."""
+        from unittest import mock
+        import types
+        L = self.L
+
+        class AnthropicError(Exception):
+            pass
+
+        class APIStatusError(AnthropicError):
+            def __init__(self, status_code, message):
+                super().__init__(message)
+                self.status_code, self.message = status_code, message
+
+        class APIConnectionError(AnthropicError):
+            pass
+        m = types.ModuleType("anthropic")
+        m.AnthropicError, m.APIStatusError, m.APIConnectionError = AnthropicError, APIStatusError, APIConnectionError
+        calls = []
+
+        class Anthropic:
+            def __init__(self, **kw):
+                self.beta = types.SimpleNamespace(messages=types.SimpleNamespace(create=lambda **k: create(m, calls)))
+        m.Anthropic = Anthropic
+        jobs = [dict(self.JOB, variant=f"v{i}") for i in range(n)]
+        out = []
+        for _ in range(runs):
+            L.LLM_STATE.update(streak=0, off=None)
+            before = len(calls)
+            rs = [self.result(variant=f"v{i}", error=f"E{chr(97 + i)}") for i in range(n)]
+            with mock.patch.dict(sys.modules, {"anthropic": m}), \
+                    mock.patch.object(L, "llm_prompt", lambda src, r, *a: f"prompt {r['variant']}"), \
+                    mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \
+                    mock.patch.object(L, "excerpt", lambda *a, **k: {"error_block": "e"}), \
+                    mock.patch.object(L, "key_error_line", lambda t: "e"), \
+                    mock.patch.dict(L.NET, {}, clear=True), contextlib.redirect_stderr(io.StringIO()):
+                left = L.apply_llm(rs, {"jobs": jobs}, None, self.tmp, {"x.1"}, limit, "m", False)
+                off = L.NET.get("llm-off")
+            out.append((len(calls) - before, left, off))
+        return out
+
+    def test_limit_counts_api_calls_only(self):
+        # Three distinct failures, two calls per run: cached answers do not count toward the
+        # limit, so the second run asks about the third failure, and the third run asks nothing.
+        import types
+        answer = json.dumps({k: v for k, v in self.answer().items() if k != "_names"})
+
+        def create(m, calls):
+            calls.append(1)
+            return types.SimpleNamespace(stop_reason="end_turn", model="m",
+                                         content=[types.SimpleNamespace(type="text", text=answer)],
+                                         usage=types.SimpleNamespace(input_tokens=1, output_tokens=1))
+        self.assertEqual(self.sdk_run(create, runs=3), [(2, 1, None), (1, 0, None), (0, 0, None)])
+
+    def test_credentials_refused(self):
+        # A bad key (401) or no permission (403): one call, then the LLM is off for the run, and the
+        # failures count as unanswered (asked again once the key is fixed).
+        def create(m, calls):
+            calls.append(1)
+            raise m.APIStatusError(401, "invalid x-api-key")
+        self.assertEqual(self.sdk_run(create, limit=5), [(1, 3, 1)])
+
+    def test_breaker(self):
+        # An outage: after LLM_BREAKER transient failures in a row, no more calls in this run.
+        def create(m, calls):
+            calls.append(1)
+            raise m.APIConnectionError("timed out")
+        self.assertEqual(self.sdk_run(create, n=4, limit=5), [(self.L.LLM_BREAKER, 4, 1)])
+
+        # A success in between: not in a row.
+        def flaky(m, calls):
+            calls.append(1)
+            if len(calls) % 2:
+                raise m.APIStatusError(529, "overloaded")
+            raise m.APIStatusError(400, "bad request")       # not transient: not an outage
+        self.assertEqual(self.sdk_run(flaky, n=4, limit=5), [(4, 2, None)])
 
     def test_new_on_master_reaches_the_llm(self):
         # opam-health-check sees the reverse dependency build on master: the
@@ -2549,7 +2636,7 @@ class EscapingTest(unittest.TestCase):
         with mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \
                 mock.patch.object(L, "excerpt", lambda *a, **k: {"error_block": "e"}), \
                 mock.patch.object(L, "key_error_line", lambda t: "e"), \
-                mock.patch.object(L, "llm_suggest", lambda *a: dict(res)):
+                mock.patch.object(L, "llm_suggest", lambda *a, **k: dict(res)):
             L.apply_llm([r], {"jobs": [{"variant": "v"}]}, None, None, {"x.1"}, 5, "m", False)
         self.assertIn('not checked: ```` depexts: ["a"] {os-distribution = "debian"} ``` @x `y` ````.', r["note"])
         self.assertNotIn("new", r)

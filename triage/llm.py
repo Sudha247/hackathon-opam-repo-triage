@@ -46,6 +46,40 @@ from .md import (  # noqa: F401
 
 LLM_MODEL = "claude-opus-5-5"
 LLM_TIMEOUT = 120          # seconds per API request (one retry)
+# Transient API failures in a row (an outage: each costs up to two
+# timeouts) after which the LLM is not called again in this process; the
+# failures it leaves are asked about in a later run. The triage page counts
+# them across its PRs the same way (NET["llm-streak"], see
+# scripts/triage_open_prs.py).
+LLM_BREAKER = 2
+# This process's LLM calls: the transient failures in a row, and why the LLM
+# is off (credentials refused, LLM_BREAKER failures), or None.
+LLM_STATE = {"streak": 0, "off": None}
+
+
+def llm_turn_off(why):
+    """Stop calling the LLM in this process (NET["llm-off"] tells the triage
+    page to stop for the rest of its run too)."""
+    if not LLM_STATE["off"]:
+        LLM_STATE["off"] = why
+        NET["llm-off"] = 1
+        print(f"note: LLM off for the rest of this run: {why}", file=sys.stderr)
+
+
+def llm_api_answered():
+    """The API answered (not an outage): no transient failures in a row."""
+    LLM_STATE["streak"] = 0
+    NET["llm-streak"] = 0
+
+
+def llm_transient_failure():
+    """A transient API failure (overloaded, rate-limited, a timeout): after
+    LLM_BREAKER in a row, the LLM is off for the rest of the run."""
+    LLM_STATE["streak"] += 1
+    NET["llm-streak"] = LLM_STATE["streak"]
+    NET["llm-errors"] = NET.get("llm-errors", 0) + 1
+    if LLM_STATE["streak"] >= LLM_BREAKER:
+        llm_turn_off(f"{LLM_STATE['streak']} API failures in a row")
 
 
 LLM_SYSTEM = """You triage failures reported by opam-repo-ci on pull requests to ocaml/opam-repository.
@@ -149,24 +183,33 @@ def prompt_names(prompt):
     return names
 
 
-def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run):
+def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run, call=True):
     """The model's answer for one failure (cached), with `_names`, the
     package names it was given (prompt_names), or {"llm_error": ...}
-    (`transient` when a later call may work), or {"llm_prompt": ...}."""
+    (`transient` when a later call may work, `off` when the LLM is off for
+    the rest of the run: credentials refused), or {"llm_prompt": ...}.
+    `_cached`: the answer (or the unusable answer) comes from the cache;
+    anything else (an answer, an API error, a prompt with `dry_run`) counts
+    as a call. Without `call`, or once the LLM is off (LLM_STATE), only a
+    cached answer is given, else {"llm_skipped": why}."""
     prompt = llm_prompt(src, r, job, text, data, pr_packages)
     names = sorted(prompt_names(prompt))
     key = hashlib.sha256(f"{model}\n{LLM_SYSTEM}\n{prompt}".encode()).hexdigest()[:32]
     disk = os.path.join(cache_dir, f"llm-{key}.json")
     if dry_run:
-        return {"llm_prompt": prompt}
+        return {"llm_prompt": prompt} if call else {"llm_skipped": "beyond the limit"}
     hit = cached_json(disk)
     if hit:
         why = llm_answer_error(hit["value"])
-        return {"llm_error": f"unusable cached answer: {why}"} if why else dict(hit["value"], _names=names)
+        return ({"llm_error": f"unusable cached answer: {why}", "_cached": True} if why
+                else dict(hit["value"], _names=names, _cached=True))
+    if not call or LLM_STATE["off"]:
+        return {"llm_skipped": LLM_STATE["off"] or "beyond the limit"}
     try:
         import anthropic
     except ImportError:
-        return {"llm_error": "the anthropic package is not installed (pip install anthropic)"}
+        llm_turn_off("the anthropic package is not installed")
+        return {"llm_error": "the anthropic package is not installed (pip install anthropic)", "off": True}
     try:
         # Not the SDK's defaults (10 minutes, 2 retries): the hourly job gives the whole analysis 10 minutes.
         client = anthropic.Anthropic(timeout=LLM_TIMEOUT, max_retries=1)
@@ -179,13 +222,27 @@ def llm_suggest(src, r, job, text, data, pr_packages, cache_dir, model, dry_run)
             output_config={"effort": "medium", "format": {"type": "json_schema", "schema": LLM_SCHEMA}},
             messages=[{"role": "user", "content": prompt}])
     except anthropic.APIStatusError as e:
+        err = f"API error {e.status_code}: {e.message[:200]}"
+        if e.status_code in (401, 403):
+            # A bad key or no permission: every call would fail the same way.
+            # Not an answer: asked again once the key is fixed.
+            llm_turn_off(err)
+            return {"llm_error": err, "off": True}
         # Overloaded, rate-limited, a server error: asked again in a later run.
-        return {"llm_error": f"API error {e.status_code}: {e.message[:200]}",
-                "transient": e.status_code in (408, 409, 429) or e.status_code >= 500}
+        transient = e.status_code in (408, 409, 429) or e.status_code >= 500
+        if transient:
+            llm_transient_failure()
+        else:
+            llm_api_answered()
+        return {"llm_error": err, "transient": transient}
     except anthropic.APIConnectionError as e:          # a timeout too
+        llm_transient_failure()
         return {"llm_error": f"connection error: {e}", "transient": True}
     except anthropic.AnthropicError as e:          # no credentials, another SDK error
-        return {"llm_error": f"{type(e).__name__}: {str(e)[:200]}"}
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+        llm_turn_off(err)
+        return {"llm_error": err, "off": True}
+    llm_api_answered()
     NET["llm"] = NET.get("llm", 0) + 1
     if resp.stop_reason in ("refusal", "max_tokens"):
         return {"llm_error": f"stopped: {resp.stop_reason}"}
@@ -303,24 +360,22 @@ def llm_sig(r):
 
 
 def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run):
-    """Ask the LLM about the failures no rule explains, `limit` calls at
-    most. Returns how many distinct failures are left without an answer that
-    a later call may give: beyond `limit`, or a transient API error (not a
-    log without an error, a refusal or an unusable answer: asking again
-    would give the same)."""
+    """Ask the LLM about the failures no rule explains, `limit` API calls at
+    most: cached answers do not count, so that each run adds answers to the
+    ones before. Returns how many distinct failures are left without an
+    answer that a later call may give: beyond `limit`, a transient API error,
+    or the LLM off (credentials refused, LLM_BREAKER failures in a row); not
+    a log without an error, a refusal or an unusable answer: asking again
+    would give the same."""
     jobs = {j["variant"]: j for j in data["jobs"]}
     todo = llm_todo(results, data)
-    seen, done, answers, left = set(), 0, {}, set()
+    seen, done, answers, left, beyond = set(), 0, {}, set(), 0
     sig_of = llm_sig
     for r in todo:
         sig = sig_of(r)
         if sig in seen:
             continue
-        if done >= limit:
-            left.add(sig)
-            continue
         seen.add(sig)
-        done += 1
         try:
             text = log_text(fetch(r["url"], cache_dir))
             if not (excerpt(text, max_output_lines=80).get("error_block") or log_info(text)["error_lines"]):
@@ -328,9 +383,19 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
                 # "transient" for a missing library): leave it unrecognised.
                 continue
             log_err = key_error_line(text)
-            res = llm_suggest(src, r, jobs[r["variant"]], text, data, pr_packages, cache_dir, model, dry_run)
+            # Beyond `limit` calls, only a cached answer.
+            res = llm_suggest(src, r, jobs[r["variant"]], text, data, pr_packages, cache_dir, model, dry_run,
+                              call=done < limit)
         except Exception as e:      # the log, an opam file or the SDK failed: the failure stays unrecognised
-            res = {"llm_error": f"{type(e).__name__}: {str(e)[:200]}"}
+            res = {"llm_error": f"{type(e).__name__}: {str(e)[:200]}", "_no_call": True}
+        # Only API calls count toward `limit`: not a cached answer, nor a
+        # failure skipped or failed before asking.
+        if not (res.pop("_cached", False) or res.pop("_no_call", False) or "llm_skipped" in res):
+            done += 1
+        if "llm_skipped" in res:
+            left.add(sig)
+            beyond += not LLM_STATE["off"]
+            continue
         if "llm_prompt" in res:
             r["llm_prompt"] = res["llm_prompt"]
             continue
@@ -338,7 +403,7 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
             # A missing package, a bad key or an API error: the failure stays
             # unrecognised; the error is logged, not shown in the suggestion.
             r["llm_error"] = res["llm_error"]
-            if res.get("transient"):
+            if res.get("transient") or res.get("off"):
                 left.add(sig)
             print(f"note: LLM not used for {r['variant']}: {res['llm_error']}", file=sys.stderr)
             continue
@@ -382,6 +447,7 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
             # the Markdown comment shows it as code, never as Markdown.
             to = f" to {md_code(named)}" if unchecked else ""
             r["note"] += f" Possible change{to}, not checked: {md_code(change)}."
-    if left - seen:
-        print(f"note: LLM used on {limit} unexplained failures (use --llm-max for more)", file=sys.stderr)
+    if beyond:
+        print(f"note: LLM asked about {done} unexplained failures, {beyond} left for a later run "
+              f"(use --llm-max for more)", file=sys.stderr)
     return len(left)
