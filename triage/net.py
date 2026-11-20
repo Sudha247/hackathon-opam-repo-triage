@@ -269,6 +269,15 @@ GIT_NET_FAILURE = re.compile(
     r"transfer closed|Recv failure|Empty reply|SSL|TLS|gnutls|Couldn't connect", re.I)
 
 
+# Of those, the failures that a dead or misconfigured host gives every time
+# (no DNS name, a bad certificate, nothing listening, no answer): the URL is
+# not asked again for GIT_DOWN_MAX_AGE (see Sources.git_down).
+GIT_UNREACHABLE = re.compile(
+    r"timed out|Could not resolve host|Failed to connect|Couldn't connect|Connection (refused|timed out)|"
+    r"SSL|TLS|gnutls|certificate", re.I)
+GIT_DOWN_MAX_AGE = 24 * 3600
+
+
 def safe_git_url(url):
     return bool(url) and SAFE_GIT_URL.fullmatch(url) is not None
 

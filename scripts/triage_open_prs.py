@@ -551,6 +551,8 @@ def main():
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
                       "llm": use_llm, "mcp_errors": net.get("mcp-errors", 0),
                       "net_errors": net.get("net-errors", 0) + net.get("timeout", 0),
+                      # A git host that failed earlier today: not asked again, not retried (see Sources.git_down).
+                      "git_unreachable": net.get("git-unreachable", 0),
                       "analysed_at": now(), "seconds": round(time.monotonic() - t0, 1),
                       "jobs": jobs_overview(summary) if summary else None})
         for k in ("pending", "last_error", "last_error_at"):

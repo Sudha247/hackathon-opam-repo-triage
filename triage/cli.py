@@ -129,7 +129,8 @@ def main():
             return
         if args.json:
             # incomplete: ocaml.org or another server failed during the analysis (see the counts).
-            errors = {k: NET[k] for k in ("mcp-errors", "net-errors") if NET.get(k)}
+            # git-unreachable: a git host that failed earlier today, not asked again.
+            errors = {k: NET[k] for k in ("mcp-errors", "net-errors", "git-unreachable") if NET.get(k)}
             json.dump({"sha": sha, "pr": data["pr"], "ci_unfinished": data["unfinished"],
                        "ci_jobs": len(data["jobs"]), "unanalysed": data.get("unanalysed", 0),
                        "incomplete": bool(errors), "errors": errors,

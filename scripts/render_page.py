@@ -616,6 +616,15 @@ def ready_section(data, shown=5):
     return out + "</section>"
 
 
+def failed_lookups(pr):
+    """The requests that failed during the analysis shown (ocaml.org's MCP
+    server, HTTP, git; a git host that failed earlier the same day counts
+    too): the analysis is incomplete. 0 without a result."""
+    if pr.get("pending") or pr.get("result") is None:
+        return 0
+    return sum(int(pr.get(k) or 0) for k in ("mcp_errors", "net_errors", "git_unreachable"))
+
+
 def render_pr(pr, year=None, max_failures=None):
     v = verdict(pr)
     g = groups(pr)
@@ -650,6 +659,12 @@ def render_pr(pr, year=None, max_failures=None):
         bar.append(copy_block(pr))
     bar.append(f'<span>commit {e((sha or "")[:12])} · analysed '
                f'{e((pr.get("analysed_at") or "never")[:16].replace("T", " "))} UTC</span>')
+    lookups = failed_lookups(pr)
+    if lookups:
+        bar.append(f'<span class="no" title="ocaml.org, a git host or another server did not answer during the '
+                   f'analysis: some versions, tags, docs or logs were not read, so a suggestion may be missing. '
+                   f'The analysis is tried again a few times a day.">analysis incomplete ({lookups} failed '
+                   f'lookup{plural(lookups)})</span>')
     if pr.get("last_error") and pr.get("result") is not None:
         # A newer analysis of the same commit failed: this result is the previous one.
         bar.append(f'<span title="{e(pr["last_error"])}">a newer analysis failed '

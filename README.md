@@ -356,7 +356,13 @@ a missing tag or repository is an answer, not counted); `suggest --json` then
 says `"incomplete": true`. Such an analysis lacks
 some versions, docs or health-check results, and states what it could not
 check instead of concluding; the triage page does it again in its next runs
-(three attempts a day at most, as for a failed or timed-out analysis). A rule
+(three attempts a day at most, as for a failed or timed-out analysis), and
+shows "analysis incomplete (N failed lookups)" beside the result. A git URL
+that failed in a way a dead host fails every time (no DNS name, a TLS or
+certificate error, nothing listening, a timeout) is not asked again for a
+day: the later analyses count it in `git-unreachable` (shown as a failed
+lookup too), not as a new `net-errors`, so a dead dev-repo host neither
+costs a timeout on each analysis nor makes the PR retried. A rule
 that crashes on a log gives a `rule-error` result for that job only.
 
 Limitations:

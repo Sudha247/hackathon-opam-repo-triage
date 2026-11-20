@@ -25,8 +25,11 @@ from .net import (  # noqa: F401
     OFFLINE,
     REPO,
     USER_AGENT,
+    GIT_DOWN_MAX_AGE,
+    GIT_UNREACHABLE,
     cached_json,
     fetch,
+    fresh,
     gh_api,
     git,
     offline_miss,
@@ -117,6 +120,31 @@ class Sources:
         self.mem[("gitdir", d)] = True
         return d
 
+    def _down_marker(self, url):
+        return os.path.join(self.cache_dir, "gitdown-" + hashlib.sha256(url.encode()).hexdigest()[:16])
+
+    def git_down(self, url):
+        """Whether a fetch or listing of `url` failed in the last
+        GIT_DOWN_MAX_AGE in a way a dead host fails every time (see
+        GIT_UNREACHABLE): it is not asked again meanwhile. That failure was
+        counted once in NET["net-errors"] (the triage page retries the
+        analysis a few times); a cached one is counted in
+        NET["git-unreachable"] instead, so that a dead dev-repo host does not
+        make every analysis incomplete and retried, each after a timeout."""
+        p = self._down_marker(url)
+        if ("down", url) not in self.mem:
+            self.mem[("down", url)] = os.path.exists(p) and fresh(p, GIT_DOWN_MAX_AGE)
+            if self.mem[("down", url)]:
+                NET["git-unreachable"] = NET.get("git-unreachable", 0) + 1
+        return self.mem[("down", url)]
+
+    def _note_down(self, url, out):
+        """Remember a failure of git on `url` that a dead host gives every
+        time (not offline: write_atomic writes nothing then)."""
+        if out.returncode != 0 and GIT_UNREACHABLE.search(out.stderr or ""):
+            write_atomic(self._down_marker(url), (out.stderr or "").strip()[:300])
+            self.mem[("down", url)] = True
+
     def _ensure(self, url, ref, is_tag):
         """Make `ref` (tag name or commit sha) available locally; return a rev."""
         key = ("ensure", url, ref)
@@ -128,9 +156,14 @@ class Sources:
         rev = f"refs/tags/{ref}" if is_tag else ref
         if git(["rev-parse", "--verify", "-q", rev + "^{tree}"], git_dir=d, check=False).returncode != 0:
             spec = f"+refs/tags/{ref}:refs/tags/{ref}" if is_tag else ref
-            r = git(["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", spec], git_dir=d, check=False)
-            if r.returncode != 0:
+            if self.git_down(url):
                 rev = None
+            else:
+                r = git(["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", spec], git_dir=d,
+                        check=False)
+                self._note_down(url, r)
+                if r.returncode != 0:
+                    rev = None
         self.mem[key] = rev
         return rev
 
@@ -141,12 +174,14 @@ class Sources:
             hit = cached_json(disk, max_age=86400)
             if hit and isinstance(hit["value"], list) and hit["value"]:
                 tags = hit["value"]
-            elif not safe_git_url(url):
+            elif not safe_git_url(url) or self.git_down(url):
                 tags = []
             else:
                 r = git(["ls-remote", "--tags", "--refs", "--", url], check=False)
                 tags = [l.split("refs/tags/", 1)[1] for l in r.stdout.splitlines() if "refs/tags/" in l]
-                # A failed listing (network error, offline) is not kept on disk.
+                # A failed listing (network error, offline) is not kept on disk;
+                # an unreachable host is remembered for a day (git_down).
+                self._note_down(url, r)
                 if r.returncode == 0 and tags:
                     write_atomic(disk, json.dumps(tags))
             self.mem[key] = tags

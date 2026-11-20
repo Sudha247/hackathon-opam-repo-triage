@@ -1079,6 +1079,51 @@ class TagsTest(NetTestBase):
             self.assertEqual(self.t.Sources(self.tmp).tags(url), ["v1.0"])     # cached
             self.assertEqual(g.call_count, 0)
 
+    def test_unreachable_host_remembered(self):
+        # A host that cannot be reached (DNS, TLS, nothing listening, no
+        # answer) is not asked again for a day: one net error, then cached
+        # failures that are not new net errors. A transient error is not remembered.
+        from unittest import mock
+        url = "https://git.dead.example/repo"
+        calls = []
+
+        def run(stderr):
+            def f(cmd, **kw):
+                sub = cmd[len(self.net.GIT_PROTOCOLS) + 1]
+                calls.append(sub)
+                if sub in ("ls-remote", "fetch"):
+                    return subprocess.CompletedProcess(cmd, 128, "", stderr)
+                return subprocess.CompletedProcess(cmd, 1 if sub == "rev-parse" else 0, "", "")   # a new mirror
+            return f
+        dead = run("fatal: unable to access 'https://git.dead.example/repo/': Could not resolve host: "
+                   "git.dead.example")
+        with mock.patch.object(self.net.subprocess, "run", dead):
+            n, u = self.errors("net-errors"), self.errors("git-unreachable")
+            self.assertEqual(self.t.Sources(self.tmp).tags(url), [])
+            self.assertEqual((calls, self.errors("net-errors")), (["ls-remote"], n + 1))
+            calls.clear()
+            s = self.t.Sources(self.tmp)
+            self.assertEqual(s.tags(url), [])
+            self.assertIsNone(s._ensure(url, "v1.0", True))         # the fetch of a tag too
+            self.assertNotIn("ls-remote", calls)
+            self.assertNotIn("fetch", calls)
+            self.assertEqual((self.errors("net-errors"), self.errors("git-unreachable")), (n + 1, u + 1))
+            # A day later, asked again.
+            for f in os.listdir(self.tmp):
+                if f.startswith("gitdown-"):
+                    self.age(os.path.join(self.tmp, f), 2)
+            calls.clear()
+            self.assertEqual(self.t.Sources(self.tmp).tags(url), [])
+            self.assertEqual(calls, ["ls-remote"])
+        # A transient error (a 503) is asked again in the next analysis.
+        url2 = url + "2"
+        with mock.patch.object(self.net.subprocess, "run",
+                               run("error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503")):
+            calls.clear()
+            self.t.Sources(self.tmp).tags(url2)
+            self.t.Sources(self.tmp).tags(url2)
+            self.assertEqual(calls, ["ls-remote", "ls-remote"])
+
     def test_unbound_stdlib_value_without_tags(self):
         out = run_patched("colibri2-stdlib", "import triage.sources as s\ns.Sources.tags = lambda self, url: []")
         self.assertEqual(out.returncode, 0, out.stderr[-1500:])
@@ -1632,6 +1677,14 @@ class PageTest(unittest.TestCase):
         self.assertIn("a newer analysis failed 2026-11-20 10:00 UTC; this result may be out of date", html)
         self.assertIn('title="timeout after 600s &lt;b&gt;"', html)
         self.assertNotIn("newer analysis failed", self.r.render_pr(self.pr([self.day10])))
+
+    def test_incomplete_analysis_shown(self):
+        # Failed lookups (ocaml.org, HTTP, git, a git host down earlier today) are shown.
+        html = self.r.render_pr(self.pr([self.day10], mcp_errors=2, net_errors=1, git_unreachable=1))
+        self.assertIn("analysis incomplete (4 failed lookups)", html)
+        self.assertIn("analysis incomplete (1 failed lookup)", self.r.render_pr(self.pr([self.day10], net_errors=1)))
+        self.assertNotIn("analysis incomplete", self.r.render_pr(self.pr([self.day10], mcp_errors=0)))
+        self.assertNotIn("analysis incomplete", self.r.render_pr(self.pr([self.day10], net_errors=1, pending=True)))
 
     def test_shared_failures(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
