@@ -1244,6 +1244,10 @@ class PageMainTest(unittest.TestCase):
         state, calls, _ = self.run_main([self.pr()], version="w", suggest_ok=False)
         self.assertEqual(calls, [])                                   # kept, until the attempts expire
         self.assertEqual(state["1"]["result"], good)
+        # A rebuild of the same commit is analysed at once, from a fresh CI page.
+        rebuilt = self.pr(ci_created="2026-11-20T11:00:00Z")
+        _, calls, _ = self.run_main([rebuilt], version="w", suggest_ok=False)
+        self.assertEqual(self.kinds(calls), ["suggest --refresh"])
         # The attempts expired: tried again, and this time it works.
         state["1"]["last_error_at"] = "2026-01-01T00:00:00+00:00"
         self.save(state)

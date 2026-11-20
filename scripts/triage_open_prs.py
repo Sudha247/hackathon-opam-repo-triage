@@ -250,8 +250,9 @@ def reuse(prev, p, version, llm, now_=None, digest=None):
         same = False
     # A failed attempt to redo an analysis kept the previous result: tried
     # again MAX_ATTEMPTS times at most, then the result is kept as it is.
+    # A new CI run (a rebuild) is always analysed: this only applies to the same one.
     if (not same and prev is not None and prev.get("sha") == p["sha"] and prev.get("last_error")
-            and prev.get("result") is not None):
+            and prev.get("result") is not None and not ci_changed(prev, p)):
         if attempts_used(prev, now_) >= MAX_ATTEMPTS:
             same, same_commit, retry = True, True, False
         else:
