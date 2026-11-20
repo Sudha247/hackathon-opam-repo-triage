@@ -277,6 +277,12 @@ def ci_digest(summary):
     return hashlib.sha256(json.dumps(jobs).encode()).hexdigest()[:16]
 
 
+# Why the LLM was turned off in a run, in words (for the run's summary and the page).
+LLM_OFF_TEXT = {"credentials": "Anthropic refused the API key (expired or invalid): check the "
+                               "ANTHROPIC_API_KEY secret.",
+                "outage": "Anthropic's API failed several times in a row; the next update tries again."}
+
+
 def reuse(prev, p, version, llm, now_=None, digest=None):
     """Whether the previous analysis of PR `p` can be kept: (same, same_commit,
     retry). `same`: it describes the current state and need not be redone
@@ -569,6 +575,7 @@ def main():
     # Transient LLM failures in a row, across the PRs of this run: after
     # LLM_BREAKER (an outage), the LLM is not asked again in this run.
     llm_streak = 0
+    llm_off = None          # why the LLM was turned off in this run: "credentials" or "outage"
     for p in failing:
         key = str(p["number"])
         prev = old.get(key)
@@ -665,6 +672,7 @@ def main():
             if "llm-streak" in net:
                 llm_streak = net["llm-streak"] + (0 if net.get("llm") else llm_streak)
             if (net.get("llm-off") or llm_streak >= LLM_BREAKER) and llm_left > 0:
+                llm_off = "credentials" if net.get("llm-off") else "outage"
                 print(f"LLM off for the rest of this run ({llm_streak} API failures in a row"
                       f"{', or the tool turned it off' if net.get('llm-off') else ''})", file=sys.stderr)
                 llm_left = 0
@@ -741,7 +749,7 @@ def main():
             # only while the CI page has unfinished jobs.
             "running_prs": len([e for e in new_state.values() if ci_running(e)]),
             "limit": args.limit, "max_failures_per_pr": args.max,
-            "llm": {"enabled": llm, "calls": net_total.get("llm", 0)},
+            "llm": {"enabled": llm, "calls": net_total.get("llm", 0), "off": llm_off},
             "run": {"github_api_calls": list_calls, "tool_requests": dict(net_total), **stats},
             "prs": sorted(new_state.values(), key=lambda e: e["updated"], reverse=True),
             # PRs whose CI passes: nothing to analyse, listed so that the page
@@ -757,6 +765,11 @@ def main():
           f"deferred {stats['deferred']}, dropped {stats['dropped']}; tool requests: "
           + (", ".join(f"{k}={v}" for k, v in net_total.items()) or "none") + f"; wrote {args.out}",
           file=sys.stderr)
+    # In the run's summary on GitHub, so that an expired key is noticed.
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary and llm_off:
+        with open(summary, "a") as f:
+            f.write(f"**LLM diagnoses were turned off in this run:** {LLM_OFF_TEXT[llm_off]}\n\n")
     gh_out = os.environ.get("GITHUB_OUTPUT")
     if gh_out:
         with open(gh_out, "a") as f:

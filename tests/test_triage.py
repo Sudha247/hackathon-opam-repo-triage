@@ -1729,7 +1729,8 @@ class PageMainTest(unittest.TestCase):
                 mock.patch.object(self.T, "tool_version", return_value=version), \
                 mock.patch.object(sys, "argv", ["triage_open_prs.py", "--state", self.state,
                                                 "--out", os.path.join(self.tmp, "data.json")] + list(args)), \
-                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": gh_out}), \
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": gh_out,
+                                             "GITHUB_STEP_SUMMARY": os.path.join(self.tmp, "summary.md")}), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.T.main()
         with open(self.state) as f:
@@ -1945,6 +1946,14 @@ class PageMainTest(unittest.TestCase):
             asked = [n for n, c in zip((1, 2, 3), [c for c in calls if c[0] == "suggest"]) if "--llm" in c]
             self.assertEqual(asked, [1, 2, 3][:len(nets)], nets)
             self.assertIsNone(state[str(len(nets) + 1)]["llm_unanswered"])     # analysed without the LLM
+        # Said in the data the page is built from, and in the run's summary on GitHub.
+        self.save({})
+        it = iter([{"llm-off": 1}] + [{}] * 3)
+        self.run_main(prs, llm=True, tool=lambda a: (dict(out), None, next(it)))
+        with open(os.path.join(self.tmp, "data.json")) as f:
+            self.assertEqual(json.load(f)["llm"]["off"], "credentials")
+        with open(os.path.join(self.tmp, "summary.md")) as f:
+            self.assertIn("ANTHROPIC_API_KEY", f.read())
         # A success between failures: not in a row.
         self.save({})
         it = iter([{"llm-streak": 1}, {"llm": 1, "llm-streak": 0}, {"llm-streak": 1}])
@@ -2683,6 +2692,12 @@ class PageTest(unittest.TestCase):
             "Warning in x.1: Unnecessary field 'version'", "Error in x.1: Missing field 'license'"]}]}
         rs = context.lint_rules(data, None)
         self.assertEqual([suggest.title_of(r) for r in rs], ["opam lint warning", "opam lint error"])
+
+    def test_llm_off_note(self):
+        page = self.r.render({"prs": [], "llm": {"enabled": True, "calls": 0, "off": "credentials"}})
+        self.assertIn("Anthropic refused the API key", page)
+        self.assertIn("They were turned off during this update.", page)
+        self.assertNotIn("Anthropic refused", self.r.render({"prs": [], "llm": {"enabled": True, "calls": 3}}))
 
     def test_stale_health_check_note(self):
         pr = self.pr([self.lint])

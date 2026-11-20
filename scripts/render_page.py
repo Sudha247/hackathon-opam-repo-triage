@@ -1013,11 +1013,23 @@ block a PR.</dd>
 the last one (a PR is analysed again when its head commit or its CI status changes). Up to
 {e(data.get("max_failures_per_pr"))} different failures are analysed per PR.{limit}
 {f"LLM diagnoses are enabled: {e(llm.get('calls', 0))} new LLM calls in this update." if llm.get("enabled")
- else "LLM diagnoses are not enabled."}</p>
+ else "LLM diagnoses are not enabled."}{" They were turned off during this update." if llm.get("off") else ""}</p>
 <p class="meta">To post a suggestion as a line comment on a PR, review it first, then run
 <code>python3 opam_repo_ci_triage.py review --pr NUMBER --post</code>
 (from <a href="https://github.com/Sudha247/hackathon-opam-repo-triage" rel="noopener noreferrer">this
 repository</a>).</p></section>'''
+
+
+# Why the LLM was turned off during an update (see triage_open_prs.py), shown under the lead.
+LLM_OFF = {"credentials": "Anthropic refused the API key (expired or invalid), so failures the rules cannot "
+                          "explain have no LLM diagnosis in this update.",
+           "outage": "Anthropic's API failed several times in a row, so some failures the rules cannot explain "
+                     "have no LLM diagnosis in this update; the next one tries again."}
+
+
+def llm_off_note(data):
+    off = (data.get("llm") or {}).get("off")
+    return f'<p class="note llm-off">{e(LLM_OFF.get(off, ""))}</p>' if off in LLM_OFF else ""
 
 
 def render(data):
@@ -1048,6 +1060,7 @@ def render(data):
         f'<nav>Updated {e(day(gen, year))} {e(gen[11:16])} UTC · <a href="feed.xml">Atom feed</a> · '
         '<a href="#help">How to read this page</a></nav></header>',
         f'<p class="lead">{scope}</p>' if scope else "",
+        llm_off_note(data),
         ready_section(data),
         f'<section id="failing"><h2>Failing PRs <span class="sub">({len(prs)})</span></h2>',
         '<nav class="filters" aria-label="Filters"><div class="seg" role="group" aria-label="Verdict">'
