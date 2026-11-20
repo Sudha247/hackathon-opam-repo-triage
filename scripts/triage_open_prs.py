@@ -165,6 +165,10 @@ def list_open_prs(token):
         cursor = conn["pageInfo"]["endCursor"]
 
 
+# The fields of a failed attempt to redo an analysis whose previous result is kept.
+LAST_ERROR = ("last_error", "last_error_at", "last_error_ci_state", "last_error_ci_created", "last_error_refreshed")
+
+
 def attempts_used(prev, now_=None):
     """The analyses of `prev`'s commit made so far that count toward
     MAX_ATTEMPTS: none once ATTEMPTS_EXPIRE has passed since the last one
@@ -196,14 +200,30 @@ def ci_changed(prev, p):
     return newer or prev.get("ci_state") != p["ci_state"]
 
 
+def tried_run(prev, p):
+    """Whether the last failed attempt to redo `prev`'s analysis (its result
+    kept, see main) was for the CI run of `p`: the same commit, status and
+    status date (`last_error_ci_state`, `last_error_ci_created`)."""
+    return bool(prev and prev.get("last_error") and prev.get("sha") == p["sha"]
+                and "last_error_ci_state" in prev and prev["last_error_ci_state"] == p["ci_state"]
+                and prev.get("last_error_ci_created") == p.get("ci_created"))
+
+
 def needs_refresh(prev, p):
     """Whether the analysis must fetch the CI page and the job logs again
     (`--refresh`) rather than read them from the cache: the status changed
     (ci_changed), or nothing says which build the cache holds: no previous
     entry (a PR dropped when its CI passed, failing again after a rebuild,
     would get the first build's cached page) or another commit (free: its
-    page is not cached)."""
-    return prev is None or prev.get("sha") != p["sha"] or ci_changed(prev, p)
+    page is not cached). Not when a failed attempt already refreshed the
+    cache for this CI run (`last_error_refreshed`): the logs it read since
+    come from this run, and dropping them again would cost the next attempt
+    the same work."""
+    if prev is None or prev.get("sha") != p["sha"]:
+        return True
+    if tried_run(prev, p) and prev.get("last_error_refreshed"):
+        return False
+    return ci_changed(prev, p)
 
 
 def ci_digest(summary):
@@ -250,9 +270,11 @@ def reuse(prev, p, version, llm, now_=None, digest=None):
         same = False
     # A failed attempt to redo an analysis kept the previous result: tried
     # again MAX_ATTEMPTS times at most, then the result is kept as it is.
-    # A new CI run (a rebuild) is always analysed: this only applies to the same one.
+    # A new CI run (a rebuild) is always analysed: this only applies to the
+    # run the result saw, or to the one the failed attempts were for (the
+    # result kept still says it saw the previous run: ci_changed holds).
     if (not same and prev is not None and prev.get("sha") == p["sha"] and prev.get("last_error")
-            and prev.get("result") is not None and not ci_changed(prev, p)):
+            and prev.get("result") is not None and (not ci_changed(prev, p) or tried_run(prev, p))):
         if attempts_used(prev, now_) >= MAX_ATTEMPTS:
             same, same_commit, retry = True, True, False
         else:
@@ -342,9 +364,12 @@ def mark_shared_failures(prs):
 
     Another PR counts only when its failing job tests another package (two
     releases of lwt break the same reverse dependencies: they do not vouch for
-    each other) and fails the same way (its category, when known), and those
-    PRs must test at least SHARED_MIN different packages: two releases of lwt
-    count as one piece of evidence for a third PR. Never for a
+    each other) and fails the same way (its category, when known), and
+    SHARED_MIN of those PRs must test different packages (the packages of
+    their matching jobs, pairwise disjoint): two releases of lwt count as one
+    piece of evidence for a third PR, and so do three PRs that each release
+    dune, dune-configurator and dune-site. `also_failing_in` lists every
+    PR that counts, not only those picked as independent. Never for a
     failure the analysis puts on this PR (health-check-new, where_kind "pr"):
     the evidence says it is this PR's."""
     where = collections.defaultdict(dict)       # revdep -> PR -> [(tested package name, category)]
@@ -368,16 +393,27 @@ def mark_shared_failures(prs):
                 name, rd = split_pkg(m.group(1))[0], m.group(2)
                 cats = {j.get("category") for j in mine.get(rd) or [] if isinstance(j, dict)
                         and j.get("variant") == v} - {None}
-                same = {p for p, js in where[rd].items()
-                        if p != n and any(t and t != name and (not cats or c in cats) for t, c in js)}
-                others = same if others is None else others & same
-                for p in same:
-                    tested.setdefault(p, set()).update(t for t, _ in where[rd][p] if t and t != name)
-            # As many different packages as PRs: two releases of one package
-            # count once.
-            names = set().union(*(tested.get(p, set()) for p in others)) if others else set()
-            if others and len(others) >= SHARED_MIN and len(names) >= SHARED_MIN:
+                same = {}
+                for p, js in where[rd].items():
+                    names = {t for t, c in js if p != n and t and t != name and (not cats or c in cats)}
+                    if names:
+                        same[p] = names
+                others = set(same) if others is None else others & set(same)
+                for p, names in same.items():
+                    tested.setdefault(p, set()).update(names)
+            if others and len(independent(others, tested)) >= SHARED_MIN:
                 r["also_failing_in"] = sorted(others)
+
+
+def independent(prs, tested):
+    """PRs of `prs` whose tested packages (`tested[pr]`, a set of names) do
+    not overlap: picked greedily, those testing fewer packages first."""
+    picked, seen = [], set()
+    for p in sorted(prs, key=lambda p: (len(tested[p]), p)):
+        if not tested[p] & seen:
+            picked.append(p)
+            seen |= tested[p]
+    return picked
 
 
 def since_last_push(prev, result):
@@ -483,8 +519,10 @@ def main():
                 continue
             if prev and prev.get("sha") != p["sha"]:     # an older result would describe another commit
                 for k in ("result", "error", "jobs", "analysed_at", "attempts", "tool_version", "ci_digest",
-                          "last_error", "last_error_at", "since_last_push"):
+                          "since_last_push", "ci_created", "ci_unfinished", "llm", "llm_unanswered", "mcp_errors",
+                          "net_errors", "git_unreachable", "seconds") + LAST_ERROR:
                     entry.pop(k, None)
+                entry["ci_state"] = p["ci_state"]        # the new commit's (its CI may still run)
             entry["pending"] = True
             new_state[key] = entry
             continue
@@ -496,6 +534,7 @@ def main():
         # then may have been rebuilt since), and without a previous analysis of
         # this build (see needs_refresh).
         refresh = ["--refresh"] if needs_refresh(prev, p) else []
+        refreshed = bool(refresh) or (tried_run(prev, p) and bool(prev.get("last_error_refreshed")))
         if refresh:
             stats["refreshed"] += 1
         if p["ci_state"] == "PENDING":
@@ -504,6 +543,14 @@ def main():
             summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir] + refresh,
                                         120)
             refresh = []
+            if summary is None and prev and prev.get("sha") == p["sha"] and prev.get("result") is not None:
+                # The CI page could not be read (timeout, network): nothing says
+                # the failures are gone, so the result is kept until the next run.
+                print(f"#{p['number']} {p['sha'][:12]} summary failed: {serr}; the previous result is kept",
+                      file=sys.stderr)
+                stats["summary failed"] += 1
+                new_state[key] = entry
+                continue
             failed = [j for j in (summary or {}).get("jobs", []) if j.get("status") == "failed"
                       and j.get("category") not in NOISE]
             if not failed:
@@ -530,8 +577,12 @@ def main():
             # A failed redo (timeout, outage) of an analysis of the same
             # commit: the previous result is kept, with the error beside it.
             # Its fields (tool version, CI status) still say what it saw, so
-            # it is tried again, MAX_ATTEMPTS times at most (see reuse()).
-            entry.update({"last_error": err, "last_error_at": now(), "attempts": attempts})
+            # it is tried again, MAX_ATTEMPTS times at most (see reuse()); the
+            # CI run tried is recorded, so that the attempts at a rebuild add
+            # up too, and are made from the cache once it was refreshed.
+            entry.update({"last_error": err, "last_error_at": now(), "attempts": attempts,
+                          "last_error_ci_state": p["ci_state"], "last_error_ci_created": p.get("ci_created"),
+                          "last_error_refreshed": refreshed})
             entry.pop("pending", None)
             stats["failed"] += 1
             print(f"#{p['number']} {p['sha'][:12]} ERROR: {err}; the previous result is kept "
@@ -555,7 +606,7 @@ def main():
                       "git_unreachable": net.get("git-unreachable", 0),
                       "analysed_at": now(), "seconds": round(time.monotonic() - t0, 1),
                       "jobs": jobs_overview(summary) if summary else None})
-        for k in ("pending", "last_error", "last_error_at"):
+        for k in ("pending",) + LAST_ERROR:
             entry.pop(k, None)
         stats["analysed" if result is not None else "failed"] += 1
         print(f"#{p['number']} {p['sha'][:12]} {'ok' if result is not None else 'ERROR: ' + err} "

@@ -131,7 +131,7 @@ Failures that would happen without the PR are marked "Pre-existing" in the note:
 - jobs that also failed in the CI run of the PR that published the previous release of the package (same platform, same job, and the same failure: category and reason, the version left out; 2 GitHub calls and one page per package, skipped when the old run has been purged). When the release's own build fails at the same step but the reason does not show the error (`The compilation of … failed at "dune build …"`), the note says so, and the triage page does not count the failure as happening without the PR;
 - reverse dependencies that opam-health-check also sees failing on master (from ocaml.org's MCP `ocaml_package_build_information`; same version and OCaml version, build only, as opam-health-check builds the newest version of each package without tests; one request per package, cached for a day). A run older than 7 days (a stuck service) is not used, and the tool says so (`note:` on stderr).
 
-Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Broken by this PR (builds on master)": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready). Another PR counts only when its failing job tests another package (two releases of one package do not vouch for each other) and fails the same way (the job's category); a failure the analysis puts on this PR ("Broken by this PR") is never marked.
+Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Broken by this PR (builds on master)": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready). Another PR counts only when its failing job tests another package (two releases of one package do not vouch for each other) and fails the same way (the job's category), and 3 of those PRs must test different packages (the packages of their matching jobs do not overlap: three PRs each releasing dune, dune-configurator and dune-site are one piece of evidence); the note lists every PR that counts; a failure the analysis puts on this PR ("Broken by this PR") is never marked.
 
 The matrix rules use only the job list (no fetch); the others reuse the log
 already downloaded, plus at most one small lookup.
@@ -246,7 +246,12 @@ publishes the results on the repository's GitHub Pages site:
    result when it is for the same commit. When analysing a commit again fails
    (a timeout, a server down), the previous result is kept, with the error
    beside it (`last_error` in the state; the page says the result may be out
-   of date), and tried again three times a day at most.
+   of date), and tried again three times a day at most. After a rebuild too:
+   the state records the CI run the failed attempts were for
+   (`last_error_ci_state`, `last_error_ci_created`), so their attempts add
+   up, and only the first one passes `--refresh` (the next ones read the logs
+   it cached); a newer run is analysed at once, with `--refresh`. A PR whose
+   CI is running keeps its result when its CI page cannot be read.
 
    With an `ANTHROPIC_API_KEY` repository secret, failures that no rule
    recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most

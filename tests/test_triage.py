@@ -1339,7 +1339,8 @@ class PageMainTest(unittest.TestCase):
                 "sha": self.SHA, "author": "x", "labels": [], "stale_labels": [], "ci_state": "FAILURE",
                 "ci_url": None, "ci_created": "2026-11-20T10:00:00Z", **kw}
 
-    def run_main(self, prs, jobs=None, suggest_ok=True, args=(), llm=False, version="v"):
+    def run_main(self, prs, jobs=None, suggest_ok=True, args=(), llm=False, version="v", summary_ok=True,
+                 suggest_out=None):
         """One run; (state after it, the tool's calls, `changed` output)."""
         from unittest import mock
         import contextlib
@@ -1348,6 +1349,8 @@ class PageMainTest(unittest.TestCase):
         def run_tool(a, timeout, tool=None):
             calls.append(a)
             if a[0] == "summary":
+                if not summary_ok:
+                    return None, "timeout after 120s", {"timeout": 1}
                 return {"jobs": jobs if jobs is not None else self.FAILED_ANALYSIS}, None, {}
             if not suggest_ok:
                 return None, "timeout after 600s", {"timeout": 1}
@@ -1460,6 +1463,51 @@ class PageMainTest(unittest.TestCase):
         self.assertEqual(self.kinds(calls), ["suggest", "summary"])
         self.assertNotIn("last_error", state["1"])
         self.assertEqual(state["1"]["tool_version"], "w")
+
+    def test_failed_redo_of_a_rebuild_limited(self):
+        # After a rebuild, a redo that keeps failing: the attempts at that CI
+        # run add up (MAX_ATTEMPTS, then the result is kept), and only the
+        # first one refreshes the cache. A newer rebuild is analysed at once.
+        state, _, _ = self.run_main([self.pr()])
+        good = state["1"]["result"]
+        rebuilt = self.pr(ci_created="2026-11-20T11:00:00Z")
+        for i in range(self.T.MAX_ATTEMPTS):
+            state, calls, _ = self.run_main([rebuilt], suggest_ok=False)
+            self.assertEqual(self.kinds(calls), ["suggest --refresh" if i == 0 else "suggest"], i)
+            self.assertEqual((state["1"]["result"], state["1"]["attempts"]), (good, i + 1))
+            self.assertEqual(state["1"]["ci_created"], "2026-11-20T10:00:00Z")       # what the result saw
+        state, calls, _ = self.run_main([rebuilt], suggest_ok=False)
+        self.assertEqual(calls, [])
+        newer = self.pr(ci_created="2026-11-20T12:00:00Z")
+        state, calls, _ = self.run_main([newer], suggest_ok=False)
+        self.assertEqual(self.kinds(calls), ["suggest --refresh"])
+        self.assertEqual(state["1"]["attempts"], 1)
+        # It works: the attempt's fields are gone.
+        state, calls, _ = self.run_main([newer])
+        self.assertEqual(self.kinds(calls), ["suggest", "summary"])
+        self.assertFalse([k for k in state["1"] if k.startswith("last_error")])
+
+    def test_deferred_new_commit_drops_old_fields(self):
+        # A new commit left for a later run: nothing of the old commit's analysis stays.
+        self.save({"1": {**self.pr(ci_state="PENDING"), "result": {"suggestions": []}, "ci_unfinished": 7,
+                         "llm": True, "mcp_errors": 2, "net_errors": 1, "tool_version": "v",
+                         "analysed_at": "2026-11-20T10:00:00+00:00"}})
+        state, calls, _ = self.run_main([self.pr(sha="b" * 40)], args=["--time-budget", "-1"])
+        self.assertEqual(calls, [])
+        e = state["1"]
+        self.assertTrue(e["pending"])
+        self.assertEqual(e["ci_state"], "FAILURE")
+        for k in ("result", "ci_unfinished", "llm", "mcp_errors", "net_errors", "ci_created"):
+            self.assertNotIn(k, e)
+
+    def test_pending_summary_failed_keeps_result(self):
+        # A pending PR whose CI page could not be read (`summary` failed): its result stays.
+        p = self.pr(ci_state="PENDING")
+        state, calls, _ = self.run_main([p])
+        good = state["1"]["result"]
+        state, calls, _ = self.run_main([p], summary_ok=False)
+        self.assertEqual(self.kinds(calls), ["summary"])
+        self.assertEqual(state["1"]["result"], good)
 
     def test_llm_budget_spent(self):
         # Analysed without the LLM; this run has the LLM but no budget left:
@@ -1725,6 +1773,34 @@ class PageTest(unittest.TestCase):
         self.assertIsNone(shared(("y.1", "build"), ("y.2", "build"), ("w.1", "build")))
         self.assertEqual(shared(("y.1", "build"), ("y.2", "build"), ("w.1", "build"), ("v.1", "build")),
                          [2, 3, 4, 5])
+        # PRs releasing several packages each (dune, dune-configurator, dune-site): their tested
+        # packages overlap, so three such PRs are one piece of evidence (the reviewer's scenario).
+        def multi(n, targets, category="build"):
+            return {"number": n, "jobs": {"failing_revdeps": {"X.1": [
+                {"variant": f"compilers,5.3,{t},revdeps,X.1", "category": c, "target": t, "url": "u"}
+                for t, c in targets]}}, "result": {"suggestions": []}}
+        dune = lambda n, v: multi(n, [(f"{p}.{v}", "build") for p in ("dune", "dune-configurator", "dune-site")])
+        mine = {"rule": "library-api", "where_kind": "other-package", "where_pkg": "X.1", "class": "elsewhere",
+                "variant": "compilers,5.3,foo.1,revdeps,X.1", "jobs": ["compilers,5.3,foo.1,revdeps,X.1"]}
+        prs = {"1": dune(1, "3.1"), "2": dune(2, "3.2"), "3": dune(3, "3.3"),
+               "4": dict(multi(4, [("foo.1", "build")]), result={"suggestions": [dict(mine)]})}
+        T.mark_shared_failures(prs)
+        self.assertIsNone(prs["4"]["result"]["suggestions"][0].get("also_failing_in"))
+        # A PR releasing bar, and one releasing dune-site alone (it overlaps the dune PRs): two
+        # independent PRs. A third one (baz) makes it shared; every PR that fails the same way is listed.
+        prs.update({"5": multi(5, [("bar.1", "build")]), "6": multi(6, [("dune-site.3.4", "build")])})
+        T.mark_shared_failures(prs)
+        self.assertIsNone(prs["4"]["result"]["suggestions"][0].get("also_failing_in"))
+        prs["7"] = multi(7, [("baz.1", "build")])
+        T.mark_shared_failures(prs)
+        self.assertEqual(prs["4"]["result"]["suggestions"][0].get("also_failing_in"), [1, 2, 3, 5, 6, 7])
+        # Only the jobs that fail the same way name the tested packages: another
+        # package failing differently in the same PR does not add evidence.
+        prs = {"2": multi(2, [("y.1", "build"), ("a.1", "dependency")]),
+               "3": multi(3, [("y.2", "build"), ("b.1", "dependency")]), "4": multi(4, [("w.1", "build")]),
+               "1": dict(multi(1, [("foo.1", "build")]), result={"suggestions": [dict(mine)]})}
+        T.mark_shared_failures(prs)
+        self.assertIsNone(prs["1"]["result"]["suggestions"][0].get("also_failing_in"))
         # Never on a failure the evidence puts on this PR: it builds on master.
         self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
                                  suggestion={"rule": "health-check-new", "fix_in": "this PR"}))
