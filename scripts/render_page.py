@@ -34,7 +34,8 @@ VERDICT_HELP = {
              "from the CI's setup, or is on an experimental platform; every job ran",
     "change": "A change to this PR's opam files is suggested: a fix, or a workaround that skips platforms or "
               "tests",
-    "blocked": "At least one failure must be fixed in another package",
+    "blocked": "At least one failure must be fixed in another package (failures that also happen without this "
+               "PR do not count)",
     "ci": "Every failure comes from the CI's setup (the day10 builder, the CI's opam), but the PR is a draft, has "
           "a label that keeps it out of the ready list, or its CI is still running",
     "rerun": "Some jobs did not run to the end because of the CI (network errors, cancelled jobs, a crash of the "
@@ -944,7 +945,8 @@ builder passes on the same system, the problem is in the CI setup, not in the pa
 <dt>Pre-existing</dt><dd>The package fails without this PR too: it also failed in the CI of the previous
 release (the same job, with the same reason), the PR only adds an upper bound to that package, or
 opam-health-check (which builds every package on master, without tests) sees it failing too. "Also fails in
-other open PRs" says the same from the other PRs on this page.</dd>
+other open PRs" says the same from the other PRs on this page: PRs of other packages, where the reverse
+dependency fails the same way.</dd>
 <dt>LLM diagnosis (unchecked)</dt><dd>For failures the tool cannot explain, an LLM (Claude) reads the log and
 suggests a cause. These diagnoses are not checked: in a test on 25 of them, 15 were right, 7 plausible and 3
 wrong. Changes to version bounds or depexts are shown as text to check, and low-confidence diagnoses are
