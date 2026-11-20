@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "..", "opam_repo_ci_triage.py")
@@ -384,6 +385,52 @@ class McpFailureTest(unittest.TestCase):
         self.assertEqual(T.reuse(dict(prev, mcp_errors=2, attempts=T.MAX_ATTEMPTS), p, "v", False),
                          (True, True, False))
         self.assertEqual(T.reuse(prev, dict(p, sha="b"), "v", False), (False, False, False))
+
+
+class RefreshTest(unittest.TestCase):
+    """After a rebuild of the same commit, the triage page analyses the PR
+    again from a fresh CI page and fresh logs."""
+
+    def test_ci_changed(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+        prev = {"sha": "a", "ci_state": "FAILURE", "ci_created": "2026-11-20T10:00:00Z", "tool_version": "v",
+                "result": {}, "attempts": 1}
+        p = {"sha": "a", "ci_state": "FAILURE", "ci_created": "2026-11-20T10:00:00Z"}
+        self.assertFalse(T.ci_changed(prev, p))
+        self.assertEqual(T.reuse(prev, p, "v", False), (True, True, False))
+        # "Rebuild failed", finished within the hour: same state, newer status.
+        rebuilt = dict(p, ci_created="2026-11-20T10:30:00Z")
+        self.assertTrue(T.ci_changed(prev, rebuilt))
+        self.assertEqual(T.reuse(prev, rebuilt, "v", False), (False, False, False))
+        self.assertTrue(T.ci_changed(prev, dict(p, ci_state="PENDING")))
+        # Unknown dates (state saved before they were recorded), another commit.
+        self.assertFalse(T.ci_changed(dict(prev, ci_created=None), rebuilt))
+        self.assertFalse(T.ci_changed(prev, dict(rebuilt, sha="b")))
+
+    def test_refresh_drops_logs(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import tempfile
+        from triage import ci, net
+        sha = "eafb2a69786279b98b31f3e5cd8a62ce432cf343"
+        with gzip.open(net.cache_path(net.BASE + sha, os.path.join(FIXTURES, "goblint-cil-baseline")) + ".gz",
+                       "rt", encoding="utf-8") as f:
+            page = f.read()
+        fetched = []
+
+        def fake_fetch(url, cache_dir, refresh=False):
+            fetched.append((url, refresh))
+            return page
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(ci, "fetch", fake_fetch):
+            data = ci.parse_commit_page(page)
+            job = next(j for j in data["jobs"] if j["status"] == "failed")
+            log = net.cache_path(job["url"], d)
+            open(log, "w").close()
+            ci.load_commit(sha, d)
+            self.assertTrue(os.path.exists(log))           # no rebuild: the cached log is kept
+            ci.load_commit(sha, d, refresh=True)
+            self.assertFalse(os.path.exists(log))          # rebuilt: fetched again when needed
+            self.assertEqual(fetched, [(net.BASE + sha, False), (net.BASE + sha, True)])
 
 
 class PageTest(unittest.TestCase):

@@ -52,6 +52,9 @@ Common options:
   `day10,debian-13,x86_64,5.5,lwt.5.10.2,tests`.
 - `--max N`: analyse at most N distinct failures (default 30).
 - `--cache-dir DIR`: cache location (default `.opam-ci-cache/`).
+- `--refresh`: fetch the commit's CI page again and drop the cached logs of
+  its jobs (after a rebuild: a finished page and the logs are otherwise cached
+  for good).
 
 ### suggest
 
@@ -193,6 +196,14 @@ publishes the results on the repository's GitHub Pages site:
    finishes. The tool never caches the CI page of a commit while jobs are
    still running (it fetches it again next time), and says when the results
    are partial.
+
+   The GraphQL query also gives the date of the `opam-ci` status. When a
+   finished CI's status changes for the same commit (another state, or a
+   status posted again after a maintainer's "Rebuild failed", even one that
+   finished within the hour), the PR is analysed again with `--refresh`: the
+   CI page is fetched again and the cached logs of its jobs are dropped (a
+   rebuilt job keeps its URL), so each log the analysis reads comes from the
+   new build. Nothing is fetched again when the status has not changed.
 
    With an `ANTHROPIC_API_KEY` repository secret, failures that no rule
    recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most

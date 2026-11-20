@@ -58,7 +58,7 @@ query($owner: String!, $name: String!, $cursor: String) {
             ... on IssueComment { createdAt author { login } }
           }
         }
-        commits(last: 1) { nodes { commit { oid status { contexts { context state targetUrl } } } } }
+        commits(last: 1) { nodes { commit { oid status { contexts { context state targetUrl createdAt } } } } }
       }
     }
   }
@@ -142,10 +142,23 @@ def list_open_prs(token):
                         "author": (n.get("author") or {}).get("login"),
                         "labels": [lb["name"] for lb in (n.get("labels") or {}).get("nodes") or []],
                         "stale_labels": stale_labels(n),
-                        "ci_state": (ci or {}).get("state"), "ci_url": (ci or {}).get("targetUrl")})
+                        "ci_state": (ci or {}).get("state"), "ci_url": (ci or {}).get("targetUrl"),
+                        "ci_created": (ci or {}).get("createdAt")})
         if not conn["pageInfo"]["hasNextPage"]:
             return prs, calls
         cursor = conn["pageInfo"]["endCursor"]
+
+
+def ci_changed(prev, p):
+    """Whether the opam-ci status of the same commit changed since the
+    previous analysis: another state, or a status posted again (a maintainer's
+    "Rebuild failed", even one that finished within the hour). The CI page and
+    the job logs are then fetched again (`--refresh`): the cache would give
+    the results of the previous build."""
+    if prev is None or prev.get("sha") != p["sha"]:
+        return False
+    newer = bool(p.get("ci_created") and prev.get("ci_created") and p["ci_created"] > prev["ci_created"])
+    return newer or prev.get("ci_state") != p["ci_state"]
 
 
 def reuse(prev, p, version, llm):
@@ -156,7 +169,7 @@ def reuse(prev, p, version, llm):
     during it."""
     # A PR whose CI is running is analysed again on every run, until its CI finishes.
     same = (prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
-            and prev.get("ci_state") == p["ci_state"] and p["ci_state"] != "PENDING")
+            and not ci_changed(prev, p) and p["ci_state"] != "PENDING")
     same_commit = same and prev.get("result") is not None
     # With the LLM on, a PR analysed without it (key added later, or the
     # run's budget spent) is analysed again; the logs come from the cache.
@@ -338,10 +351,19 @@ def main():
             continue
         t0 = time.monotonic()
         summary = None
+        # Jobs rebuilt since the previous analysis: the first run of the tool
+        # fetches the CI page again and drops the cached logs of its jobs. A
+        # page is not cached while CI runs, and the logs of jobs finished by
+        # then are final: nothing to refresh after a PENDING analysis.
+        refresh = ["--refresh"] if ci_changed(prev, p) and prev.get("ci_state") != "PENDING" else []
+        if refresh:
+            stats["refreshed"] += 1
         if p["ci_state"] == "PENDING":
             # Only worth showing once some job has failed: `summary` reads the
             # CI page (not cached while CI runs) and gives the counts.
-            summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
+            summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir] + refresh,
+                                        120)
+            refresh = []
             failed = [j for j in (summary or {}).get("jobs", []) if j.get("status") == "failed"
                       and j.get("category") not in NOISE]
             if not failed:
@@ -351,7 +373,7 @@ def main():
         use_llm = llm_left > 0
         extra = ["--llm", "--llm-max", str(min(args.llm_max, llm_left))] if use_llm else []
         result, err, net = run_tool(["suggest", p["sha"], "--json", "--max", str(args.max),
-                                     "--cache-dir", args.cache_dir] + extra, args.timeout)
+                                     "--cache-dir", args.cache_dir] + extra + refresh, args.timeout)
         net_total.update(net)
         llm_left -= net.get("llm", 0)
         if summary is None:
@@ -360,7 +382,7 @@ def main():
             entry["since_last_push"] = since_last_push(prev, result)
         elif prev and prev.get("sha") != p["sha"]:
             entry.pop("since_last_push", None)      # no comparable previous result
-        entry.update({"ci_state": p["ci_state"],
+        entry.update({"ci_state": p["ci_state"], "ci_created": p.get("ci_created"),
                       "ci_unfinished": (result or {}).get("ci_unfinished", 0)})
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
                       "llm": use_llm, "mcp_errors": net.get("mcp-errors", 0),

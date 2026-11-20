@@ -76,7 +76,8 @@ def main():
                     help="comment/review: post it on the PR with gh (default: print it)")
     ap.add_argument("--baseline", help="compare: baseline commit sha/URL (default: the PR of the previous version)")
     ap.add_argument("--cache-dir", default=".opam-ci-cache")
-    ap.add_argument("--refresh", action="store_true", help="ignore the cache for the commit page")
+    ap.add_argument("--refresh", action="store_true",
+                    help="fetch the commit page again, and the logs of its jobs when needed (after a rebuild)")
     args = ap.parse_args()
 
     sha = resolve_sha(args.target, args.pr)
