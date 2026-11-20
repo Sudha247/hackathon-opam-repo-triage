@@ -50,8 +50,15 @@ Common options:
   A variant is the last part of a job URL, e.g.
   `compilers,4.14,lwt.5.10.2,revdeps,osc.0.1.4` or
   `day10,debian-13,x86_64,5.5,lwt.5.10.2,tests`.
-- `--max N`: analyse at most N distinct failures (default 30).
+- `--max N`: analyse at most N distinct failures (default 30): those of the
+  PR's own packages first, then those of their reverse dependencies, and
+  experimental platforms last. `suggest --json` gives the number of the others
+  that no suggestion explains in `unanalysed`; the PR comment and the triage
+  page say how many, and such a PR is not listed as seeming ready.
 - `--cache-dir DIR`: cache location (default `.opam-ci-cache/`).
+- `--refresh`: fetch the commit's CI page again and drop the cached logs of
+  its jobs (after a rebuild: a finished page and the logs are otherwise cached
+  for good).
 
 ### suggest
 
@@ -72,8 +79,8 @@ recognises are grouped in one "Not recognised" entry listing their jobs.
 | Missing C header | which platform lacks it; add a depext or `x-ci-accept-failures` | low |
 | Job matrix: fails on every older (or newer) OCaml version, passes on the others | `"ocaml" {>= "X"}` / `{< "X"}`, `{with-test & …}` if only tests fail | medium |
 | Job matrix: fails only on Windows / one arch / some distributions | `"@runtest" {with-test & os != "win32"}`, `available: arch != "s390x"`, `x-ci-accept-failures: [...]`; aimed at the failing dependency when it is the one failing | medium |
-| Fails only on the day10 builder while the classic builder passes on the same distribution and OCaml version | reported as a CI-environment problem, with the evidence (e.g. a conf package that declares the depext the image didn't install) | high |
-| The PR removes or relaxes the `available` filter of an existing version, and its packages now fail on platforms the old filter excluded | restore the old filter, or narrow it to the platforms that build (read from the PR's diff: one GitHub call) | high/medium |
+| Fails only on the day10 builder while the classic builder passes on the same distribution, architecture and OCaml version (and day10 does not pass on another architecture there) | reported as a CI-environment problem, with the evidence (e.g. a conf package that declares the depext the image didn't install) | high |
+| The PR removes or relaxes the `available` filter of an existing version, and that version (or its reverse dependencies) now fails on platforms the old filter excluded and the new one allows (filters on `os`, `arch`, `os-distribution` and `os-family` are evaluated; medium confidence when another variable decides) | restore the old filter, or narrow it to the platforms that build (read from the PR's diff: one GitHub call) | high/medium |
 | A conf package fails on a platform listed in its `x-ci-accept-failures` | CI should have ignored it: CI-environment problem | high |
 | Lint error already reported in the previous release's CI | noted, with the PR number | high |
 | A PR package installs on no platform | the constraint every solver conflict goes through (e.g. `js_of_ocaml-compiler < 5.0.0`) | high |
@@ -114,10 +121,10 @@ moved to the note as text to check, at low confidence.
 Failures that would happen without the PR are marked "Pre-existing" in the note:
 
 - packages the PR only modifies by adding an upper bound that excludes a version it adds (their dependency solution is the same as on master; read from the PR's diff, the same GitHub call as above);
-- jobs that also failed in the CI run of the PR that published the previous release of the package (same platform, same job; 2 GitHub calls and one page per package, skipped when the old run has been purged);
+- jobs that also failed in the CI run of the PR that published the previous release of the package (same platform, same job, and the same failure: category and reason, the version left out; 2 GitHub calls and one page per package, skipped when the old run has been purged). When the release's own build fails at the same step but the reason does not show the error (`The compilation of … failed at "dune build …"`), the note says so, and the triage page does not count the failure as happening without the PR;
 - reverse dependencies that opam-health-check also sees failing on master (from ocaml.org's MCP `ocaml_package_build_information`; same version and OCaml version, build only, as opam-health-check builds the newest version of each package without tests; one request per package, cached for a day).
 
-Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Builds on master, fails here": those are the failures most likely caused by the PR. On the triage page, a suggestion about a reverse dependency that also fails in 3 or more other open PRs says so, with links.
+Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Builds on master, fails here": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready).
 
 The matrix rules use only the job list (no fetch); the others reuse the log
 already downloaded, plus at most one small lookup.
@@ -176,7 +183,7 @@ publishes the results on the repository's GitHub Pages site:
    one GraphQL query (needs a token; the workflow's `GITHUB_TOKEN` is enough),
    keeps those whose `opam-ci` status is `failure`, and runs `suggest <sha>
    --json --max 6` (and `summary`, from the cached page) on each new or updated
-   one, sequentially. PRs whose head sha is unchanged reuse their result from
+   one, sequentially. PRs whose head sha and status are unchanged reuse their result from
    `state/prs.json`; closed PRs, and PRs no longer failing, are dropped. It
    writes `site/data.json`. `--time-budget` stops starting new PRs; the next
    run continues.
@@ -193,6 +200,14 @@ publishes the results on the repository's GitHub Pages site:
    finishes. The tool never caches the CI page of a commit while jobs are
    still running (it fetches it again next time), and says when the results
    are partial.
+
+   The GraphQL query also gives the date of the `opam-ci` status. When a
+   finished CI's status changes for the same commit (another state, or a
+   status posted again after a maintainer's "Rebuild failed", even one that
+   finished within the hour), the PR is analysed again with `--refresh`: the
+   CI page is fetched again and the cached logs of its jobs are dropped (a
+   rebuilt job keeps its URL), so each log the analysis reads comes from the
+   new build. Nothing is fetched again when the status has not changed.
 
    With an `ANTHROPIC_API_KEY` repository secret, failures that no rule
    recognises also get an LLM diagnosis (`suggest --llm --llm-max 2`, at most

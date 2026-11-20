@@ -87,8 +87,8 @@ def not_this_pr(r):
     """Whether a failure is not the PR's: it happens without the PR (pre-existing,
     or also failing in other open PRs), comes from the CI, or is on an
     experimental platform, whose failures do not block a PR."""
-    return bool(r.get("preexisting") or r.get("also_failing_in") or r.get("experimental")
-                or r.get("rule") in CI_SIDE)
+    return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or r.get("also_failing_in")
+                or r.get("experimental") or r.get("rule") in CI_SIDE)
 
 
 def seems_ready(pr):
@@ -99,6 +99,8 @@ def seems_ready(pr):
     if pr.get("pending") or res is None or pr.get("ci_state") == "PENDING" or pr.get("draft"):
         return False
     if blocking_labels(pr) or pr.get("ci_unfinished") or res.get("ci_unfinished"):
+        return False
+    if res.get("unanalysed"):          # failures beyond `--max`: nothing says they are not the PR's
         return False
     sugg = res.get("suggestions", [])
     return bool(sugg) and all(not_this_pr(r) for r in sugg)
@@ -138,7 +140,8 @@ def comment_markdown(pr):
     results = [r for r in res.get("suggestions", []) if r.get("class")
                and not (r.get("rule") == "llm" and str(r.get("confidence") or "").startswith("low"))]
     total = (pr.get("jobs") or {}).get("total") or 0
-    data = {"unfinished": pr.get("ci_unfinished") or 0, "jobs": [None] * total}
+    data = {"unfinished": pr.get("ci_unfinished") or 0, "jobs": [None] * total,
+            "unanalysed": res.get("unanalysed") or 0}
     md = render_comment(pr.get("sha") or "", data, results)
     if seems_ready(pr):
         # After the paragraph on where the results come from.
@@ -352,6 +355,10 @@ def render_pr(pr):
                     f'<code>{e(pr.get("error"))}</code></p>')
     else:
         body.append(copy_block(pr))
+        left = pr["result"].get("unanalysed")
+        if left:
+            body.append(f'<p class="note">{e(left)} more distinct failure{"s were" if left != 1 else " was"} not '
+                        f'analysed (each run analyses a few per PR): see the CI results.</p>')
         if not pr["result"].get("suggestions"):
             body.append('<p class="note">No build or test failure to analyse.</p>')
         for k, label, _ in CLASSES:
@@ -606,7 +613,7 @@ the PR does not break them.</dd>
 day10 builder (the jobs named <code>day10,…</code>). When a job fails only on day10 while the classic
 builder passes on the same system, the problem is in the CI setup, not in the package.</dd>
 <dt>Pre-existing</dt><dd>The failure would happen without the PR: it also failed in the CI of the previous
-release, the PR only adds an upper bound to that package, or opam-health-check (which builds every package on
+release (the same job, with the same reason), the PR only adds an upper bound to that package, or opam-health-check (which builds every package on
 master, without tests) sees it failing too. "Also failing in other open PRs" says the same from the other PRs
 on this page.</dd>
 <dt>LLM diagnosis (unchecked)</dt><dd>For failures that no rule recognises, an LLM reads the log and

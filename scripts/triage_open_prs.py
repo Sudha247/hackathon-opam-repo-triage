@@ -6,11 +6,13 @@ opam-ci status is `failure`, and write the results to site/data.json.
 
 The open PRs and the opam-ci status of their head commit are listed with one
 GitHub GraphQL query per 100 PRs (needs a token: GITHUB_TOKEN, GH_TOKEN or a
-logged-in gh). A PR whose head sha is unchanged since the previous run is not
-analysed again: its result comes from the state file. PRs that were closed,
-or whose CI is no longer `failure`, are dropped. PRs are analysed one at a
-time, to respect opam.ci.ocaml.org's rate limit; `--time-budget` stops
-starting new ones after that many seconds, and the next run continues.
+logged-in gh). A PR whose head sha and opam-ci status are unchanged since the
+previous run is not analysed again: its result comes from the state file (after
+a rebuild, the status changes and the PR is analysed from fresh CI results).
+PRs that were closed, or whose CI is no longer `failure`, are dropped. PRs are
+analysed one at a time, to respect opam.ci.ocaml.org's rate limit;
+`--time-budget` stops starting new ones after that many seconds, and the next
+run continues.
 """
 
 import argparse
@@ -63,7 +65,7 @@ query($owner: String!, $name: String!, $cursor: String) {
             ... on IssueComment { createdAt author { login } }
           }
         }
-        commits(last: 1) { nodes { commit { oid status { contexts { context state targetUrl } } } } }
+        commits(last: 1) { nodes { commit { oid status { contexts { context state targetUrl createdAt } } } } }
       }
     }
   }
@@ -156,7 +158,8 @@ def list_open_prs(token):
                         "author": (n.get("author") or {}).get("login"),
                         "labels": [lb["name"] for lb in (n.get("labels") or {}).get("nodes") or []],
                         "stale_labels": stale_labels(n),
-                        "ci_state": (ci or {}).get("state"), "ci_url": (ci or {}).get("targetUrl")})
+                        "ci_state": (ci or {}).get("state"), "ci_url": (ci or {}).get("targetUrl"),
+                        "ci_created": (ci or {}).get("createdAt")})
         if not conn["pageInfo"]["hasNextPage"]:
             return prs, calls
         cursor = conn["pageInfo"]["endCursor"]
@@ -176,6 +179,18 @@ def attempts_used(prev, now_=None):
     return prev.get("attempts", 0)
 
 
+def ci_changed(prev, p):
+    """Whether the opam-ci status of the same commit changed since the
+    previous analysis: another state, or a status posted again (a maintainer's
+    "Rebuild failed", even one that finished within the hour). The CI page and
+    the job logs are then fetched again (`--refresh`): the cache would give
+    the results of the previous build."""
+    if prev is None or prev.get("sha") != p["sha"]:
+        return False
+    newer = bool(p.get("ci_created") and prev.get("ci_created") and p["ci_created"] > prev["ci_created"])
+    return newer or prev.get("ci_state") != p["ci_state"]
+
+
 def reuse(prev, p, version, llm, now_=None):
     """Whether the previous analysis of PR `p` can be kept: (same, same_commit,
     mcp_retry). `same`: it describes the current state and need not be redone
@@ -185,7 +200,7 @@ def reuse(prev, p, version, llm, now_=None):
     another server) failed during it."""
     # A PR whose CI is running is analysed again on every run, until its CI finishes.
     same = (prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
-            and prev.get("ci_state") == p["ci_state"] and p["ci_state"] != "PENDING")
+            and not ci_changed(prev, p) and p["ci_state"] != "PENDING")
     same_commit = same and prev.get("result") is not None
     # With the LLM on, a PR analysed without it (key added later, or the
     # run's budget spent) is analysed again; the logs come from the cache.
@@ -272,7 +287,10 @@ SHARED_MIN = 3   # other open PRs a failure must also appear in to be marked
 def mark_shared_failures(prs):
     """Mark the suggestions about reverse dependencies that also fail in at
     least SHARED_MIN other open PRs: such a failure is not caused by this PR.
-    Uses the failing reverse dependencies of every PR (from `summary`)."""
+    Uses the failing reverse dependencies of every PR (from `summary`). Every
+    job of the suggestion must be a reverse-dependency job, and the same other
+    PRs must fail on each of its reverse dependencies: three revdeps each
+    failing in one other PR do not make a failure shared by three PRs."""
     where = collections.defaultdict(set)
     for e in prs.values():
         for rd in ((e.get("jobs") or {}).get("failing_revdeps") or {}):
@@ -280,9 +298,10 @@ def mark_shared_failures(prs):
     for e in prs.values():
         n = int(e["number"])
         for r in (e.get("result") or {}).get("suggestions", []):
-            rds = {m.group(1) for v in (r.get("jobs") or [r.get("variant") or ""])
-                   for m in [re.search(r"revdeps,([^,]+)", v or "")] if m}
-            others = sorted(set().union(*(where[rd] for rd in rds)) - {n}) if rds else []
+            found = [re.search(r"revdeps,([^,]+)", v or "") for v in (r.get("jobs") or [r.get("variant") or ""])]
+            others = []
+            if found and all(found):
+                others = sorted(set.intersection(*(where[m.group(1)] for m in found)) - {n})
             if len(others) >= SHARED_MIN:
                 r["also_failing_in"] = others
             else:
@@ -391,10 +410,19 @@ def main():
             continue
         t0 = time.monotonic()
         summary = None
+        # Jobs rebuilt since the previous analysis: the first run of the tool
+        # fetches the CI page again and drops the cached logs of its jobs. A
+        # page is not cached while CI runs, and the logs of jobs finished by
+        # then are final: nothing to refresh after a PENDING analysis.
+        refresh = ["--refresh"] if ci_changed(prev, p) and prev.get("ci_state") != "PENDING" else []
+        if refresh:
+            stats["refreshed"] += 1
         if p["ci_state"] == "PENDING":
             # Only worth showing once some job has failed: `summary` reads the
             # CI page (not cached while CI runs) and gives the counts.
-            summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir], 120)
+            summary, serr, _ = run_tool(["summary", p["sha"], "--json", "--cache-dir", args.cache_dir] + refresh,
+                                        120)
+            refresh = []
             failed = [j for j in (summary or {}).get("jobs", []) if j.get("status") == "failed"
                       and j.get("category") not in NOISE]
             if not failed:
@@ -404,7 +432,7 @@ def main():
         use_llm = llm_left > 0
         extra = ["--llm", "--llm-max", str(min(args.llm_max, llm_left))] if use_llm else []
         result, err, net = run_tool(["suggest", p["sha"], "--json", "--max", str(args.max),
-                                     "--cache-dir", args.cache_dir] + extra, args.timeout)
+                                     "--cache-dir", args.cache_dir] + extra + refresh, args.timeout)
         net_total.update(net)
         llm_left -= net.get("llm", 0)
         if net.get("timeout") and use_llm:      # an LLM call may have been under way: count it
@@ -415,7 +443,7 @@ def main():
             entry["since_last_push"] = since_last_push(prev, result)
         elif prev and prev.get("sha") != p["sha"]:
             entry.pop("since_last_push", None)      # no comparable previous result
-        entry.update({"ci_state": p["ci_state"],
+        entry.update({"ci_state": p["ci_state"], "ci_created": p.get("ci_created"),
                       "ci_unfinished": (result or {}).get("ci_unfinished", 0)})
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
                       "llm": use_llm, "mcp_errors": net.get("mcp-errors", 0),

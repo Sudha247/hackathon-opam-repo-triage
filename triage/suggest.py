@@ -60,28 +60,38 @@ from .llm import (  # noqa: F401
 )
 
 
+def group_key(j):
+    """One job per (package, revdep, kind, reason): the same error on many
+    platforms is one problem. A dependency failure is the dependency's: one
+    log per (cause, platform)."""
+    return (("dependency", j["reason"], job_dims(j)["distro"]) if j["category"] == "dependency"
+            else failure_key(j))
+
+
+def distinct_failures(jobs, match=None):
+    """The failed jobs to analyse, grouped by `group_key`, in the order they
+    are analysed (those beyond `--max` are not): non-experimental jobs first,
+    then the PR's own packages before their reverse dependencies. In each
+    group, the job whose log is read comes first: classic-builder logs first,
+    as they show the depext installation (versions)."""
+    cats = {"build", "build-or-test", "solver", "dependency"}
+    sel = [j for j in jobs if j["status"] == "failed" and j["category"] in cats
+           and (not match or re.search(match, j["variant"]))]
+    groups = {}
+    for j in sorted(sel, key=lambda j: (j["experimental"], bool(j["revdep"]), j["platform"][:1] == ["day10"])):
+        groups.setdefault(group_key(j), []).append(j)
+    return list(groups.values())
+
+
 def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     pr_packages = sorted({j["target"] for j in data["jobs"] if j["target"]})
-    cats = {"build", "build-or-test", "solver", "dependency"}
-    sel = [j for j in data["jobs"] if j["status"] == "failed" and j["category"] in cats
-           and (not match or re.search(match, j["variant"]))]
-    # One job per (package, revdep, kind, reason): the same error on many platforms is one problem.
-    def group_key(j):
-        # A dependency failure is the dependency's: one log per (cause, platform).
-        return (("dependency", j["reason"], job_dims(j)["distro"]) if j["category"] == "dependency"
-                else failure_key(j))
+    groups = distinct_failures(data["jobs"], match)
+    if len(groups) > max_logs:
+        print(f"note: {len(groups)} distinct failures, analysing the first {max_logs} (use --max)", file=sys.stderr)
     # `merged` keeps every job behind each analysed one, so the report can say how many it stands for.
-    merged, uniq = {}, []
-    # Classic-builder logs first: they show the depext installation (versions).
-    for j in sorted(sel, key=lambda j: (j["experimental"], j["platform"][:1] == ["day10"])):
-        key = group_key(j)
-        if key not in merged:
-            merged[key] = []
-            uniq.append(j)
-        merged[key].append(j["variant"])
-    if len(uniq) > max_logs:
-        print(f"note: {len(uniq)} distinct failures, analysing the first {max_logs} (use --max)", file=sys.stderr)
-        uniq = uniq[:max_logs]
+    uniq = [g[0] for g in groups[:max_logs]]
+    merged = {group_key(g[0]): [j["variant"] for j in g] for g in groups[:max_logs]}
+    dropped = groups[max_logs:]          # to count the failures no suggestion explains
     results, base, prev_cache = [], None, {}
     for j in uniq:
         try:
@@ -119,6 +129,9 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     matrix = collapse_systemic(matrix_rules(jobs, results, match, set(pr_packages), failing_in_log))
     # A matrix suggestion explains the per-job failures that had no rule.
     explained = {k for m in matrix for k in m.get("_keys", [])}
+    # Distinct failures beyond `max_logs` that no matrix suggestion covers:
+    # nothing says why they fail (the JSON output and the page say how many).
+    data["unanalysed"] = sum(any(failure_key(j) not in explained for j in js) for js in dropped)
     results = [r for r in results
                if r.get("keep") or not (r.get("_key") in explained and not r.get("new") and not r.get("candidates"))]
     if data.get("unfinished"):
@@ -142,6 +155,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
                                 else "this PR only adds upper bounds to these packages, so their dependencies "
                                      "are the same as on master")
             r["note"] = f"Pre-existing: {r['preexisting']}." + (" " + r["note"] if r.get("note") else "")
+            if any(k in new_notes.get("unverified", ()) for k in keys):
+                r["preexisting_unverified"] = True      # not counted as happening without the PR
     results += health_summary(new_notes, src)
     for r in results:
         r.pop("_key", None)

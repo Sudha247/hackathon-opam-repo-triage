@@ -76,7 +76,8 @@ def main():
                     help="comment/review: post it on the PR with gh (default: print it)")
     ap.add_argument("--baseline", help="compare: baseline commit sha/URL (default: the PR of the previous version)")
     ap.add_argument("--cache-dir", default=".opam-ci-cache")
-    ap.add_argument("--refresh", action="store_true", help="ignore the cache for the commit page")
+    ap.add_argument("--refresh", action="store_true",
+                    help="fetch the commit page again, and the logs of its jobs when needed (after a rebuild)")
     args = ap.parse_args()
 
     sha = resolve_sha(args.target, args.pr)
@@ -123,7 +124,8 @@ def main():
             # incomplete: ocaml.org or another server failed during the analysis (see the counts).
             errors = {k: NET[k] for k in ("mcp-errors", "net-errors") if NET.get(k)}
             json.dump({"sha": sha, "pr": data["pr"], "ci_unfinished": data["unfinished"],
-                       "ci_jobs": len(data["jobs"]), "incomplete": bool(errors), "errors": errors,
+                       "ci_jobs": len(data["jobs"]), "unanalysed": data.get("unanalysed", 0),
+                       "incomplete": bool(errors), "errors": errors,
                        "suggestions": results}, sys.stdout, indent=2)
             print()
         else:

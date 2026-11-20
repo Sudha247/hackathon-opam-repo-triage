@@ -87,6 +87,13 @@ def platform_matrix(js):
     return None
 
 
+def job_arch(job):
+    """The architecture of a job, with one name per architecture (the
+    FreeBSD jobs say amd64)."""
+    a = job_dims(job)["arch"]
+    return {"amd64": "x86_64", "aarch64": "arm64"}.get(a, a)
+
+
 CYGWIN_PKG = {"awk": "gawk", "gawk": "gawk", "gcc": "gcc-core", "cc": "gcc-core", "g++": "gcc-g++",
               "make": "make", "autoconf": "autoconf", "automake": "automake", "pkg-config": "pkgconf",
               "m4": "m4", "patch": "patch", "perl": "perl", "python3": "python3", "bison": "bison", "flex": "flex"}
@@ -114,16 +121,21 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
         tests_only = kind == "tests" or all(j["category"] == "build-or-test" for j in fails)
         where = "this PR" if owner in pr_packages else f"{owner} (other package)"
         label = f"{pkg} [{kind}{', revdep of ' + target if revdep else ''}]"
-        # A day10 failure whose distribution and OCaml version pass on the
-        # classic builder is a problem of the day10 environment, not of the
-        # package: report it as such, and leave it out of the analyses below.
+        # A day10 failure whose distribution, architecture and OCaml version
+        # pass on the classic builder is a problem of the day10 environment,
+        # not of the package: report it as such, and leave it out of the
+        # analyses below. Not when day10 passes on another architecture of
+        # the same distribution and OCaml version: the failure then depends
+        # on the architecture.
         passes = [j for j in js if not j["experimental"] and j["category"] == "passed"]
 
         def classic_twin(j):
             d = job_dims(j)
-            return next((p for p in passes if p["platform"][:1] != ["day10"]
-                         and job_dims(p)["distro"] == d["distro"] and d["distro"]
-                         and job_dims(p)["ocaml"] == d["ocaml"]), None)
+            same = [p for p in passes if job_dims(p)["distro"] == d["distro"] and d["distro"]
+                    and job_dims(p)["ocaml"] == d["ocaml"]]
+            if any(p["platform"][:1] == ["day10"] and job_arch(p) != job_arch(j) for p in same):
+                return None
+            return next((p for p in same if p["platform"][:1] != ["day10"] and job_arch(p) == job_arch(j)), None)
         twins = [(j, classic_twin(j)) for j in fails if j["platform"][:1] == ["day10"]]
         twins = [(j, t) for j, t in twins if t]
         if twins:
@@ -133,7 +145,7 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
             out.append({"variant": label, "failing": culprit or pkg,
                         "fix_in": "the CI environment (day10 builder)", "rule": "builder-specific",
                         "error": f"Fails only on the day10 builder on {', '.join(dists)}: the classic "
-                                 f"builder passes on the same distributions and OCaml versions",
+                                 f"builder passes on the same distributions, architectures and OCaml versions",
                         "confidence": "high",
                         "note": f"For example, it fails on {platform_words(twins[0][0])} and passes on "
                                 f"{platform_words(twins[0][1])}."

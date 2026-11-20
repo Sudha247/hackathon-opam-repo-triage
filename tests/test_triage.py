@@ -27,6 +27,7 @@ import sys
 import time
 import unittest
 import urllib.error
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "..", "opam_repo_ci_triage.py")
@@ -335,6 +336,132 @@ class ChecksTest(unittest.TestCase):
                       self.t.applied(text, {"old": '"ocaml" {>= "4.08"}', "new": '"ocaml" {>= "4.08" & < "5.4"}'}))
         self.assertIn('  "conf-python-3" {build}\n  "ocaml"',
                       self.t.applied(text, {"new": '"conf-python-3" {build}   (new line in depends)'}))
+
+
+def job(variant, category="build", reason="The compilation of x failed", experimental=False):
+    """A synthetic CI job, as parse_commit_page makes it."""
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    from triage import ci
+    parts = variant.split(",")
+    i = 4 if parts[0] == "day10" else 2
+    platform, rest = parts[:i], parts[i:]
+    kind = "revdeps" if rest[1:2] == ["revdeps"] else rest[1] if len(rest) > 1 else "build"
+    status = "passed" if category == "passed" else "failed"
+    return {"variant": variant, "platform": platform, "target": rest[0], "kind": kind,
+            "revdep": rest[2] if kind == "revdeps" else None, "status": status, "category": category,
+            "reason": "" if status == "passed" else reason, "experimental": experimental,
+            "url": ci.BASE + "0" * 40 + "/variant/" + variant}
+
+
+class RulesTest(unittest.TestCase):
+    """Rules on synthetic job lists (no fixture)."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import opam_repo_ci_triage as t
+        self.t = t
+
+    def test_unanalysed_order(self):
+        # The PR's own failures are analysed before those of its reverse
+        # dependencies, experimental platforms last; classic builder first.
+        jobs = [job("compilers,5.4,a.1,revdeps,r.1", reason="Error in r"),
+                job("freebsd,freebsd-15.1-ocaml-5.5-amd64,a.1", reason="Error on freebsd", experimental=True),
+                job("day10,debian-13,x86_64,5.4,a.1", reason="Error in a"),
+                job("compilers,5.4,a.1", reason="Error in a"),
+                job("compilers,5.4,a.1,revdeps,s.1", category="passed")]
+        groups = self.t.distinct_failures(jobs)
+        self.assertEqual([[j["variant"] for j in g] for g in groups],
+                         [["compilers,5.4,a.1", "day10,debian-13,x86_64,5.4,a.1"],
+                          ["compilers,5.4,a.1,revdeps,r.1"],
+                          ["freebsd,freebsd-15.1-ocaml-5.5-amd64,a.1"]])
+
+    def test_builder_specific_same_arch(self):
+        def rules(*jobs):
+            return [r["rule"] for r in self.t.matrix_rules(list(jobs), [], None, {"x.1"})]
+        classic = job("compilers,5.3,x.1", category="passed")             # debian-13, x86_64
+        self.assertIn("builder-specific", rules(job("day10,debian-13,x86_64,5.3,x.1"), classic))
+        # day10 fails on arm64 only: the classic builder passing on x86_64 says nothing about the builder.
+        self.assertNotIn("builder-specific", rules(job("day10,debian-13,arm64,5.3,x.1"), classic,
+                                                   job("day10,debian-13,x86_64,5.3,x.1", category="passed")))
+        self.assertNotIn("builder-specific", rules(job("day10,debian-13,arm64,5.3,x.1"), classic))
+        # FreeBSD's classic jobs say amd64.
+        self.assertIn("builder-specific", rules(job("day10,freebsd-15.1,x86_64,5.5,x.1"),
+                                                job("freebsd,freebsd-15.1-ocaml-5.5-amd64,x.1", category="passed")))
+        # A classic pass on the same arch, but day10 passes on another arch: the arch matters.
+        self.assertNotIn("builder-specific", rules(
+            job("day10,macos-homebrew,arm64,5.5,x.1"), job("macos,macos-homebrew-ocaml-5.5-arm64,x.1", category="passed"),
+            job("day10,macos-homebrew,x86_64,5.5,x.1", category="passed")))
+
+    def test_eval_filter(self):
+        f = self.t.eval_filter
+        linux = self.t.platform_vars(job("compilers,5.4,x.1"))
+        cygwin = self.t.platform_vars(job("day10,cygwin,x86_64,5.4,x.1"))
+        self.assertEqual((linux["os"], linux["arch"], cygwin["os-distribution"]), ("linux", "x86_64", "cygwin"))
+        old = 'os = "linux" & (arch = "arm64" | arch = "x86_64")'
+        self.assertEqual((f(old, linux), f(old, cygwin)), (True, False))
+        self.assertTrue(f("", cygwin))
+        self.assertFalse(f('!(os-distribution = "cygwin")', cygwin))
+        self.assertIsNone(f('opam-version >= "2.1"', linux))      # not a platform variable
+        self.assertFalse(f('opam-version >= "2.1" & os != "win32"', cygwin))
+
+    def test_relaxed_available(self):
+        from unittest import mock
+        from triage import context
+        jobs = [job("day10,cygwin,x86_64,5.4,x.1"), job("day10,cygwin,x86_64,5.4,y.1"),
+                job("day10,macos-homebrew,arm64,5.4,x.1"), job("compilers,5.4,x.1", category="passed")]
+
+        def rules(old, new):
+            with mock.patch.object(context, "pr_opam_changes", lambda *a: {"x.1": {"available": (old, new)}}):
+                return context.relaxed_available_rules({"jobs": jobs}, "s", "b", "d", ["x.1", "y.1"])
+        r = rules('os = "linux"', "")
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["confidence"], "high")
+        # Only x.1's jobs: y.1 failing on cygwin is not caused by x.1's `available`.
+        self.assertEqual(r[0]["jobs"], ["day10,cygwin,x86_64,5.4,x.1", "day10,macos-homebrew,arm64,5.4,x.1"])
+        # Only the platforms the old filter excluded and the new one allows.
+        r = rules('os != "macos" & os != "win32"', 'os != "win32"')
+        self.assertEqual(r[0]["jobs"], ["day10,macos-homebrew,arm64,5.4,x.1"])
+        self.assertEqual(rules('os != "win32"', 'os != "win32" & opam-version >= "2.1"'), [])
+        self.assertEqual(rules('arch != "arm32"', 'arch != "arm32" & arch != "x86_32"'), [])
+
+    def test_preexisting_same_failure(self):
+        from unittest import mock
+        from triage import context
+        build = 'The compilation of {} failed at "dune build -p x -j {}"'
+        new = [job("compilers,5.4,x.2", reason=build.format("x.2", 32)),
+               job("compilers,5.3,x.2", reason="Error: Unbound module Foo"),
+               job("compilers,5.2,x.2", category="dependency", reason="y.1 failed to build"),
+               job("compilers,5.1,x.2", category="dependency", reason="z.1 failed to build"),
+               job("compilers,5.4,x.2,revdeps,r.1", reason=build.format("r.1", 8))]
+        old = [job("compilers,5.4,x.1", reason=build.format("x.1", 8)),
+               job("compilers,5.3,x.1", reason="Error: Unbound module Bar"),          # another error
+               job("compilers,5.2,x.1", category="dependency", reason="y.1 failed to build"),
+               job("compilers,5.1,x.1", reason="z.1 failed to build"),                # another category
+               job("compilers,5.4,x.1,revdeps,r.1", reason=build.format("r.1", 8))]
+        notes = {}
+        with mock.patch.object(context, "find_baseline_commit", lambda *a: {"prev": "x.1", "pr": 7, "sha": "b" * 40}), \
+                mock.patch.object(context, "fetch", lambda *a: ""), \
+                mock.patch.object(context, "parse_commit_page", lambda page: {"jobs": old}):
+            pre = context.preexisting_failures({"jobs": new}, "s", None, "d", notes=notes)
+        key = {j["variant"]: self.t.failure_key(j) for j in new}
+        self.assertEqual(set(pre), {key["compilers,5.4,x.2"], key["compilers,5.2,x.2"],
+                                    key["compilers,5.4,x.2,revdeps,r.1"]})
+        self.assertIn("x.1 failed the same job in the CI of #7", pre[key["compilers,5.2,x.2"]])
+        # The release's own build failing at the same step may fail with another error.
+        self.assertEqual(notes["unverified"], {key["compilers,5.4,x.2"]})
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import render_page
+        self.assertFalse(render_page.not_this_pr({"preexisting": "x", "preexisting_unverified": True}))
+        self.assertTrue(render_page.not_this_pr({"preexisting": "x"}))
+
+    def test_unanalysed_count(self):
+        # Failures beyond --max are counted in the JSON output.
+        env = {**os.environ, "OPAM_CI_OFFLINE": "1", "OPAM_CI_RECORD": "0"}
+        out = subprocess.run([sys.executable, TOOL, "suggest", CASES["websocket-bound"][0], "--json", "--max", "2",
+                              "--cache-dir", os.path.join(FIXTURES, "websocket-bound")],
+                             capture_output=True, text=True, env=env, timeout=300)
+        self.assertIn("offline cache misses: 0", out.stderr)
+        self.assertGreater(json.loads(out.stdout)["unanalysed"], 0)
 
 
 def make_test(case):
@@ -799,6 +926,51 @@ class PageRunTest(unittest.TestCase):
         with mock.patch.object(self.T, "graphql", return_value=data):
             self.assertEqual(self.T.list_open_prs("tok"), ([], 1))
 
+class RefreshTest(unittest.TestCase):
+    """After a rebuild of the same commit, the triage page analyses the PR
+    again from a fresh CI page and fresh logs."""
+
+    def test_ci_changed(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+        prev = {"sha": "a", "ci_state": "FAILURE", "ci_created": "2026-11-20T10:00:00Z", "tool_version": "v",
+                "result": {}, "attempts": 1}
+        p = {"sha": "a", "ci_state": "FAILURE", "ci_created": "2026-11-20T10:00:00Z"}
+        self.assertFalse(T.ci_changed(prev, p))
+        self.assertEqual(T.reuse(prev, p, "v", False), (True, True, False))
+        # "Rebuild failed", finished within the hour: same state, newer status.
+        rebuilt = dict(p, ci_created="2026-11-20T10:30:00Z")
+        self.assertTrue(T.ci_changed(prev, rebuilt))
+        self.assertEqual(T.reuse(prev, rebuilt, "v", False), (False, False, False))
+        self.assertTrue(T.ci_changed(prev, dict(p, ci_state="PENDING")))
+        # Unknown dates (state saved before they were recorded), another commit.
+        self.assertFalse(T.ci_changed(dict(prev, ci_created=None), rebuilt))
+        self.assertFalse(T.ci_changed(prev, dict(rebuilt, sha="b")))
+
+    def test_refresh_drops_logs(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import tempfile
+        from triage import ci, net
+        sha = "eafb2a69786279b98b31f3e5cd8a62ce432cf343"
+        with gzip.open(net.cache_path(net.BASE + sha, os.path.join(FIXTURES, "goblint-cil-baseline")) + ".gz",
+                       "rt", encoding="utf-8") as f:
+            page = f.read()
+        fetched = []
+
+        def fake_fetch(url, cache_dir, refresh=False):
+            fetched.append((url, refresh))
+            return page
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(ci, "fetch", fake_fetch):
+            data = ci.parse_commit_page(page)
+            job = next(j for j in data["jobs"] if j["status"] == "failed")
+            log = net.cache_path(job["url"], d)
+            open(log, "w").close()
+            ci.load_commit(sha, d)
+            self.assertTrue(os.path.exists(log))           # no rebuild: the cached log is kept
+            ci.load_commit(sha, d, refresh=True)
+            self.assertFalse(os.path.exists(log))          # rebuilt: fetched again when needed
+            self.assertEqual(fetched, [(net.BASE + sha, False), (net.BASE + sha, True)])
+
 
 class PageTest(unittest.TestCase):
     """The triage page: which PRs seem ready, labels, the Markdown comment."""
@@ -834,6 +1006,12 @@ class PageTest(unittest.TestCase):
         # Unexplained failures (only skipped jobs), CI not finished, drafts, labels.
         self.assertFalse(self.r.seems_ready(self.pr([])))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], ci_unfinished=2)))
+        # Distinct failures beyond --max were not analysed: nothing says they are not the PR's.
+        unanalysed = self.pr([self.day10])
+        unanalysed["result"]["unanalysed"] = 3
+        self.assertFalse(self.r.seems_ready(unanalysed))
+        self.assertIn("3 more distinct failures were not analysed", self.r.render_pr(unanalysed))
+        self.assertIn("3 more distinct failure(s) were not analysed", self.r.comment_markdown(unanalysed))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], draft=True)))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], labels=["needs reporter action"])))
         self.assertTrue(self.r.seems_ready(self.pr([self.day10], labels=["consider for merge"])))
@@ -842,6 +1020,24 @@ class PageTest(unittest.TestCase):
                                                    stale_labels=["needs reporter action"])))
         self.assertIn("author active since", self.r.label_badges(["needs reporter action"],
                                                                  ["needs reporter action"]))
+
+    def test_shared_failures(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+        rd = "compilers,5.4,x.1,revdeps,{}"
+
+        def entry(n, failing, *suggestions):
+            return {"number": n, "jobs": {"failing_revdeps": {r: [] for r in failing}},
+                    "result": {"suggestions": [{"variant": "v", "jobs": js} for js in suggestions]}}
+        prs = {"1": entry(1, ["a.1", "b.1", "c.1", "d.1"],
+                          [rd.format("a.1"), rd.format("b.1"), rd.format("c.1")],   # each in one other PR
+                          [rd.format("d.1")],                                         # in 3 other PRs
+                          [rd.format("d.1"), "compilers,5.4,x.1"],                    # and a non-revdep job
+                          [rd.format("a.1"), rd.format("d.1")]),
+               "2": entry(2, ["a.1", "d.1"]), "3": entry(3, ["b.1", "d.1"]), "4": entry(4, ["c.1", "d.1"])}
+        T.mark_shared_failures(prs)
+        got = [s.get("also_failing_in") for s in prs["1"]["result"]["suggestions"]]
+        self.assertEqual(got, [None, [2, 3, 4], None, None])
 
     def test_stale_labels(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
