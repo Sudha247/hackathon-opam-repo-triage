@@ -338,6 +338,43 @@ class ChecksTest(unittest.TestCase):
                       self.t.applied(text, {"new": '"conf-python-3" {build}   (new line in depends)'}))
 
 
+class WhereTest(unittest.TestCase):
+    """Where a fix goes, as data (`where_kind`), and derived from the words of
+    `fix_in` for results stored before it existed."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import where, suggest
+        self.w, self.s = where, suggest
+
+    def test_legacy(self):
+        kind = self.w.where_kind
+        self.assertEqual(kind({"fix_in": "this PR"}), "pr")
+        self.assertEqual(kind({"fix_in": "lwt.5.9.0 (other package)"}), "other-package")
+        self.assertEqual(self.w.where_pkg({"fix_in": "lwt.5.9.0 (other package)"}), "lwt.5.9.0")
+        self.assertEqual(kind({"fix_in": "the dependency declaring these depexts"}), "other-package")
+        self.assertIsNone(self.w.where_pkg({"fix_in": "the dependency declaring these depexts"}))
+        self.assertEqual(kind({"fix_in": "CI (rerun)"}), "rerun")
+        self.assertEqual(kind({"fix_in": "the CI environment (day10 builder)"}), "ci")
+        self.assertEqual(kind({"fix_in": "x.1 (upstream archive)"}), "upstream")
+        self.assertEqual(kind({"fix_in": "nothing (this PR's bound)"}), "none")
+        self.assertEqual(kind({"fix_in": "the PR, a shared dependency, or the CI"}), "unknown")
+        shared = {"fix_in": "the PR, a shared dependency, or the CI", "failing_dep": "dep.1"}
+        self.assertEqual((kind(shared), self.w.where_pkg(shared)), ("other-package", "dep.1"))
+        self.assertEqual(kind({"fix_in": "somewhere new"}), "unknown")
+
+    def test_structured_wins(self):
+        # The words of fix_in are only read when where_kind is missing.
+        r = {"fix_in": "this PR", "where_kind": "ci"}
+        self.assertEqual(self.w.where_kind(r), "ci")
+        self.assertEqual(self.s.where_text(r), "the CI")
+        self.assertEqual(self.s.classify(dict(r, new="x")), "elsewhere")
+        r = {"fix_in": "the maintainers of y (new wording)", "where_kind": "other-package", "where_pkg": "y.1"}
+        self.assertEqual(self.s.where_text(r), "y.1 (another package)")
+        self.assertEqual(self.s.where_text({"where_kind": "other-package", "rule": "missing-system-package"}),
+                         "the dependency that declares these depexts (another package)")
+
+
 def job(variant, category="build", reason="The compilation of x failed", experimental=False):
     """A synthetic CI job, as parse_commit_page makes it."""
     sys.path.insert(0, os.path.join(HERE, ".."))
@@ -464,6 +501,19 @@ class RulesTest(unittest.TestCase):
         self.assertGreater(json.loads(out.stdout)["unanalysed"], 0)
 
 
+def check_where(test, sugg):
+    """Every suggestion says where its fix goes (`where_kind`), and the same
+    place is derived from its `fix_in` alone, as for results stored before
+    `where_kind` existed."""
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    from triage import where
+    for s in sugg:
+        test.assertIn(s.get("where_kind"), where.WHERE_KINDS, s)
+        old = {k: v for k, v in s.items() if k not in ("where_kind", "where_pkg")}
+        test.assertEqual((where.where_kind(old), where.where_pkg(old)),
+                         (s["where_kind"], s.get("where_pkg")), (s.get("rule"), s.get("fix_in")))
+
+
 def make_test(case):
     def test(self):
         if not os.path.isdir(os.path.join(FIXTURES, case)):
@@ -472,6 +522,7 @@ def make_test(case):
         self.assertEqual(out.returncode, 0, out.stderr[-1000:])
         self.assertIn("offline cache misses: 0", out.stderr, out.stderr[-1500:])
         sugg = json.loads(out.stdout)["suggestions"]
+        check_where(self, sugg)
         for exp in CASES[case][2]:
             if "not" in exp:
                 bad = [s for s in sugg if matches(s, exp["not"])]
@@ -1215,6 +1266,18 @@ class PageTest(unittest.TestCase):
         h = self.r.headline(pr, as_html=False)
         self.assertNotIn("the dependency declaring", h)
         self.assertIn("System package not found (p.1)", h)
+
+    def test_where_kind(self):
+        # The verdict, the headline and the shared-failures table follow
+        # where_kind and where_pkg, whatever the words of fix_in.
+        other = {"class": "elsewhere", "rule": "library-api", "failing": "y.1", "variant": "v",
+                 "fix_in": "the y maintainers", "where_kind": "other-package", "where_pkg": "y.1"}
+        self.assertEqual(self.r.verdict(self.pr([self.day10, other])), "blocked")
+        self.assertEqual(self.r.headline(self.pr([self.day10, other]), as_html=False), "needs a fix in y.1")
+        not_other = dict(self.revdep, where_kind="pr")
+        self.assertNotEqual(self.r.verdict(self.pr([self.day10, not_other])), "blocked")
+        table = self.r.chronic([self.pr([other], number=n) for n in (1, 2)])
+        self.assertIn("<b>y.1</b>", table)
 
     def test_skipped_jobs(self):
         pr = self.pr([dict(self.lint, rule="uninstallable", new=None, **{"class": "explanation"})],

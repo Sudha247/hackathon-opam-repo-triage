@@ -22,7 +22,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from opam_repo_ci_triage import (  # noqa: E402
-    BASE, RULE_TITLES, compared_text, describe_job, fix_label, render_comment, where_text)
+    BASE, RULE_TITLES, compared_text, describe_job, fix_label, render_comment, where_kind, where_pkg, where_text)
 from opam_repo_ci_triage import title_of as rule_title  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
 # One verdict per PR: the first that applies, in this order (see `verdict`).
@@ -87,9 +87,10 @@ def plural(n):
     return "" if n == 1 else "s"
 
 
-def other_package(fix_in):
-    fix_in = fix_in or ""
-    return fix_in.endswith("(other package)") or fix_in.startswith("the dependency")
+def other_package(r):
+    """Whether the fix of suggestion `r` goes in another package (see where.py:
+    stored suggestions may predate `where_kind`)."""
+    return where_kind(r) == "other-package"
 
 
 def groups(pr):
@@ -136,9 +137,10 @@ def verdict(pr):
     sugg = pr["result"].get("suggestions", [])
     if any(r.get("class") in CHANGE_CLASSES for r in sugg):
         return "change"
-    if any(other_package(r.get("fix_in")) for r in sugg):
+    # A failure that is not the PR's (it happens on master too, say) does not block it.
+    if any(other_package(r) and not not_this_pr(r) for r in sugg):
         return "blocked"
-    if all(r.get("fix_in") != "this PR" for r in sugg):
+    if all(where_kind(r) != "pr" for r in sugg):
         return "ci"
     return "other"
 
@@ -248,16 +250,14 @@ def packages_text(r, n=2):
 
 
 def blocked_by(sugg):
-    """The other packages where a fix goes, in order. A fix_in that is not a
-    package name ("the dependency declaring these depexts") is left out:
-    the headline then names the finding instead."""
+    """The other packages where a fix goes, in order. Another package the
+    analysis cannot name (the dependency declaring some depexts) is left
+    out: the headline then names the finding instead."""
     out = []
     for r in sugg:
-        f = r.get("fix_in") or ""
-        if f.endswith(" (other package)"):
-            name = f[:-len(" (other package)")]
-            if name not in out:
-                out.append(name)
+        name = where_pkg(r)
+        if name and name not in out:
+            out.append(name)
     return out
 
 
@@ -310,11 +310,11 @@ def headline(pr, v=None, as_html=True):
     elif v == "blocked":
         # The fix goes in a dependency the analysis cannot name (depexts declared
         # by a dependency, say): the first such finding.
-        r = merge_similar([r for r in sugg if other_package(r.get("fix_in"))] or sugg)[0]
+        r = merge_similar([r for r in sugg if other_package(r)] or sugg)[0]
         pkgs = packages_text(r)
         parts.append(t(title_of(r) + (f" ({pkgs})" if pkgs else "")))
     else:
-        pool = [r for r in sugg if r.get("fix_in") == "this PR"] if v == "other" else sugg
+        pool = [r for r in sugg if where_kind(r) == "pr"] if v == "other" else sugg
         pool = [r for r in pool if r.get("rule") != "llm"] or pool or sugg
         r = merge_similar(pool)[0]
         pkgs = packages_text(r)
@@ -376,7 +376,7 @@ def job_link(sha, variant):
 
 def where_of(r):
     """Where the fix goes, unless it is this PR (implied, or not meaningful
-    for a failure without a change), in words (from `fix_in`, as stored
+    for a failure without a change), in words (from `where_kind`, as stored
     `where` values may be older wordings)."""
     w = where_text(r)
     return None if w in (None, "", "this PR") else w
@@ -680,8 +680,8 @@ def chronic(prs, min_prs=2):
             name, _, version = rd.partition(".")
             revdeps[name][n][version] = jobs
         for r in (pr.get("result") or {}).get("suggestions", []):
-            if (r.get("fix_in") or "").endswith(" (other package)"):
-                blamed[(r.get("fix_in") or "").replace(" (other package)", "")].add(n)
+            if where_pkg(r):
+                blamed[where_pkg(r)].add(n)
     rows = sorted(((rd, d) for rd, d in revdeps.items() if len(d) >= min_prs), key=lambda x: (-len(x[1]), x[0]))
     brows = sorted(((p, s) for p, s in blamed.items() if len(s) >= min_prs), key=lambda x: (-len(x[1]), x[0]))
     out = ['<section id="chronic"><h2>Failures shared by several PRs</h2>']

@@ -43,6 +43,7 @@ from .sources import (  # noqa: F401
     opam_field,
     url_src,
 )
+from .where import fix_where
 from .rules import (  # noqa: F401
     direct_deps,
 )
@@ -85,7 +86,8 @@ def accepted_but_failing(results, src, sha, pr_packages):
         if set(ds) <= accepted_platforms(text):
             for k in ("new", "old", "alternative", "candidates"):
                 r.pop(k, None)
-            r.update(rule="accept-failures-ignored", fix_in="the CI environment (day10 builder)", confidence="high",
+            r.update(fix_where("ci", "the CI environment (day10 builder)"), rule="accept-failures-ignored",
+                     confidence="high",
                      note=f"{owner} already lists {', '.join(ds)} in x-ci-accept-failures, but the day10 builder "
                           f"ignores that field there. Nothing to change in the package.")
 
@@ -169,7 +171,7 @@ def health_summary(notes, src=None):
         else:
             error = f"{rd} fails with this PR on {ocaml} but builds on master ({when})."
         r = {"variant": f"{rd}, reverse dependency" + (f" of {target}" if target else ""),
-             "rule": "health-check-new", "fix_in": "this PR", "confidence": "medium", "failing": rd,
+             "rule": "health-check-new", **fix_where("pr", "this PR"), "confidence": "medium", "failing": rd,
              "error": error,
              "note": "Probably broken by this PR: look at it first. opam-health-check builds the newest "
                      "version of each package, without tests.",
@@ -201,7 +203,8 @@ def health_summary(notes, src=None):
     bad = {**(h.get("bad") or {}), **(h.get("partial") or {})}
     if bad:
         out.append({"variant": counted(len(bad), "reverse dependency"),
-                    "rule": "health-check-preexisting", "fix_in": "the reverse dependencies (other packages)",
+                    "rule": "health-check-preexisting",
+                    **fix_where("other-package", "the reverse dependencies (other packages)"),
                     "confidence": "high", "failing": ", ".join(sorted(bad)),
                     "error": f"These fail on master too ({when}): {listing(bad)}",
                     "note": "They, or one of their dependencies, fail without this PR. Nothing to change in "
@@ -341,7 +344,7 @@ def sources_rules(data, cache_dir, match=None):
             text = ""
         m = re.search(r"([^\s:]+): Cannot create symlink to '([^']+)'", text)
         r = {"variant": j["variant"], "url": j["url"], "rule": "sources", "failing": pkg, "jobs": [j["variant"]],
-             "fix_in": f"{pkg} (upstream archive)", "experimental": j["experimental"],
+             **fix_where("upstream", f"{pkg} (upstream archive)"), "experimental": j["experimental"],
              "error": (j["reason"] or "")[:200], "confidence": "medium"}
         if m:
             r.update(error=f"tar cannot create the symlink {m.group(1)} -> {m.group(2)} on {dims['distro']}",
@@ -380,7 +383,7 @@ def rerun_rules(data, results, match=None):
         return counted(n, noun) + (f" ({detail})" if detail else "")
     variants = merge_jobs([j["variant"] for j in jobs], [v for r in transient for v in r.get("jobs") or [r["variant"]]])
     exp = sum(j["experimental"] for j in jobs)
-    entry = {"variant": counted(len(variants), "job"), "rule": "rerun", "fix_in": "CI (rerun)",
+    entry = {"variant": counted(len(variants), "job"), "rule": "rerun", **fix_where("rerun", "CI (rerun)"),
              "error": ", ".join(what(k, n) for k, n in counts.most_common()),
              "confidence": "high", "jobs": variants,
              "note": "These jobs failed because of the CI, not the packages. An opam-repository maintainer can "
@@ -576,7 +579,7 @@ def relaxed_available_rules(data, sha, base, cache_dir, pr_packages):
             continue
         plats = sorted({(job_dims(j)["distro"] or job_dims(j)["os"]) + (" (experimental)" if j["experimental"] else "")
                         for j in failing})
-        out.append({"variant": f"{pkg} [available changed by this PR]", "failing": pkg, "fix_in": "this PR",
+        out.append({"variant": f"{pkg} [available changed by this PR]", "failing": pkg, **fix_where("pr", "this PR"),
                     "rule": "pr-relaxed-available",
                     "error": f"This PR changes `available` of {pkg} from `{old}` to "
                              f"`{new or '(removed)'}`; {pkg} now fails on {', '.join(plats)}",
@@ -622,7 +625,7 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
             # The job failed before linting: the CI could not fetch or check out the PR.
             msg = next((m for m in j["messages"] if m.strip()), "") or "no message"
             git = re.search(r'"git"', msg) and re.search(r"status 128", msg)
-            out.append({"variant": "(lint)", "fix_in": "CI (rerun)", "rule": "lint-ci-error",
+            out.append({"variant": "(lint)", **fix_where("rerun", "CI (rerun)"), "rule": "lint-ci-error",
                         "error": msg[:220], "url": j.get("url"),
                         "note": ("The lint job failed before linting anything"
                                  + (": git could not check out the PR's commit" if git else "")
@@ -633,7 +636,7 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
             if not m:
                 continue
             name, ver, text = m.groups()
-            r = {"variant": "(lint)", "failing": f"{name}.{ver}", "fix_in": "this PR", "rule": "lint",
+            r = {"variant": "(lint)", "failing": f"{name}.{ver}", **fix_where("pr", "this PR"), "rule": "lint",
                  "error": text[:220]}
             if "warning 62" in text:
                 val = (re.findall(r'"([^"]+)"', text) or [""])[-1]
@@ -787,13 +790,14 @@ def skipped_rules(data, src, cache_dir, pr_packages, bounds=None):
         if not chains:
             continue
         firsts = {c.split(" -> ")[1] for c in chains if " -> " in c}
-        r = {"variant": f"{t} [all build jobs skipped]", "failing": t, "fix_in": "this PR", "rule": "uninstallable",
+        r = {"variant": f"{t} [all build jobs skipped]", "failing": t, **fix_where("pr", "this PR"),
+             "rule": "uninstallable",
              "error": "Not installable on any tested platform. Solver: " + "; ".join(sorted(set(chains))[:3])}
         added = (bounds or {}).get(t) or {}
         through = {f.split(" ")[0] for f in firsts}
         if added and through and through <= set(added) and not unknown:
             lines = "; ".join(f"`{added[d]}`" for d in sorted(through))
-            r.update(rule="bounded-out", fix_in="nothing (this PR's bound)", confidence="high",
+            r.update(fix_where("none", "nothing (this PR's bound)"), rule="bounded-out", confidence="high",
                      note=f"This PR adds {lines} to {t}, which no tested platform satisfies, so CI cannot "
                           f"build it. That is expected when the bound is the point of the change.")
         elif unknown:

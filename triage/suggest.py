@@ -59,6 +59,12 @@ from .context import (  # noqa: F401
 from .llm import (  # noqa: F401
     apply_llm,
 )
+from .where import (  # noqa: F401
+    fix_where,
+    pr_or_other,
+    where_kind,
+    where_pkg,
+)
 from .words import (  # noqa: F401
     counted,
 )
@@ -170,6 +176,11 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     if llm:
         data["_sha"] = sha
         apply_llm(results, data, src, cache_dir, pr_packages, llm["limit"], llm["model"], llm["dry_run"])
+        for r in results:
+            if r.get("rule") == "llm":
+                # The answer's place comes as `fix_in` (see where.py): the rule's where_kind no longer holds.
+                r.pop("where_kind", None)
+                r.pop("where_pkg", None)
 
     # Old releases failing on newer platforms: maintainers mark them
     # `x-maintained: false` so that the next archiving round removes them.
@@ -238,7 +249,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
 def rule_error(job, e, jobs):
     """The result for a job whose rules raised `e`."""
     return {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"],
-            "failing": job.get("revdep") or job.get("target"), "rule": "rule-error", "fix_in": "unknown",
+            "failing": job.get("revdep") or job.get("target"), "rule": "rule-error", **fix_where("unknown", "unknown"),
             "confidence": "low", "error": f"{type(e).__name__}: {str(e)[:300]}",
             "note": "The tool failed while analysing this log, which is a bug in the tool. Read the log.",
             "_key": failure_key(job), "jobs": jobs, "keep": True}
@@ -342,7 +353,7 @@ def merge_versions(results):
         if r.get("rule") not in MERGE_VERSIONS or r.get("new") or not name or " " in failing:
             out.append(r)
             continue
-        k = (name, r["rule"], r.get("fix_in") == "this PR")
+        k = (name, r["rule"], where_kind(r))
         f = first.get(k)
         if f is None:
             first[k] = r
@@ -351,8 +362,8 @@ def merge_versions(results):
         if failing not in f["failing"].split(", "):
             f["failing"] += ", " + failing
         f["jobs"] = merge_jobs(f.get("jobs") or [f["variant"]], r.get("jobs") or [r["variant"]])
-        if r.get("fix_in") != "this PR":
-            f["fix_in"] = f"{name} (other package)"
+        if where_kind(r) == "other-package":
+            f.update(pr_or_other(name, False))
         if r.get("note") and r["note"] != f.get("_note0", f.get("note")):
             f.setdefault("_note0", f.get("note"))
             f.setdefault("_first", f["failing"].split(", ")[0])
@@ -375,7 +386,8 @@ def merge_unrecognised(results):
     jobs = merge_jobs([], [v for r in unk for v in (r.get("jobs") or [r["variant"]])])
     names = sorted({r["failing"] for r in unk if r.get("failing")})
     return [r for r in results if r not in unk] + [{
-        "variant": counted(len(jobs), "job"), "rule": "unrecognised", "fix_in": "unknown", "confidence": "low",
+        "variant": counted(len(jobs), "job"), "rule": "unrecognised", **fix_where("unknown", "unknown"),
+        "confidence": "low",
         "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else "") if names else None,
         "error": f"{counted(len(jobs), 'failed job')} the tool cannot explain",
         "note": "Read its log." if len(jobs) == 1 else "Read their logs.", "jobs": jobs,
@@ -425,31 +437,24 @@ def title_of(r):
     return f"{t} ({m.group(1)} packages)" if m else t
 
 
-# Where the fix goes, in words: "this PR", "{pkg} (another package)",
-# "upstream", "the CI", "rerun" or "nothing to fix"; None when unknown. The
-# stored `fix_in` values stay as they are: the page groups and classifies
-# suggestions with them.
-WHERE = {"this PR": "this PR", "unknown": None, "CI (rerun)": "rerun",
-         "the CI environment (day10 builder)": "the CI", "the CI environment": "the CI",
-         "opam (the CI's opam version)": "the CI", "upstream (the package's source)": "upstream",
-         "nothing (this PR's bound)": "nothing to fix",
-         "the dependency declaring these depexts": "the dependency that declares these depexts (another package)",
-         "the reverse dependencies (other packages)": "these reverse dependencies (other packages)",
-         "the PR, a shared dependency, or the CI": "unknown: one cause shared by these packages"}
+# Where the fix goes, in words, by `where_kind` (see where.py): "this PR",
+# "{pkg} (another package)", "upstream", "the CI", "rerun" or "nothing to
+# fix"; None when unknown.
+WHERE = {"pr": "this PR", "upstream": "upstream", "ci": "the CI", "rerun": "rerun", "none": "nothing to fix"}
+# Another package the analysis cannot name, by rule.
+WHERE_UNNAMED = {"missing-system-package": "the dependency that declares these depexts (another package)",
+                 "health-check-preexisting": "these reverse dependencies (other packages)"}
 
 
 def where_text(r):
     """Where the fix of a suggestion goes, in words (see WHERE), or None."""
-    f = r.get("fix_in") or ""
-    if r.get("failing_dep") and f == "the PR, a shared dependency, or the CI":
-        return f"{r['failing_dep']} (another package)"
-    if f in WHERE:
-        return WHERE[f]
-    if f.endswith(" (other package)"):
-        return f[:-len(" (other package)")] + " (another package)"
-    if f.endswith(" (upstream archive)"):
-        return "upstream"
-    return f or None
+    k = where_kind(r)
+    if k == "other-package":
+        pkg = where_pkg(r)
+        return f"{pkg} (another package)" if pkg else WHERE_UNNAMED.get(r.get("rule"), "another package")
+    if k == "unknown" and (r.get("rule") or "").endswith("-systemic"):
+        return "unknown: one cause shared by these packages"
+    return WHERE.get(k)
 
 
 def fix_label(where):
@@ -468,6 +473,11 @@ def readable(results):
             r["title"] = title_of(r)
         if r.get("variant"):
             r["job"] = describe_job(r["variant"])
+        r["where_kind"], pkg = where_kind(r), where_pkg(r)
+        if pkg:
+            r["where_pkg"] = pkg
+        else:
+            r.pop("where_pkg", None)
         r["where"] = where_text(r)
         for k in ("note", "error"):
             v = (r.get(k) or "").strip()
@@ -489,12 +499,14 @@ WORKAROUND_RULES = {"platform-matrix", "missing-system-package"}
 
 def classify(r):
     """'fix' (change in this PR), 'workaround' (skips platforms or tests),
-    'elsewhere' (another package, CI, systemic), or 'explanation'. A change
-    described in words (`advice`) counts as a change."""
+    'elsewhere' (another package, upstream, the CI), or 'explanation' (no
+    change, or the place of the fix is unknown). A change described in words
+    (`advice`) counts as a change."""
     has_change = bool(r.get("new") or r.get("candidates") or r.get("advice"))
+    k = where_kind(r)
     if r.get("rule") == "rule-error":
         return "explanation"
-    if r.get("rule", "").endswith("-systemic") or (r.get("fix_in") and r.get("fix_in") != "this PR"):
+    if r.get("rule", "").endswith("-systemic") or k != "pr":
         return "elsewhere"
     if not has_change:
         return "explanation"
