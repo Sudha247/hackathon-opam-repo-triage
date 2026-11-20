@@ -273,13 +273,15 @@ job's summary.
 
 1. The CI commit page and job logs (opam.ci.ocaml.org).
 2. The ocaml.org MCP endpoint (`https://ocaml.org/mcp`, JSON-RPC, no session, no token): module lists and plain-text signatures for every documented package version; the versions of a package with their release dates (`ocaml_package_versions`, kept a day in the cache); and, for a test-output failure, the changelog sections of each suspect dependency between the passing version and the first release after it (`ocaml_package_changelog`).
-3. opam.ocaml.org pages: the versions and release dates, only when the MCP endpoint does not answer.
-4. Raw files: opam files of opam-repository, `stdlib/*.mli` of each OCaml release.
-5. A shallow, blob-less `git fetch` of one upstream tag, only when ocaml.org has no docs for a version.
-6. The GitHub REST API, only for `--pr` and for `compare`'s baseline lookup (2–3 calls). It works without a token (60 requests per hour); `GITHUB_TOKEN`, `GH_TOKEN` or a logged-in `gh` are used if present.
+3. Raw files: opam files of opam-repository, `stdlib/*.mli` of each OCaml release.
+4. A shallow, blob-less `git fetch` of one upstream tag, only when ocaml.org has no docs for a version.
+5. The GitHub REST API, only for `--pr` and for `compare`'s baseline lookup (2–3 calls). It works without a token (60 requests per hour); `GITHUB_TOKEN`, `GH_TOKEN` or a logged-in `gh` are used if present.
 
 Results are cached in `.opam-ci-cache/`. `suggest` prints the number of
-network requests it actually sent.
+network requests it actually sent, and `mcp-errors`, the ocaml.org MCP calls
+that failed: an analysis with such failures lacks some versions, docs or
+health-check results, and the triage page does it again in its next runs
+(three attempts at most).
 
 Limitations:
 

@@ -354,6 +354,38 @@ for _case in CASES:
     setattr(TriageTest, "test_" + _case.replace("-", "_"), make_test(_case))
 
 
+class McpFailureTest(unittest.TestCase):
+    """A failed ocaml.org MCP call is counted, not cached, and the triage page
+    analyses the PR again (a few times at most)."""
+
+    def test_failed_call_counted(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import tempfile
+        import opam_repo_ci_triage as t
+        from triage import net
+        if net.OFFLINE:
+            self.skipTest("offline")
+        with tempfile.TemporaryDirectory() as d:
+            src = t.Sources(d)
+            src.MCP_URL = "http://127.0.0.1:9/mcp"          # nothing listens there
+            before = t.NET.get("mcp-errors", 0)
+            self.assertIsNone(src.mcp("ocaml_package_versions", package="x"))
+            self.assertEqual(t.NET.get("mcp-errors", 0), before + 1)
+            self.assertEqual(os.listdir(d), [])             # not cached
+            self.assertEqual(src.versions("x"), [])
+
+    def test_reuse(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+        p = {"sha": "a", "ci_state": "FAILURE"}
+        prev = {"sha": "a", "ci_state": "FAILURE", "tool_version": "v", "result": {}, "attempts": 1}
+        self.assertEqual(T.reuse(prev, p, "v", False), (True, True, False))
+        self.assertEqual(T.reuse(dict(prev, mcp_errors=2), p, "v", False), (False, True, True))
+        self.assertEqual(T.reuse(dict(prev, mcp_errors=2, attempts=T.MAX_ATTEMPTS), p, "v", False),
+                         (True, True, False))
+        self.assertEqual(T.reuse(prev, dict(p, sha="b"), "v", False), (False, False, False))
+
+
 class PageTest(unittest.TestCase):
     """The triage page: which PRs seem ready, labels, the Markdown comment."""
 

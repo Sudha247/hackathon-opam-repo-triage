@@ -148,6 +148,28 @@ def list_open_prs(token):
         cursor = conn["pageInfo"]["endCursor"]
 
 
+def reuse(prev, p, version, llm):
+    """Whether the previous analysis of PR `p` can be kept: (same, same_commit,
+    mcp_retry). `same`: it describes the current state and need not be redone;
+    `same_commit`: it has a result for the same commit, shown until it is
+    redone; `mcp_retry`: it is redone because ocaml.org's MCP server failed
+    during it."""
+    # A PR whose CI is running is analysed again on every run, until its CI finishes.
+    same = (prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
+            and prev.get("ci_state") == p["ci_state"] and p["ci_state"] != "PENDING")
+    same_commit = same and prev.get("result") is not None
+    # With the LLM on, a PR analysed without it (key added later, or the
+    # run's budget spent) is analysed again; the logs come from the cache.
+    if same and llm and not prev.get("llm"):
+        same = False
+    # An analysis made while ocaml.org's MCP server failed lacks versions,
+    # docs or health-check results: done again, a few times at most.
+    mcp_retry = bool(same and prev.get("mcp_errors") and prev.get("attempts", 0) < MAX_ATTEMPTS)
+    if mcp_retry:
+        same = False
+    return same, same_commit, mcp_retry
+
+
 def run_tool(args, timeout):
     """Run the triage tool; (parsed JSON or None, error message or None, request counts)."""
     try:
@@ -298,19 +320,16 @@ def main():
         entry.update({k: p[k] for k in ("number", "title", "url", "draft", "updated", "sha", "author", "labels",
                                          "stale_labels")})
         entry["ci_url"] = p["ci_url"] or BASE + p["sha"]
-        # A PR whose CI is running is analysed again on every run, until its CI finishes.
-        same = (prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
-                and prev.get("ci_state") == p["ci_state"] and p["ci_state"] != "PENDING")
-        # With the LLM on, a PR analysed without it (key added later, or the
-        # run's budget spent) is analysed again; the logs come from the cache.
-        if same and llm and not prev.get("llm"):
-            same = False
+        same, same_commit, mcp_retry = reuse(prev, p, version, llm)
         if same and (prev.get("result") is not None or prev.get("attempts", 0) >= MAX_ATTEMPTS):
             stats["unchanged"] += 1
             new_state[key] = entry
             continue
         if args.time_budget and time.monotonic() - start > args.time_budget:
             stats["deferred"] += 1
+            if same_commit:     # to redo (LLM, MCP errors): keep showing the result meanwhile
+                new_state[key] = entry
+                continue
             if not same:        # an older result would describe another commit
                 for k in ("result", "error", "jobs", "analysed_at", "attempts", "tool_version"):
                     entry.pop(k, None)
@@ -328,7 +347,7 @@ def main():
             if not failed:
                 stats["running, no failure yet"] += 1
                 continue
-        attempts = (prev.get("attempts", 0) if same else 0) + 1
+        attempts = (prev.get("attempts", 0) if same or mcp_retry else 0) + 1
         use_llm = llm_left > 0
         extra = ["--llm", "--llm-max", str(min(args.llm_max, llm_left))] if use_llm else []
         result, err, net = run_tool(["suggest", p["sha"], "--json", "--max", str(args.max),
@@ -344,7 +363,7 @@ def main():
         entry.update({"ci_state": p["ci_state"],
                       "ci_unfinished": (result or {}).get("ci_unfinished", 0)})
         entry.update({"result": result, "error": err, "attempts": attempts, "tool_version": version,
-                      "llm": use_llm,
+                      "llm": use_llm, "mcp_errors": net.get("mcp-errors", 0),
                       "analysed_at": now(), "seconds": round(time.monotonic() - t0, 1),
                       "jobs": jobs_overview(summary) if summary else None})
         entry.pop("pending", None)

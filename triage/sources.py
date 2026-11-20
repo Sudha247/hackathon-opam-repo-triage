@@ -159,16 +159,13 @@ class Sources:
 
     def versions(self, name, ref="master"):
         """Versions of `name` in opam-repository, oldest first: from ocaml.org's
-        ocaml_package_versions; from the opam.ocaml.org package page if the MCP
-        server does not answer; from a git listing for another ref."""
+        ocaml_package_versions for master ([] if not a package, or if the MCP
+        server did not answer: counted in NET["mcp-errors"]), from a git
+        listing for another ref."""
         if ref == "master":
-            vs = self.mcp_versions(name)
-            if vs is not None:
-                return sorted({v["version"] for v in vs if isinstance(v.get("version"), str)},
-                              key=functools.cmp_to_key(opam_vcmp))
-            page = self.raw(f"https://opam.ocaml.org/packages/{name}/")
-            vs = set(re.findall(re.escape(name) + r"\.(\d[^\s\"'<>/]*)", page or ""))
-            return sorted(vs, key=functools.cmp_to_key(opam_vcmp))   # [] if not a package
+            vs = self.mcp_versions(name) or []
+            return sorted({v["version"] for v in vs if isinstance(v.get("version"), str)},
+                          key=functools.cmp_to_key(opam_vcmp))
         return self._versions_git(name, ref)
 
     def _versions_git(self, name, ref="master"):
@@ -195,8 +192,12 @@ class Sources:
 
     def mcp(self, tool, _max_age=None, **args):
         """Call an ocaml.org MCP tool; parsed JSON result, or None on error.
-        Answers are cached on disk; with `_max_age` (seconds), an older answer
-        is fetched again (for data that changes, like health-check results)."""
+        Answers are cached on disk, including the tool's own errors (an unknown
+        package, a version without docs), as None; with `_max_age` (seconds),
+        an older answer is fetched again (for data that changes, like
+        health-check results). A call that fails (network error, timeout, HTTP
+        error, unreadable answer) is not cached and is counted in
+        NET["mcp-errors"]: the analysis is then incomplete."""
         key = json.dumps([tool, args], sort_keys=True)
         if key in self.mem:
             return self.mem[key]
@@ -217,7 +218,8 @@ class Sources:
                 with urllib.request.urlopen(req, timeout=60) as r:
                     res = json.loads(r.read()).get("result", {})
                 v = None if res.get("isError") else json.loads(res["content"][0]["text"])
-            except (urllib.error.URLError, ValueError, KeyError, IndexError):
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError, IndexError):
+                NET["mcp-errors"] = NET.get("mcp-errors", 0) + 1
                 return None                      # transient: do not cache
             os.makedirs(self.cache_dir, exist_ok=True)
             with open(disk, "w") as f:
@@ -311,14 +313,12 @@ class Sources:
         return defines(page, kind, ident)
 
     def published(self, pkg, version):
-        """Release date (YYYY-MM-DD) of pkg.version: from ocaml_package_versions,
-        else from its opam.ocaml.org page."""
+        """Release date (YYYY-MM-DD) of pkg.version, from ocaml_package_versions,
+        or None."""
         for v in self.mcp_versions(pkg) or []:
             if v.get("version") == version and re.fullmatch(r"\d{4}-\d\d-\d\d", str(v.get("published") or "")):
                 return v["published"]
-        page = self.raw(f"https://opam.ocaml.org/packages/{pkg}/{pkg}.{version}/")
-        m = re.search(r'datetime="(\d{4}-\d\d-\d\d)', page or "")
-        return m.group(1) if m else None
+        return None
 
     def opam_file(self, name, version, ref="master"):
         return self.raw(f"https://raw.githubusercontent.com/{REPO}/{ref}/packages/{name}/{name}.{version}/opam")
