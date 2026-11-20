@@ -14,6 +14,7 @@ The expectations are fixes checked by hand against the CI logs, upstream
 history, or the change the PR author actually made.
 """
 
+import contextlib
 import datetime
 import gzip
 import http.client
@@ -1582,6 +1583,172 @@ def outside_code(md):
     return "".join(res)
 
 
+class LlmFallbackTest(unittest.TestCase):
+    """The LLM fallback (no API call: llm_suggest or the SDK are faked): which
+    failures it gets, which changes are shown as a diff, which package names
+    are kept, and errors that leave the failure unrecognised."""
+
+    JOB = {"variant": "v", "target": "x.1", "revdep": None, "kind": "build"}
+
+    def setUp(self):
+        import tempfile
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import triage.llm as L
+        self.L = L
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def result(self, **kw):
+        return {"variant": "v", "url": "https://opam.ci.ocaml.org/x", "note": "Unrecognised error.", "error": "E",
+                "failing": "x.1", "_unexplained": True, **kw}
+
+    def answer(self, **kw):
+        return {"diagnosis": "d", "fix_in": "this-pr", "package": "x.1", "change_old": "", "change_new": "",
+                "confidence": "low", "verify": "v", **kw}
+
+    def apply(self, r, res=None, suggest=None, pr_packages=("x.1",)):
+        from unittest import mock
+        L = self.L
+        with mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \
+                mock.patch.object(L, "excerpt", lambda *a, **k: {"error_block": "e"}), \
+                mock.patch.object(L, "key_error_line", lambda t: "e"), \
+                mock.patch.object(L, "llm_suggest", suggest or (lambda *a: dict(res))), \
+                contextlib.redirect_stderr(io.StringIO()):
+            L.apply_llm([r], {"jobs": [self.JOB]}, None, self.tmp, set(pr_packages), 5, "m", False)
+        return r
+
+    def test_change_shapes(self):
+        ok = self.L.llm_change_as_diff
+        for new in ['"foo"', '"foo" {with-test}', '"foo" {build & with-test}', 'available: os != "win32"',
+                    'x-ci-accept-failures: ["alpine-3.22"]', "x-maintained: false", '"foo" {with-test}\n"bar"']:
+            self.assertTrue(ok("", new), new)
+        self.assertTrue(ok('"foo"', '"foo" {with-test}'))
+        for old, new in [("", 'build: [["dune" "build" "-p" name]]'), ("", 'install: [make "install"]'),
+                         ("", 'url { src: "https://e.x/a.tgz" }'), ("", 'src: "https://e.x/a.tgz"'),
+                         ("", '"foo" {>= "1.0"}'), ("", 'depexts: ["libgmp-dev"]'),
+                         ("", 'available: ocaml:version < "5.0"'), ("", 'depends: [\n"foo"\n]'),
+                         ('build: [["make"]]', '"foo"'), ('"foo" {>= "1.0"}', '"foo"')]:
+            self.assertFalse(ok(old, new), (old, new))
+        # Through apply_llm: a build command is text in the note, a missing dependency is a diff.
+        r = self.apply(self.result(), self.answer(change_new='build: [["make" "-j1"]]'))
+        self.assertNotIn("new", r)
+        self.assertIn('Possible change, not checked: `build: [["make" "-j1"]]`.', r["note"])
+        r = self.apply(self.result(), self.answer(change_new='"zarith" {with-test}'))
+        self.assertEqual((r["new"], r["old"]), ('"zarith" {with-test}', None))
+
+    def test_package_checked(self):
+        # A package the input does not name: dropped, with the claim of where the fix goes.
+        r = self.apply(self.result(), self.answer(package="evil.6.6", fix_in="other-package",
+                                                  change_new='"zarith"'))
+        self.assertEqual((r["failing"], r["fix_in"]), ("x.1", "unknown"))
+        self.assertNotIn("new", r)
+        self.assertIn("Possible change to `evil.6.6`, not checked", r["note"])
+        # One of the PR's packages, or the failing one (a name alone is enough).
+        r = self.apply(self.result(failing="y.2"), self.answer(package="x", change_new='"zarith"'))
+        self.assertEqual((r["failing"], r["fix_in"], r["new"]), ("x.1", "this PR", '"zarith"'))
+        r = self.apply(self.result(failing="y.2"), self.answer(package="y.2", fix_in="other-package"))
+        self.assertEqual((r["failing"], r["fix_in"]), ("y.2", "y.2 (other package)"))
+        r = self.apply(self.result(), self.answer(package=""))
+        self.assertEqual((r["failing"], r["fix_in"]), ("x.1", "this PR"))
+
+    def test_errors_leave_the_failure_unrecognised(self):
+        from unittest import mock
+
+        def boom(*a):
+            raise ConnectionResetError(104, "reset")
+        r = self.apply(self.result(), suggest=boom)
+        self.assertNotIn("rule", r)
+        self.assertIn("ConnectionResetError", r["llm_error"])
+        # The SDK: no credentials, an answer that is not JSON, no text, a bad field.
+        import types
+
+        class AnthropicError(Exception):
+            pass
+
+        class APIStatusError(AnthropicError):
+            pass
+
+        class APIConnectionError(AnthropicError):
+            pass
+
+        def sdk(answer=None, client_error=None):
+            m = types.ModuleType("anthropic")
+            m.AnthropicError, m.APIStatusError, m.APIConnectionError = \
+                AnthropicError, APIStatusError, APIConnectionError
+            blocks = [] if answer is None else [types.SimpleNamespace(type="text", text=answer)]
+            resp = types.SimpleNamespace(stop_reason="end_turn", content=blocks, model="m",
+                                         usage=types.SimpleNamespace(input_tokens=1, output_tokens=1))
+
+            class Anthropic:
+                def __init__(self):
+                    if client_error:
+                        raise client_error
+                    self.beta = types.SimpleNamespace(messages=types.SimpleNamespace(create=lambda **k: resp))
+            m.Anthropic = Anthropic
+            return m
+        cases = [(sdk(client_error=AnthropicError("no api_key")), "no api_key"),
+                 (sdk("not json"), "no JSON answer"), (sdk(None), "no JSON answer"),
+                 (sdk(json.dumps(self.answer(fix_in="bogus"))), "unknown fix_in"),
+                 (sdk(json.dumps({"diagnosis": "d"})), "no fix_in"), (sdk("[1]"), "not a JSON object")]
+        for i, (mod, why) in enumerate(cases):
+            with mock.patch.dict(sys.modules, {"anthropic": mod}), \
+                    mock.patch.object(self.L, "llm_prompt", lambda *a: f"prompt {i}"):
+                res = self.L.llm_suggest(None, {}, self.JOB, "log", {}, [], self.tmp, "m", False)
+            self.assertIn(why, res.get("llm_error", ""), (why, res))
+        self.assertEqual([f for f in os.listdir(self.tmp) if f.startswith("llm-")], [])     # nothing cached
+        # A good answer is cached; a damaged cached one is an error, not a crash.
+        with mock.patch.dict(sys.modules, {"anthropic": sdk(json.dumps(self.answer()))}), \
+                mock.patch.object(self.L, "llm_prompt", lambda *a: "good"):
+            self.assertEqual(self.L.llm_suggest(None, {}, self.JOB, "log", {}, [], self.tmp, "m", False)["fix_in"],
+                             "this-pr")
+            cached = [f for f in os.listdir(self.tmp) if f.startswith("llm-")]
+            self.assertEqual(len(cached), 1)
+            with open(os.path.join(self.tmp, cached[0]), "w") as f:
+                json.dump({"diagnosis": 3}, f)
+            self.assertIn("unusable cached answer",
+                          self.L.llm_suggest(None, {}, self.JOB, "log", {}, [], self.tmp, "m", False)["llm_error"])
+
+    def test_new_on_master_reaches_the_llm(self):
+        # opam-health-check sees the reverse dependency build on master: the
+        # hint is put before the note; the failure is still unexplained.
+        hint = "y.2 builds on master (opam-health-check, 17 Nov), so this PR probably causes this failure."
+        r = self.apply(self.result(note=hint + " Unrecognised error.", new_on_master=hint), self.answer())
+        self.assertEqual(r["rule"], "llm")
+        self.assertTrue(r["note"].startswith(hint + " d Suggested next step"), r["note"])
+        r = self.apply(self.result(note="Pre-existing: z. Unrecognised error.", preexisting="z"), self.answer())
+        self.assertEqual(r["rule"], "llm")
+        # Without the rules' flag (a rule explained it), the LLM is not asked.
+        r = self.apply(self.result(_unexplained=False), self.answer())
+        self.assertNotIn("rule", r)
+
+    def test_flag_set_by_the_rules_and_not_output(self):
+        from triage import rules
+        job = {"variant": "compilers,5.3,x.1", "url": "u", "kind": "build", "experimental": False,
+               "platform": ["compilers", "5.3"], "target": "x.1", "revdep": None}
+        text = "#=== ERROR while compiling x.1 ===#\n# exit-code 2\n### output ###\n# something odd happened\n"
+
+        class Src:
+            def opam_file(self, *a):
+                return None
+        r = rules.suggest_for_job(Src(), job, text, ["x.1"], "a" * 40)
+        self.assertEqual((r.get("note"), r.get("_unexplained")), ("Unrecognised error.", True))
+        # The flag is not in the output.
+        out = run_patched("lwt-revdeps", """
+import triage.suggest as s
+_orig = s.suggest_for_job
+def f(src, job, *a):
+    r = _orig(src, job, *a)
+    if "kinetic-client" in job["variant"]:
+        r = {k: r[k] for k in ("variant", "url", "kind", "experimental", "failing")}
+        r.update(error="Unbound value frobnicate", note="Unrecognised error.", _unexplained=True)
+    return r
+s.suggest_for_job = f
+""")
+        self.assertEqual(out.returncode, 0, out.stderr[-1500:])
+        self.assertIn("frobnicate", out.stdout)
+        self.assertNotIn("_unexplained", out.stdout)
+
+
 class EscapingTest(unittest.TestCase):
     """Untrusted text (logs, opam files, LLM answers) in the Markdown posted on
     GitHub: no link, image, HTML, mention or reference, and no way out of a
@@ -1672,7 +1839,8 @@ class EscapingTest(unittest.TestCase):
     def test_llm_change_is_code(self):
         from unittest import mock
         import triage.llm as L
-        r = {"variant": "v", "url": "https://opam.ci.ocaml.org/x", "note": "Unrecognised error.", "error": "E"}
+        r = {"variant": "v", "url": "https://opam.ci.ocaml.org/x", "note": "Unrecognised error.", "error": "E",
+             "_unexplained": True}
         res = {"fix_in": "this-pr", "confidence": "low", "diagnosis": "d", "verify": "v",
                "change_new": 'depexts: ["a"] {os-distribution = "debian"}\n```\n@x `y`', "package": "x.1"}
         with mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \

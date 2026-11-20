@@ -164,6 +164,18 @@ Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
 fallbacks enabled. Responses are cached in `.opam-ci-cache/`, so re-runs cost
 nothing. The log and opam file are passed as untrusted data.
 
+The LLM gets the failures the rules flag as unexplained (also when a note was
+added since: pre-existing, or opam-health-check's "builds on master"). Its
+answer is checked: an answer that does not follow the schema, an SDK or API
+error, or a log that cannot be read leaves the failure unrecognised (with an
+`llm_error`), it never fails the analysis. The package it names must be one of
+the PR's or the failing one, or it is dropped (with its claim of where the fix
+goes). Only a few shapes of change are shown as a diff: a dependency without a
+version (possibly `{with-test}`, `{build}` or `{with-doc}`), `available`,
+`x-ci-accept-failures` and `x-maintained`, without version bounds or depexts.
+Anything else (bounds, depexts, build or install commands, URLs) is shown as
+text to check.
+
 Every Monday, `.github/workflows/llm-digest.yml` groups the LLM answers shown
 on the triage page by the error line of their log (`scripts/llm_digest.py`;
 paths, numbers and identifiers masked) and keeps one issue, "LLM diagnoses to
@@ -234,7 +246,8 @@ publishes the results on the repository's GitHub Pages site:
    cost anything). Without the secret, or if the API fails, the page is built
    from the rules alone. Once a run's budget is spent, PRs analysed without
    the LLM are left as they are until a run with budget left. On the page, LLM diagnoses are labelled "unchecked",
-   version bounds and depexts they propose are shown as text to check, and
+   the changes they propose are shown as a diff only for a few safe shapes
+   (see above), as text to check otherwise, and
    low-confidence ones are folded, as "LLM diagnosis (low confidence)": in an evaluation on 25 answers, 15 were
    right, 7 plausible, 1 wrong and 2 harmful, all the harmful ones being
    version bounds.

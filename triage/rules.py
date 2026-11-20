@@ -228,6 +228,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         top = mods[0] if mods else (ident if kind == "module" else None)
         if top is None:
             out["note"] = "The identifier has no module path, so the tool cannot tell which package it comes from."
+            out["_unexplained"] = True        # for the LLM fallback (popped by suggest)
             return out
         # Stdlib?
         rel = ocaml_releases(src)              # [] if the OCaml tags could not be listed
@@ -328,7 +329,9 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                 if f"{pkg}.{fver}" in pr_packages and src.upstream(fname, fver, ref) == src.upstream(pkg, fver, ref):
                     out["alternative"] = f'"{pkg}" {{= version}}  (same upstream repository and version)'
                 return out
-        out.setdefault("note", "The identifier was not found in the history of any dependency the tool checked.")
+        if "note" not in out:
+            out.update(note="The identifier was not found in the history of any dependency the tool checked.",
+                       _unexplained=True)
         return out
 
     if info["test_diff"]:
@@ -360,9 +363,10 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         out["error"] = "Test output differs (cram/mdx)"
         return out   # completed by the caller with a passing job's versions
     if out.get("install"):
-        out.update(error=out.pop("install"), note="The tool does not recognise the earlier build error.")
+        out.update(error=out.pop("install"), note="The tool does not recognise the earlier build error.",
+                   _unexplained=True)
         return out
-    out["note"] = "Unrecognised error."
+    out.update(note="Unrecognised error.", _unexplained=True)
     return out
 
 

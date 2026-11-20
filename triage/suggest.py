@@ -188,6 +188,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     seen, unique = {}, []
     for r in results:
         plat = r.pop("_plat", None)
+        r.pop("_unexplained", None)         # set by the rules, read by apply_llm
         k = ((r.get("failing"), (r.get("new") or "").split("   ")[0]) if r.get("new")
              else (r.get("failing"), r.get("advice")) if r.get("advice")
              else (r.get("failing"), r["rule"], (r.get("note") or "").replace(plat or "\0", "{P}"))
