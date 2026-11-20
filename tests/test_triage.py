@@ -1892,6 +1892,14 @@ class PageTest(unittest.TestCase):
               "failing": "y.1", "variant": "v", "title": "API change"}
     lint = {"class": "fix", "rule": "lint", "fix_in": "this PR", "failing": "x.1", "variant": "v", "title": "Lint"}
 
+    def test_help_texts(self):
+        # Jobs aborted on riscv64 or s390x do not hold a PR back: not "every job ran".
+        self.assertNotIn("every job ran", self.r.VERDICT_HELP["ready"])
+        self.assertIn("riscv64", self.r.VERDICT_HELP["ready"])
+        page = self.r.render_pr(dict(self.pr([self.day10]), git_unreachable=1))
+        self.assertIn("a git host that did not answer is asked again a day later", page)
+        self.assertNotIn("a few times a day", page)
+
     def test_seems_ready(self):
         self.assertTrue(self.r.seems_ready(self.pr([self.day10])))
         # A revdep failure is the PR's, unless it happens without the PR.

@@ -33,7 +33,8 @@ VERDICTS = [("ready", "Not this PR's fault"), ("change", "Change this PR"), ("bl
 VERDICT_LABEL = dict(VERDICTS)
 VERDICT_HELP = {
     "ready": "CI fails, but none of the failures is this PR's fault: each one also fails without this PR, comes "
-             "from the CI's setup, or is on an experimental platform; every job ran",
+             "from the CI's setup, or is on an experimental platform; CI has finished, and the jobs it did not "
+             "run to the end are on experimental platforms or aborted on riscv64 or s390x (routine there)",
     "change": "A change to this PR's opam files is suggested: a fix, or a workaround that skips platforms or "
               "tests",
     "blocked": "At least one failure must be fixed in another package (failures that also happen without this "
@@ -683,7 +684,8 @@ def render_pr(pr, year=None, max_failures=None):
     if lookups:
         bar.append(f'<span class="no" title="ocaml.org, a git host or another server did not answer during the '
                    f'analysis: some versions, tags, docs or logs were not read, so a suggestion may be missing. '
-                   f'The analysis is tried again a few times a day.">analysis incomplete ({lookups} failed '
+                   f'The analysis is tried again up to three times a day; a git host that did not answer is asked '
+                   f'again a day later.">analysis incomplete ({lookups} failed '
                    f'lookup{plural(lookups)})</span>')
     if pr.get("last_error") and pr.get("result") is not None:
         # A newer analysis of the same commit failed: this result is the previous one.
