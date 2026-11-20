@@ -1129,9 +1129,93 @@ class PageTest(unittest.TestCase):
         self.assertLess(html_.index("/pull/7"), html_.index("/pull/5"))   # labelled first
         for n in (6, 8, 9):
             self.assertNotIn(f"/pull/{n}", html_)
-        self.assertEqual(self.r.pr_cats(self.pr([self.day10], labels=["consider for merge"])) & {"ready", "merge"},
-                         {"ready", "merge"})
+        self.assertNotIn("<table", html_)                                  # a list, which wraps on a phone
+        self.assertIn('href="#pr-5"', html_)
+        # More than `shown`: the rest is folded.
+        many = {"passing": [{"number": n, "title": "p", "labels": []} for n in range(10, 17)]}
+        self.assertIn("2 more</summary>", self.r.ready_section(many, shown=5))
+        page = self.r.render_pr(self.pr([self.day10], labels=["consider for merge"]))
+        self.assertIn('data-v="ready"', page)
+        self.assertIn("data-merge", page)
         self.assertIn("&lt;b&gt;", self.r.label_badges(["<b>"]))
+
+    def test_verdict(self):
+        v = self.r.verdict
+        workaround = dict(self.lint, **{"class": "workaround", "rule": "platform-matrix", "new": 'available: os != "win32"'})
+        self.assertEqual(v(self.pr([self.day10])), "ready")
+        self.assertEqual(v(self.pr([self.lint, self.revdep])), "change")          # change first, then blocked
+        self.assertEqual(v(self.pr([workaround])), "change")
+        self.assertEqual(v(self.pr([self.day10, self.revdep])), "blocked")
+        self.assertEqual(v(self.pr([self.day10], ci_unfinished=3)), "ci")          # not ready while CI runs
+        self.assertEqual(v(self.pr([dict(self.day10, **{"class": "explanation", "fix_in": "this PR",
+                                                        "rule": "uninstallable"})])), "other")
+        self.assertEqual(v(self.pr([], pending=True)), "error")
+        self.assertEqual(v(self.pr([], result=None)), "error")
+        # A draft is never ready: then its CI-only failures say so.
+        self.assertEqual(v(self.pr([self.day10], draft=True)), "ci")
+
+    def test_verdict_counts_add_up(self):
+        prs = [self.pr([self.day10], number=1), self.pr([self.lint, self.revdep], number=2),
+               self.pr([self.day10, self.revdep], number=3), self.pr([], number=4, pending=True),
+               self.pr([self.day10], number=5, draft=True), self.pr([self.lint], number=6, ci_state="PENDING",
+                                                                     labels=["consider for merge"])]
+        page = self.r.render({"prs": prs, "generated": "2026-11-20T10:00:00+00:00", "open_prs": 9,
+                              "failing_prs": 6})
+        counts = [int(c) for c in re.findall(r'data-f="(?!all)\w+"[^>]*>.*?<b>(\d+)</b>', page)]
+        self.assertEqual(sum(counts), len(prs))
+        self.assertIn(f"All<b>{len(prs)}</b>", page)
+        self.assertEqual(page.count('<details class="pr '), len(prs))
+        self.assertIn("consider for merge (1)", page)
+        self.assertIn("CI running", page)
+        self.assertNotIn('class="stat', page)
+        self.assertNotIn('id="expand"', page)
+        self.assertIn('rel="alternate" type="application/atom+xml"', page)
+        feed = self.r.render_feed({"prs": prs})
+        self.assertIn("Change this PR: ", feed)
+
+    def test_merge_similar(self):
+        a = dict(self.day10, failing="a.1", jobs=["day10,a,1", "day10,a,2"], note="a.1 note", error="E")
+        b = dict(self.day10, failing="b.1", jobs=["day10,b,1"], note="b.1 note", error="E", also_failing_in=[7])
+        c = dict(self.revdep)
+        llm = {"class": "elsewhere", "rule": "llm", "title": "LLM", "fix_in": "x", "failing": "c.1"}
+        merged = self.r.merge_similar([a, c, b, llm, dict(llm, failing="d.1")])
+        self.assertEqual(len(merged), 4)                     # a and b merged; LLM answers never
+        m = merged[0]
+        self.assertEqual(m["merged"], 2)
+        self.assertEqual(m["packages"], ["a.1", "b.1"])
+        self.assertEqual(m["jobs"], ["day10,a,1", "day10,a,2", "day10,b,1"])
+        self.assertEqual(m["errors"], ["E"])
+        self.assertEqual(m["notes"], ["a.1 note", "b.1 note"])
+        self.assertEqual(m["also_failing_in"], [7])
+        self.assertIs(merged[1], c)
+        # A different new constraint is a different suggestion.
+        self.assertEqual(len(self.r.merge_similar([dict(self.lint, new="x"), dict(self.lint, new="y")])), 2)
+        item = self.r.render_item(m, "a" * 40)
+        self.assertIn("2 failures, 3 jobs", item)
+        self.assertIn("a.1, b.1", item)
+        self.assertNotIn("Fix in: this PR", item)
+        page = self.r.render_pr(self.pr([a, b], number=3))
+        self.assertIn("Not caused by this PR (1)", page)
+        self.assertEqual(page.count('<details class="it">'), 1)
+
+    def test_headline(self):
+        h = self.r.headline
+        fix = dict(self.lint, new='"ocaml" {>= "5.1"}   (a comment)', failing="colibri2.0.7")
+        workaround = dict(self.lint, **{"class": "workaround", "new": 'available: os != "win32"'})
+        self.assertEqual(h(self.pr([fix])), '<code>&quot;ocaml&quot; {&gt;= &quot;5.1&quot;}</code> for colibri2.0.7')
+        self.assertIn("for x.1 (workaround)", h(self.pr([workaround])))
+        self.assertIn("also blocked by y.1", h(self.pr([fix, self.revdep])))
+        self.assertEqual(h(self.pr([self.day10, self.revdep])), "needs a fix in y.1")
+        two = [dict(self.revdep, fix_in=f"z.{i} (other package)") for i in (1, 2)] + [self.revdep]
+        self.assertEqual(h(self.pr(two)), "needs fixes in z (2 versions), y.1")
+        self.assertEqual(h(self.pr([self.day10])), "Fails only on the day10 builder (x.1)")
+        self.assertEqual(h(self.pr([fix]), as_html=False), '`"ocaml" {>= "5.1"}` for colibri2.0.7')
+        self.assertIn("&lt;", h(self.pr([dict(self.day10, title="<b>")])))
+        # Fix in "this PR" goes without saying; confidence only when not high.
+        card = self.r.render_suggestion(dict(fix, confidence="high"))
+        self.assertNotIn("Fix in", card)
+        self.assertNotIn("confidence", card)
+        self.assertIn("medium confidence", self.r.render_suggestion(dict(fix, confidence="medium")))
 
     def test_changelog_in_comment(self):
         sys.path.insert(0, os.path.join(HERE, ".."))
@@ -1159,6 +1243,11 @@ class PageTest(unittest.TestCase):
         self.assertIn('data-for="md-1"', page)
         self.assertIn("</textarea>", page)
         self.assertEqual(page.count("<textarea"), 1)
+        # Only workarounds: the comment says so, as the verdict does ("Change this PR").
+        workaround = dict(self.lint, **{"class": "workaround", "rule": "platform-matrix"})
+        md = self.r.comment_markdown(self.pr([workaround]))
+        self.assertIn("a workaround is suggested", md)
+        self.assertNotIn("No change to this PR", md)
 
 
 HOSTILE = "@ocaml/maintainers ![x](https://evil.example/x.png) <img src=x> see #123, ocaml/dune#4 GH-5 www.evil.example"

@@ -260,6 +260,9 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
             if ev:
                 out.append(f"<sub>{ev}</sub>")
             out.append("")
+    elif by["workaround"] and not placed:
+        out += ["No fix could be derived automatically, but a workaround is suggested: restrict where this PR is "
+                "built or tested (below).", ""]
     elif not placed:
         out += ["No change to this PR's opam files could be derived automatically.", ""]
 

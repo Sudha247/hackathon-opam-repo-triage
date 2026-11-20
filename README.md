@@ -219,10 +219,13 @@ publishes the results on the repository's GitHub Pages site:
    right, 7 plausible, 1 wrong and 2 harmful, all the harmful ones being
    version bounds.
 2. `scripts/render_page.py` turns it into `site/index.html`: one static page,
-   no external resources, with filters (fix for the PR, blocked by other
-   packages, CI only), the suggestions of each PR by class, the `review`
-   command to run by hand, and the reverse dependencies that fail on several
-   PRs. PR titles, logs and suggestions are HTML-escaped.
+   no external resources. Each failing PR gets one verdict (not this PR's
+   fault, change this PR, blocked elsewhere, CI only, needs a look), used by
+   the filters, and a headline saying what the problem is; its details show
+   the suggested changes in full and the other findings folded, one line
+   each, near-duplicates merged. Above the list, the PRs that seem ready;
+   below it, the reverse dependencies that fail on several PRs. PR titles,
+   logs and suggestions are HTML-escaped.
 
 `.opam-ci-cache/` and `state/` are kept between runs with `actions/cache`
 (files older than 30 days are pruned; the git mirrors of `.opam-ci-cache/git/`
