@@ -1174,6 +1174,8 @@ class StdlibHistoryTest(unittest.TestCase):
                                                          "5.2.0": "present"},
                                  "ocaml-compiler": {"5.3.0": "present", "5.4.0": "present"}})
         self.assertEqual((r["rule"], r["new"]), ("stdlib", '"ocaml" {>= "5.1"}'))
+        self.assertEqual(r["note"], "`List.is_empty` is new in OCaml 5.1: to keep supporting older releases, do "
+                                    "without it instead.")
         self.assertEqual(r["source"], "ocaml.org API history")
         hist = [c for c in calls if c[0] == "history"]
         self.assertEqual(hist, [

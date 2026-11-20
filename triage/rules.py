@@ -344,6 +344,12 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                 v = ".".join(v.split(".")[:2])
                 old, new = constraint_edit(opam_text, "ocaml", op, v)
                 out.update(rule="stdlib", dep="ocaml", old=old, new=new, confidence="high")
+                # The bound drops OCaml releases the package supported: some authors
+                # keep them and do without the identifier (grenier 0.17, Float.log2).
+                name = ".".join(mods + [ident])
+                out["note"] = (f"`{name}` is new in OCaml {v}: to keep supporting older releases, do without it "
+                               "instead." if op == ">=" else
+                               f"`{name}` was removed in OCaml {v}: to support it, do without it instead.")
             else:
                 out["note"] = "Standard library identifier, but no OCaml release adds or removes it."
             return out
