@@ -356,6 +356,36 @@ class PageTest(unittest.TestCase):
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], draft=True)))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], labels=["needs reporter action"])))
         self.assertTrue(self.r.seems_ready(self.pr([self.day10], labels=["consider for merge"])))
+        # A "needs reporter action" label the author acted on since may be stale.
+        self.assertTrue(self.r.seems_ready(self.pr([self.day10], labels=["needs reporter action"],
+                                                   stale_labels=["needs reporter action"])))
+        self.assertIn("author active since", self.r.label_badges(["needs reporter action"],
+                                                                 ["needs reporter action"]))
+
+    def test_stale_labels(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import triage_open_prs as T
+        lab = {"__typename": "LabeledEvent", "createdAt": "2026-11-10T00:00:00Z",
+               "label": {"name": "needs reporter action"}}
+        def node(*items):
+            return {"author": {"login": "me"}, "labels": {"nodes": [{"name": "needs reporter action"}]},
+                    "timelineItems": {"nodes": [lab, *items]}}
+        self.assertEqual(T.stale_labels(node()), [])
+        removed = dict(node({"__typename": "HeadRefForcePushedEvent", "createdAt": "2026-11-11T00:00:00Z"}),
+                       labels={"nodes": []})
+        self.assertEqual(T.stale_labels(removed), [])
+        self.assertEqual(T.stale_labels(node({"__typename": "HeadRefForcePushedEvent",
+                                              "createdAt": "2026-11-11T00:00:00Z"})), ["needs reporter action"])
+        self.assertEqual(T.stale_labels(node({"__typename": "PullRequestCommit",
+                                              "commit": {"committedDate": "2026-11-11T00:00:00Z"}})),
+                         ["needs reporter action"])
+        # A comment counts only from the author, and only after the label.
+        self.assertEqual(T.stale_labels(node({"__typename": "IssueComment", "createdAt": "2026-11-11T00:00:00Z",
+                                              "author": {"login": "maintainer"}})), [])
+        self.assertEqual(T.stale_labels(node({"__typename": "IssueComment", "createdAt": "2026-11-09T00:00:00Z",
+                                              "author": {"login": "me"}})), [])
+        self.assertEqual(T.stale_labels(node({"__typename": "IssueComment", "createdAt": "2026-11-11T00:00:00Z",
+                                              "author": {"login": "me"}})), ["needs reporter action"])
 
     def test_ready_section_and_labels(self):
         data = {"prs": [self.pr([self.day10], number=5, labels=["question"]), self.pr([self.lint], number=6)],

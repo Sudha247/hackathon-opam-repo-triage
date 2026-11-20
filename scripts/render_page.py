@@ -28,7 +28,8 @@ CATEGORIES = [("ready", "Seems ready"), ("fix", "Has a fix for the PR"), ("block
               ("ci", "CI problems only"), ("other", "Needs a look"), ("error", "Not analysed"),
               ("merge", 'Labelled "consider for merge"')]
 # Labels of ocaml/opam-repository: "consider for merge" is a filter, and a PR
-# with one of NOT_READY_LABELS is never listed as ready.
+# with one of NOT_READY_LABELS is never listed as ready, unless the label may
+# be stale (the author acted after it was added, see triage_open_prs.py).
 MERGE_LABEL, NO_MERGE_LABEL = "consider for merge", "do not merge"
 NOT_READY_LABELS = {NO_MERGE_LABEL, "needs reporter action"}
 # Rules whose failures come from the CI, not from the PR.
@@ -97,7 +98,7 @@ def seems_ready(pr):
     res = pr.get("result")
     if pr.get("pending") or res is None or pr.get("ci_state") == "PENDING" or pr.get("draft"):
         return False
-    if NOT_READY_LABELS & set(pr.get("labels") or []) or pr.get("ci_unfinished") or res.get("ci_unfinished"):
+    if blocking_labels(pr) or pr.get("ci_unfinished") or res.get("ci_unfinished"):
         return False
     sugg = res.get("suggestions", [])
     return bool(sugg) and all(not_this_pr(r) for r in sugg)
@@ -113,12 +114,21 @@ def pr_cats(pr):
     return cats
 
 
-def label_badges(labels):
-    """The PR's labels, "consider for merge" first."""
-    def cls(lb):
-        return {MERGE_LABEL: "b-merge", NO_MERGE_LABEL: "b-nomerge"}.get(lb, "b-label")
-    order = sorted(labels, key=lambda lb: lb != MERGE_LABEL)
-    return "".join(f'<span class="badge {cls(lb)}" title="Label">{e(lb)}</span>' for lb in order)
+def blocking_labels(pr):
+    """The labels of NOT_READY_LABELS that still apply."""
+    return NOT_READY_LABELS & set(pr.get("labels") or []) - set(pr.get("stale_labels") or [])
+
+
+def label_badges(labels, stale=()):
+    """The PR's labels, "consider for merge" first. A label the author may
+    have answered since it was added says so."""
+    def badge(lb):
+        if lb in stale:
+            return (f'<span class="badge b-label b-stale" title="The author pushed or commented after this label '
+                    f'was added: it may be out of date">{e(lb)} (author active since)</span>')
+        cls = {MERGE_LABEL: "b-merge", NO_MERGE_LABEL: "b-nomerge"}.get(lb, "b-label")
+        return f'<span class="badge {cls}" title="Label">{e(lb)}</span>'
+    return "".join(badge(lb) for lb in sorted(labels, key=lambda lb: lb != MERGE_LABEL))
 
 
 def comment_markdown(pr):
@@ -261,7 +271,7 @@ def ready_section(data):
     Drafts and PRs with one of NOT_READY_LABELS are left out."""
     rows = []
     for p in data.get("passing") or []:
-        if not p.get("draft") and not NOT_READY_LABELS & set(p.get("labels") or []):
+        if not p.get("draft") and not blocking_labels(p):
             rows.append((p, "CI passes"))
     for p in data.get("prs", []):
         if seems_ready(p):
@@ -274,15 +284,15 @@ def ready_section(data):
         n = int(p["number"])
         why_html = e(why) if why else f'CI fails, not because of this PR (<a href="#pr-{n}">details</a>)'
         html_rows.append(f'<tr><td class="nw">{link(f"{REPO_URL}/pull/{n}", f"#{n}")}</td>'
-                         f'<td>{e(p.get("title"))} {label_badges(p.get("labels") or [])}</td>'
+                         f'<td>{e(p.get("title"))} {label_badges(p.get("labels") or [], p.get("stale_labels") or [])}</td>'
                          f'<td>{e(p.get("author") or "?")}</td><td>{why_html}</td>'
                          f'<td class="nw">{e((p.get("updated") or "")[:10])}</td></tr>')
     if not html_rows:
         return ""
     return ('<section id="ready"><h2>PRs that seem ready (' + str(len(html_rows)) + ')</h2>'
             '<p class="meta">Their CI passes, or no failure points at the PR. Drafts and PRs labelled '
-            '"do not merge" or "needs reporter action" are left out. Only CI is checked here: reviews and '
-            'discussions are not.</p>'
+            '"do not merge" or "needs reporter action" are left out, unless the author pushed or commented '
+            'after the label was added. Only CI is checked here: reviews and discussions are not.</p>'
             + table(["PR", "Title", "Author", "CI", "Updated"], html_rows, shown=15) + "</section>")
 
 
@@ -296,7 +306,7 @@ def render_pr(pr):
               for k, label, word in CLASSES if groups.get(k)]
     badges = "".join(f'<span class="badge b-{c}"{READY_TITLE if c == "ready" else ""}>{e(label)}</span>'
                      for c, label in CATEGORIES if c in cats and c != "merge")
-    badges += label_badges(pr.get("labels") or [])
+    badges += label_badges(pr.get("labels") or [], pr.get("stale_labels") or [])
     if pr.get("ci_state") == "PENDING":
         left = pr.get("ci_unfinished")
         badges = (f'<span class="badge b-running" title="These are the failures so far; the page is updated '
@@ -459,7 +469,7 @@ td:last-child{overflow-wrap:anywhere}.nw{white-space:nowrap}
 details.more>summary{cursor:pointer;color:var(--acc);margin:6px 0}
 .hidden{display:none}
 .b-ready{color:var(--fix);border-color:var(--fix);font-weight:600}.b-merge{color:var(--acc);border-color:var(--acc)}
-.b-nomerge{color:var(--err);border-color:var(--err)}.b-label{color:var(--mut)}
+.b-nomerge{color:var(--err);border-color:var(--err)}.b-label{color:var(--mut)}.b-stale{border-style:dashed}
 .md{margin:8px 0}.md button{font:inherit;font-size:.85rem;padding:4px 10px;border-radius:6px;border:1px solid var(--bd);
 background:var(--card);color:var(--fg);cursor:pointer}
 details.mdv{display:inline-block;margin-left:8px;font-size:.85rem;color:var(--mut);vertical-align:top}
@@ -572,7 +582,9 @@ failing in other open PRs too), comes from the CI, or is on an experimental plat
 whose CI passes, they are listed under "PRs that seem ready". Only CI is checked: not the reviews, nor whether
 a maintainer asked for changes.</dd>
 <dt>Labels</dt><dd>The PR's labels on GitHub, set by the opam-repository maintainers. "consider for merge"
-has a filter; a PR labelled "do not merge" or "needs reporter action" is never listed as ready.</dd>
+has a filter. A PR labelled "do not merge" is never listed as ready, nor one labelled "needs reporter action",
+unless its author pushed or commented after the label was added: the label is then shown as "author active
+since", since maintainers often leave it in place.</dd>
 <dt>Copy as a PR comment</dt><dd>Copies a summary of the analysis, as Markdown, to paste in a comment on
 the PR. Check it before posting: low-confidence LLM answers are left out, other suggestions are not
 checked.</dd>

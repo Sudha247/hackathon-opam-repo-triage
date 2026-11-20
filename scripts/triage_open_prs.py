@@ -48,6 +48,16 @@ query($owner: String!, $name: String!, $cursor: String) {
         number title url isDraft updatedAt headRefOid
         author { login }
         labels(first: 20) { nodes { name } }
+        timelineItems(last: 30, itemTypes: [LABELED_EVENT, PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT,
+                                            ISSUE_COMMENT]) {
+          nodes {
+            __typename
+            ... on LabeledEvent { createdAt label { name } }
+            ... on PullRequestCommit { commit { committedDate } }
+            ... on HeadRefForcePushedEvent { createdAt }
+            ... on IssueComment { createdAt author { login } }
+          }
+        }
         commits(last: 1) { nodes { commit { oid status { contexts { context state targetUrl } } } } }
       }
     }
@@ -79,6 +89,39 @@ def graphql(query, variables, token):
             time.sleep(10 * (attempt + 1))
 
 
+# Labels that ask the PR's author to act. Such a label is often left in place
+# after the author has acted: then it may be stale.
+AUTHOR_LABELS = ("needs reporter action",)
+
+
+def stale_labels(node):
+    """The labels of AUTHOR_LABELS the PR has, added before a new commit, a
+    push or a comment by the PR's author. A label added before the last 30 timeline
+    items is not known to be stale."""
+    author = (node.get("author") or {}).get("login")
+    items = ((node.get("timelineItems") or {}).get("nodes")) or []
+    acts = []
+    for i in items:
+        t = i.get("__typename")
+        if t == "PullRequestCommit":
+            acts.append(((i.get("commit") or {}).get("committedDate")))
+        elif t == "HeadRefForcePushedEvent":
+            acts.append(i.get("createdAt"))
+        elif t == "IssueComment" and author and (i.get("author") or {}).get("login") == author:
+            acts.append(i.get("createdAt"))
+    last_act = max((a for a in acts if a), default=None)
+    current = {lb.get("name") for lb in ((node.get("labels") or {}).get("nodes") or [])}
+    out = []
+    for name in AUTHOR_LABELS:
+        if name not in current:     # added, then removed
+            continue
+        added = [i.get("createdAt") for i in items
+                 if i.get("__typename") == "LabeledEvent" and (i.get("label") or {}).get("name") == name]
+        if added and last_act and last_act > max(added):
+            out.append(name)
+    return out
+
+
 def list_open_prs(token):
     """All open PRs with the opam-ci state of their head commit; (prs, number of requests)."""
     prs, cursor, calls = [], None, 0
@@ -98,6 +141,7 @@ def list_open_prs(token):
                         "updated": n["updatedAt"], "sha": n["headRefOid"],
                         "author": (n.get("author") or {}).get("login"),
                         "labels": [lb["name"] for lb in (n.get("labels") or {}).get("nodes") or []],
+                        "stale_labels": stale_labels(n),
                         "ci_state": (ci or {}).get("state"), "ci_url": (ci or {}).get("targetUrl")})
         if not conn["pageInfo"]["hasNextPage"]:
             return prs, calls
@@ -251,7 +295,8 @@ def main():
         key = str(p["number"])
         prev = old.get(key)
         entry = dict(prev or {})
-        entry.update({k: p[k] for k in ("number", "title", "url", "draft", "updated", "sha", "author", "labels")})
+        entry.update({k: p[k] for k in ("number", "title", "url", "draft", "updated", "sha", "author", "labels",
+                                         "stale_labels")})
         entry["ci_url"] = p["ci_url"] or BASE + p["sha"]
         # A PR whose CI is running is analysed again on every run, until its CI finishes.
         same = (prev is not None and prev.get("sha") == p["sha"] and prev.get("tool_version") == version
@@ -323,7 +368,8 @@ def main():
             "prs": sorted(new_state.values(), key=lambda e: e["updated"], reverse=True),
             # PRs whose CI passes: nothing to analyse, listed so that the page
             # can say which PRs seem ready.
-            "passing": [{k: p[k] for k in ("number", "title", "url", "draft", "updated", "author", "labels")}
+            "passing": [{k: p[k] for k in ("number", "title", "url", "draft", "updated", "author", "labels",
+                                           "stale_labels")}
                         for p in prs if p["ci_state"] == "SUCCESS"]}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
