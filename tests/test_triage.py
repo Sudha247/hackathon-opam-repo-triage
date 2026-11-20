@@ -569,6 +569,21 @@ class RulesTest(unittest.TestCase):
             job("day10,macos-homebrew,arm64,5.5,x.1"), job("macos,macos-homebrew-ocaml-5.5-arm64,x.1", category="passed"),
             job("day10,macos-homebrew,x86_64,5.5,x.1", category="passed")))
 
+    def test_pattern_after_a_change_from_the_log(self):
+        # liquidsoap 2.4.6 (#30906): its tests fail on OCaml 5 with `Library "bytes" not found`;
+        # the log gives base-bytes, so no workaround from the pattern of passes and failures.
+        fails = [job(f"compilers,{v},x.1,tests", reason='failed: Library "bytes" not found.') for v in ("5.2", "5.5")]
+        jobs = fails + [job("compilers,4.14,x.1,tests", category="passed")]
+        for j in jobs:
+            j["kind"] = "tests"
+        self.assertEqual([r["rule"] for r in self.t.matrix_rules(jobs, [], None, {"x.1"})], ["compiler-matrix"])
+        from_log = {"failing": "x.1", "rule": "missing-library", "new": '"base-bytes" {with-test}',
+                    "_key": self.t.failure_key(fails[0])}
+        self.assertEqual(self.t.matrix_rules(jobs, [from_log], None, {"x.1"}), [])
+        # A note without a change: the pattern still gives its suggestion.
+        self.assertEqual([r["rule"] for r in self.t.matrix_rules(jobs, [dict(from_log, new=None)], None, {"x.1"})],
+                         ["compiler-matrix"])
+
     def test_eval_filter(self):
         f = self.t.eval_filter
         linux = self.t.platform_vars(job("compilers,5.4,x.1"))
@@ -1648,6 +1663,13 @@ class ModuleFindRuleTest(unittest.TestCase):
             r, calls = self.suggest(*args, ["foo"], providers, **kw)
             self.assertNotIn("new", r)
             self.assertFalse([c for c in calls if c[0] == "published"])
+
+    def test_findlib_library_of_another_package(self):
+        # `bytes` is installed by base-bytes on OCaml 5 (liquidsoap 2.4.6, #30906).
+        r, _ = self.suggest('Library "bytes" not found.', {"foo": "1.0"}, ["foo"], None)
+        self.assertEqual((r["rule"], r["new"], r["note"]),
+                         ("missing-library", '"base-bytes"   (new line in depends)',
+                          "The library `bytes` is installed by the base-bytes package."))
 
     def test_match_outside_the_installed_packages(self):
         # In a package named after the module (searched by the tool), or an

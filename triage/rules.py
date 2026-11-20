@@ -101,6 +101,11 @@ STDLIB_SOURCES = "OCaml's stdlib .mli files"
 
 # Dependencies not searched for the module of an unbound identifier (as in the
 # guess from the dependencies), besides the conf-* packages: no OCaml module.
+# Findlib libraries installed by an opam package of another name: `bytes`
+# comes with OCaml 4 and is installed by base-bytes on OCaml 5 (liquidsoap
+# 2.4.6, #30906).
+FINDLIB_PACKAGES = {"bytes": "base-bytes"}
+
 NOT_SEARCHED = ("ocaml", "dune", "ocamlfind")
 
 
@@ -903,6 +908,7 @@ def log_rules(src, err, fname, opam_text, info, job):
     if m:
         lib = m.group(1)
         pkg = lib.split(".", 1)[0]
+        pkg = FINDLIB_PACKAGES.get(pkg, pkg)
         in_tests = bool(re.search(r"(^|/)tests?/", text))
         r = {"rule": "missing-library", "error": m.group(0)}
         siblings = {split_pkg(p)[0]: split_pkg(p)[1] for p in (info.get("pr_packages") or [])}
@@ -927,6 +933,8 @@ def log_rules(src, err, fname, opam_text, info, job):
         elif vs := src.versions(pkg):
             filt = " {with-test}" if in_tests else ""
             r.update(dep=pkg, old=None, new=f'"{pkg}"{filt}   (new line in depends)', confidence="medium")
+            if pkg != lib.split(".", 1)[0]:
+                r["note"] = f"The library `{lib}` is installed by the {pkg} package."
         elif vs is None:
             r.update(note=f"The tool could not check whether {pkg} is an opam package (ocaml.org did not "
                           f"answer): if it is, add it to depends; otherwise `{lib}` is probably an internal "

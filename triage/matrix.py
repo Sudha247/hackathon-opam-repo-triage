@@ -107,6 +107,10 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
     """Suggestions from the pass/fail pattern of the jobs only (no fetch)."""
     failing_in_log = failing_in_log or {}
     done = {(r.get("failing"), r.get("dep")) for r in earlier}
+    # The failures for which a job's log gave a change: the pass/fail pattern
+    # adds only a workaround next to it (liquidsoap 2.4.6, #30906: its tests
+    # need base-bytes on OCaml 5, not to be disabled there).
+    from_log = {r.get("_key") for r in earlier if r.get("_key") and (r.get("new") or r.get("candidates"))}
     out = []
     for (target, revdep, kind), js in sorted(matrix_groups(jobs, match).items(), key=lambda kv: str(kv[0])):
         pkg = revdep or target
@@ -163,6 +167,8 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
             fails = [j for j in fails if id(j) not in gone]
             if not fails:
                 continue
+        if all(failure_key(j) in from_log for j in fails):
+            continue
         cm = compiler_matrix(js)
         if cm and (owner, "ocaml") not in done:
             op, v, fv, pv = cm
