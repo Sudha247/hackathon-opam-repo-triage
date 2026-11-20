@@ -10,6 +10,8 @@ changed before the merge:
   3. count a suggestion as a hit when the author changed the same dependency
      or field of the same package. A new upstream archive (checksum,
      x-commit-hash) is counted apart: it is not a change the tool suggests.
+     So are the suggestions that compare with opam-health-check, whose
+     latest run describes today's master, not the one of the PR.
 
 Usage:
   python3 evaluate_closed_prs.py [--since 2026-08-01] [--limit 150] [--json out.json]
@@ -146,6 +148,9 @@ def actual_fix(number, initial, final):
 # change of the opam file that the tool could suggest, so not in the recall.
 NEW_ARCHIVE = {"field:checksum", "field:x-commit-hash"}
 
+# The rules that compare with opam-health-check's latest run (see main).
+HEALTH_RULES = {"health-check-new"}
+
 
 def failing_packages(sha):
     """Packages of the PR that failed in that CI run: non-experimental build,
@@ -210,7 +215,8 @@ def main():
     print(f"{len(prs)} merged PRs since {args.since}; {len(cands)} whose initial version failed opam-ci "
           f"and was changed before the merge", file=sys.stderr)
 
-    rows, totals = [], {"scored": 0, "hit": 0, "fix_tokens": 0, "fix_covered": 0, "new_archive": 0}
+    rows, totals = [], {"scored": 0, "hit": 0, "fix_tokens": 0, "fix_covered": 0, "new_archive": 0,
+                        "health_scored": 0, "health_hit": 0}
     for pr, init in cands:
         fix = actual_fix(pr["number"], init, pr["headRefOid"])
         fix = {k: v for k, v in fix.items() if v}
@@ -232,6 +238,12 @@ def main():
             hit = bool(toks & fix.get(pkg, set()))
             scored.append({"package": pkg, "rule": s.get("rule"), "new": (s.get("new") or "")[:90],
                            "hit": hit, "tokens": sorted(toks)})
+        # The rules comparing with opam-health-check read today's run, not the one
+        # at the time of the PR: master has changed since (console-eio, #31170,
+        # builds on today's master thanks to a bound added after the PR). Their
+        # suggestions are counted apart.
+        health = [x for x in scored if x["rule"] in HEALTH_RULES]
+        scored = [x for x in scored if x["rule"] not in HEALTH_RULES]
         # Recall: only the author's changes in packages that failed in the
         # initial run (rebases, version bumps and metadata edits elsewhere are
         # not fixes of a CI failure).
@@ -242,6 +254,8 @@ def main():
         covered = {(p, t) for p, ts in fix_failed.items() for t in ts
                    if any(x["package"] == p and t in x["tokens"] for x in scored)}
         n_fix = sum(len(v) for v in fix_failed.values())
+        totals["health_scored"] += len(health)
+        totals["health_hit"] += sum(x["hit"] for x in health)
         totals["scored"] += len(scored)
         totals["hit"] += sum(x["hit"] for x in scored)
         totals["fix_tokens"] += n_fix
@@ -249,6 +263,7 @@ def main():
         rows.append({"pr": pr["number"], "title": pr["title"], "initial": init, "final": pr["headRefOid"],
                      "actual_fix": {k: sorted(v) for k, v in fix.items()},
                      "fix_in_failing_packages": {k: sorted(v) for k, v in fix_failed.items()}, "suggestions": scored,
+                     "health_suggestions": health,
                      "explanations": sum(1 for s in sugg if not (s.get("new") or s.get("candidates")))})
 
     for r in rows:
@@ -260,7 +275,9 @@ def main():
             print(f"  author changed {p}: {', '.join(toks)}")
         for s in r["suggestions"]:
             print(f"  {'HIT ' if s['hit'] else 'miss'} [{s['rule']}] {s['package']}: {s['new']}")
-        if not r["suggestions"]:
+        for s in r.get("health_suggestions", []):
+            print(f"  ({'hit' if s['hit'] else 'miss'}, not counted) [{s['rule']}] {s['package']}: {s['new']}")
+        if not r["suggestions"] and not r.get("health_suggestions"):
             print(f"  (no suggested change; {r['explanations']} explanations)")
     t = totals
     print(f"\nPRs evaluated: {len([r for r in rows if 'error' not in r])}")
@@ -270,6 +287,8 @@ def main():
           f"anticipated: {t['fix_covered']}"
           + (f" ({100 * t['fix_covered'] // t['fix_tokens']}%)" if t["fix_tokens"] else ""))
     print(f"packages that failed and got a new upstream archive (not counted above): {t['new_archive']}")
+    print(f"suggestions from today's opam-health-check (not counted above): {t['health_scored']}, "
+          f"matching the author's fix: {t['health_hit']}")
     if args.json:
         with open(args.json, "w") as f:
             json.dump({"totals": t, "prs": rows}, f, indent=2)
