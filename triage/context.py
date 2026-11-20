@@ -524,10 +524,17 @@ def eval_filter(text, env):
     return v if i == len(toks) else None
 
 
+def upper_bound(line):
+    """The lowest upper bound (`<` or `<=` version) of a dependency line, or None."""
+    ups = [v for _, v in re.findall(r'(<=|<)\s*"([^"]+)"', line)]
+    return min(ups, key=functools.cmp_to_key(opam_vcmp)) if ups else None
+
+
 def pr_added_bounds(base, sha, cache_dir):
-    """{"name.version": {dep: new line}} for the dependencies whose upper bound
-    (`<`) the commit `sha` adds or changes in an opam file it modifies,
-    relative to master commit `base`. The same (cached) compare call as
+    """{"name.version": {dep: new line}} for the `depends` lines whose upper
+    bound (`<`, `<=`) the commit `sha` adds or lowers in an opam file it
+    modifies, relative to master commit `base`: not a changed lower bound,
+    nor `conflicts` or `depopts`. The same (cached) compare call as
     pr_opam_changes."""
     d = gh_api(f"repos/{REPO}/compare/{base}...{sha}", cache_dir) if base else None
     out = {}
@@ -535,13 +542,24 @@ def pr_added_bounds(base, sha, cache_dir):
         m = re.match(r"packages/[^/]+/([^/]+)/opam$", f.get("filename", ""))
         if not m or f.get("status") != "modified":
             continue
-        old, new = {}, {}
+        old, new, field = {}, {}, None
         for l in (f.get("patch") or "").splitlines():
+            if l.startswith("@@"):
+                # The hunk header names the field the hunk starts in (git's default function context).
+                h = re.match(r"@@[^@]*@@\s*([a-z][\w-]*):", l)
+                field = h.group(1) if h else None
+                continue
+            fm = re.match(r"[-+ ]?([a-z][\w-]*):", l)
+            if fm:
+                field = fm.group(1)
             dm = re.match(r'([-+])\s*"([\w+.-]+)"\s*(\{[^}]*\})?', l)
-            if dm:
+            if dm and field == "depends":
                 (old if dm.group(1) == "-" else new)[dm.group(2)] = l[1:].strip()
-        added = {dep: line for dep, line in new.items()
-                 if re.search(r"<\s*\"", line) and old.get(dep) != line}
+        added = {}
+        for dep, line in new.items():
+            up, was = upper_bound(line), upper_bound(old.get(dep) or "")
+            if up and (was is None or opam_vcmp(up, was) < 0):
+                added[dep] = line
         if added:
             out[m.group(1)] = added
     return out
@@ -839,8 +857,18 @@ def skipped_rules(data, src, cache_dir, pr_packages, bounds=None):
              "error": "Not installable on any tested platform. Solver: " + "; ".join(sorted(set(chains))[:3])}
         added = (bounds or {}).get(t) or {}
         through = {f.split(" ")[0] for f in firsts}
-        if added and through and through <= set(added) and not unknown:
-            lines = "; ".join(f"`{added[d]}`" for d in sorted(through))
+        bounded = added and through and through <= set(added) and not unknown
+        lines = "; ".join(f"`{added[d]}`" for d in sorted(through)) if bounded else ""
+        # A bound that no version satisfies (`{>= "3.0" & < "2.0"}`) is a mistake, not the point of the change.
+        from .suggest import VERSION_TERM, unsatisfiable       # (suggest imports this module)
+        empty = sorted(d for d in through if bounded and "|" not in added[d]
+                       and unsatisfiable(VERSION_TERM.findall(added[d])))
+        if empty:
+            r.update(confidence="high",
+                     note=f"This PR adds {lines} to {t}, and no version of {', '.join(empty)} satisfies "
+                          f"{'it' if len(empty) == 1 else 'them'}: a lower bound is above an upper bound. Fix "
+                          f"the bound.")
+        elif bounded:
             r.update(fix_where("none", "nothing (this PR's bound)"), rule="bounded-out", confidence="high",
                      note=f"This PR adds {lines} to {t}, which no tested platform satisfies, so CI cannot "
                           f"build it. That is expected when the bound is the point of the change.")

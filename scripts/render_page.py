@@ -116,8 +116,12 @@ def not_this_pr(r):
     PRs does not outweigh evidence that the failure is this PR's (it builds
     on master, say: see mark_shared_failures)."""
     shared = r.get("also_failing_in") and where_kind(r) != "pr" and r.get("rule") != "health-check-new"
+    # A bound the PR adds on purpose: only as checked since where_kind exists (a lowered upper bound of
+    # `depends` that some version satisfies), not from a result stored before.
+    unchecked = r.get("rule") == "bounded-out" and "where_kind" not in r
     return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or shared
-                or r.get("experimental") or where_kind(r) in CI_SIDE or r.get("rule") in PREEXISTING_RULES)
+                or r.get("experimental") or (where_kind(r) in CI_SIDE and not unchecked)
+                or r.get("rule") in PREEXISTING_RULES)
 
 
 def seems_ready(pr):

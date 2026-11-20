@@ -1107,6 +1107,42 @@ class BoundedOutTest(unittest.TestCase):
             b = self.c.pr_added_bounds("base", "sha", "/nonexistent")
         self.assertEqual(sorted(b["kinetic-client.0.0.9"]), ["cmdliner", "ocaml"])   # not fmt: no upper bound
 
+    def added(self, patch):
+        with unittest.mock.patch.object(self.c, "gh_api", lambda *a, **k: self.compare(patch)):
+            return sorted(self.c.pr_added_bounds("base", "sha", "/nonexistent").get("kinetic-client.0.0.9") or {})
+
+    def test_only_tightened_depends(self):
+        # Only a `depends` line whose upper bound is added or lowered: not a changed lower bound, a
+        # loosened bound, nor `conflicts` or `depopts`.
+        self.assertEqual(self.added("""@@ -10,7 +10,7 @@ depends: [
+-  "ocaml" {>= "4.02.0" & < "5.0"}
++  "ocaml" {>= "4.08.0" & < "5.0"}
+-  "lwt" {< "5.0"}
++  "lwt" {< "6.0"}
+-  "fmt" {< "0.10"}
++  "fmt" {< "0.9.1"}
+ ]
+ conflicts: [
+-  "base-domains"
++  "base-domains" {< "0.2"}
+ ]
+ depopts: [
++  "zarith" {< "1.0"}
+ ]
+"""), ["fmt"])
+        # The field comes from the hunk header when the hunk starts inside it.
+        self.assertEqual(self.added("""@@ -20,3 +20,3 @@ conflicts: [
+-  "base-domains"
++  "base-domains" {< "0.2"}
+"""), [])
+
+    def test_unsatisfiable_bound(self):
+        # A typo such as `{>= "3.0" & < "2.0"}` excludes every version: a mistake in the PR, not intended.
+        [r] = self.run_rule({"kinetic-client.0.0.9": {"ocaml": '"ocaml" {>= "4.07" & < "4.06"}'}})
+        self.assertEqual(r["rule"], "uninstallable")
+        self.assertEqual(r["where_kind"], "pr")
+        self.assertIn("no version of ocaml satisfies it", r["note"])
+
     def run_rule(self, bounds):
         jobs = [{"target": "kinetic-client.0.0.9", "kind": "build", "category": "not-available",
                  "variant": f"compilers,{v},kinetic-client.0.0.9", "url": "https://x/" + v}
@@ -1341,6 +1377,15 @@ class PageTest(unittest.TestCase):
         self.assertIn('.v-rerun{', page)
         self.assertNotIn('<section id="ready">', page)
         self.assertIn("Needs a rerun", self.r.help_section({}))
+
+    def test_bounded_out(self):
+        # A checked bound (where_kind set by the rule) is the point of the change; one stored before the
+        # check (no where_kind) keeps the PR out of the ready list.
+        b = {"class": "elsewhere", "rule": "bounded-out", "fix_in": "nothing (this PR's bound)", "failing": "x.1",
+             "variant": "x.1 [all build jobs skipped]"}
+        self.assertTrue(self.r.seems_ready(self.pr([dict(b, where_kind="none")])))
+        self.assertFalse(self.r.seems_ready(self.pr([b])))
+        self.assertEqual(self.r.verdict(self.pr([b])), "other")
 
     def test_unknown_is_an_explanation(self):
         sys.path.insert(0, os.path.join(HERE, ".."))
