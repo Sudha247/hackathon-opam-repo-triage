@@ -21,17 +21,19 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from opam_repo_ci_triage import BASE, RULE_TITLES, describe_job, render_comment  # noqa: E402
+from opam_repo_ci_triage import (  # noqa: E402
+    BASE, RULE_TITLES, compared_text, describe_job, fix_label, render_comment, where_text)
+from opam_repo_ci_triage import title_of as rule_title  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
 # One verdict per PR: the first that applies, in this order (see `verdict`).
 VERDICTS = [("ready", "Not this PR's fault"), ("change", "Change this PR"), ("blocked", "Blocked elsewhere"),
             ("ci", "CI only"), ("other", "Needs a look"), ("error", "Not analysed")]
 VERDICT_LABEL = dict(VERDICTS)
 VERDICT_HELP = {
-    "ready": "CI fails, but no failure points at this PR: each one also happens without it, comes from the CI, "
-             "or is on an experimental platform",
-    "change": "A change to this PR's opam files is suggested: a fix, or a workaround restricting where it is "
-              "built or tested",
+    "ready": "CI fails, but none of the failures is this PR's fault: each one also fails without this PR, comes "
+             "from the CI, or is on an experimental platform",
+    "change": "A change to this PR's opam files is suggested: a fix, or a workaround that skips platforms or "
+              "tests",
     "blocked": "At least one failure must be fixed in another package",
     "ci": "Nothing points at this PR or at another package: problems of the CI, network errors, cancelled jobs",
     "other": "Failures in this PR's packages, without a suggested change",
@@ -156,7 +158,7 @@ def label_badges(labels, stale=()):
     def badge(lb):
         if lb in stale:
             return (f' <span class="lbl stale" title="The author pushed or commented after this label was added: '
-                    f'it may be out of date">{e(lb)} · author active since</span>')
+                    f'it may be out of date">{e(lb)} (author replied since)</span>')
         cls = {MERGE_LABEL: " merge", NO_MERGE_LABEL: " nomerge"}.get(lb, "")
         return f' <span class="lbl{cls}" title="GitHub label">{e(lb)}</span>'
     return "".join(badge(lb) for lb in sorted(labels, key=lambda lb: lb != MERGE_LABEL))
@@ -176,7 +178,8 @@ def merge_key(r):
     packages or jobs. LLM answers and ranked candidates are never merged."""
     if r.get("rule") == "llm" or r.get("candidates"):
         return None
-    return (r.get("class"), r.get("rule"), r.get("title"), r.get("fix_in"), r.get("new"))
+    # Not the title: it follows from the rule (a merged pattern's title also counts its packages).
+    return (r.get("class"), r.get("rule"), r.get("fix_in"), r.get("new"))
 
 
 def merge_similar(rs):
@@ -259,7 +262,12 @@ def blocked_by(sugg):
 
 
 def title_of(r):
-    return r.get("title") or RULE_TITLES.get(r.get("rule"), r.get("rule")) or "Note"
+    """The title of a suggestion, from its rule (stored titles may be older wordings)."""
+    return rule_title(r)
+
+
+# A suggested change written as an opam line: a quoted package, a field, a variable.
+OPAM_LINE = re.compile(r'\s*("[\w+.@-]+"|[a-z][\w-]*:|extra-source\b|%\{)')
 
 
 def headline(pr, v=None, as_html=True):
@@ -272,7 +280,8 @@ def headline(pr, v=None, as_html=True):
     def code(s):
         return f"<code>{e(s)}</code>" if as_html else f"`{s}`"
     if v == "error":
-        return t("analysis pending: the next run continues" if pr.get("pending") else "the analysis failed")
+        return t("not analysed yet; the next page update will cover it" if pr.get("pending")
+                 else "the analysis failed")
     sugg = pr["result"].get("suggestions", [])
     if not sugg:
         return t("no build or test failure to analyse")
@@ -282,7 +291,7 @@ def headline(pr, v=None, as_html=True):
         items = merge_similar(g["fix"]) + merge_similar(g["workaround"])
         r = items[0]
         pkgs = packages_text(r)
-        if r.get("new"):
+        if r.get("new") and OPAM_LINE.match(r["new"]):
             s = code(shorten(r["new"].split("   ")[0], 48)) + (t(f" for {pkgs}") if pkgs else "")
         else:
             s = t(title_of(r) + (f" ({pkgs})" if pkgs else ""))
@@ -327,8 +336,8 @@ def comment_markdown(pr):
         # After the paragraph on where the results come from.
         lines = md.split("\n")
         i = next((k for k, x in enumerate(lines) if x.startswith("From the [CI results]")), 1)
-        lines[i + 1:i + 1] = ["", "**No failure seems to come from this PR**: each one also happens without it, "
-                              "comes from the CI, or is on an experimental platform (details below)."]
+        lines[i + 1:i + 1] = ["", "**None of the failures is this PR's fault**: each one also fails without this "
+                              "PR, comes from the CI, or is on an experimental platform (details below)."]
         md = "\n".join(lines)
     return md
 
@@ -367,9 +376,10 @@ def job_link(sha, variant):
 
 def where_of(r):
     """Where the fix goes, unless it is this PR (implied, or not meaningful
-    for a finding without a change)."""
-    w = r.get("where") or r.get("fix_in")
-    return None if w in (None, "", "this PR", "unknown") else w
+    for a failure without a change), in words (from `fix_in`, as stored
+    `where` values may be older wordings)."""
+    w = where_text(r)
+    return None if w in (None, "", "this PR") else w
 
 
 def conf_note(r):
@@ -378,7 +388,7 @@ def conf_note(r):
     return f"{c} confidence" if c and c != "high" else None
 
 
-def suggestion_body(r, sha=None, full=True):
+def suggestion_body(r, sha=None, full=True, year=None):
     """The details of a suggestion: job, error, change, candidates, notes and jobs."""
     rule = r.get("rule")
     out = []
@@ -388,7 +398,8 @@ def suggestion_body(r, sha=None, full=True):
     if r.get("variant") and r.get("url") and not lists_jobs:
         meta.append("Job: " + link(r.get("url"), r.get("job") or describe_job(r["variant"])))
     if full and where_of(r):
-        meta.append("Fix in: " + e(where_of(r)))
+        label = fix_label(where_of(r))
+        meta.append(e(label[:1].upper() + label[1:]))
     if meta:
         out.append(f'<div class="meta">{" · ".join(meta)}</div>')
     errors = r.get("errors") or ([r["error"]] if r.get("error") else [])
@@ -406,13 +417,18 @@ def suggestion_body(r, sha=None, full=True):
             diff.append(f'<span class="alt">or {e(r["alternative"])}</span>')
         out.append('<pre class="diff">' + "\n".join(diff) + "</pre>")
     if r.get("candidates"):
-        out.append(f'<div class="meta">Dependencies that may have changed the output '
-                   f'(compared with {e(r.get("compared_with") or "?")}):</div>')
+        m = re.match(r"release date of (\S+) \((\d{4}-\d\d-\d\d)\)$", r.get("compared_with") or "")
+        if m:
+            what = (f"Dependencies newer than {m.group(1)}'s release ({day(m.group(2), year)}) that may have "
+                    f"changed the output:")
+        else:
+            what = f"Dependencies that may have caused the failure, compared with {compared_text(r)}:"
+        out.append(f'<div class="meta">{e(what)}</div>')
         for c in r["candidates"]:
             if "first_after" in c:
-                what = f'{c.get("failing")} installed; first release after the compared one: {c.get("first_after")}'
+                what = f'CI used {c.get("failing")}; first release after it: {c.get("first_after")}'
             else:
-                what = f'{c.get("passing")} passes, {c.get("failing")} fails'
+                what = f'passes with {c.get("passing")}, fails with {c.get("failing")}'
             diff = [f'<span class="cm"># {e(c.get("dep"))}: {e(what)}</span>']
             if c.get("old"):
                 diff.append(f'<span class="del">- {e(c["old"])}</span>')
@@ -448,8 +464,8 @@ def suggestion_body(r, sha=None, full=True):
                    + "</details>")
     if r.get("also_failing_in"):
         prs = r["also_failing_in"]
-        out.append(f'<p class="note shared">Also failing in {len(prs)} other open PR{"s" if len(prs) != 1 else ""}, '
-                   f'so probably not caused by this one: '
+        out.append(f'<p class="note shared">Also fails in {len(prs)} other open PR{"s" if len(prs) != 1 else ""}, '
+                   f'so probably not this PR\'s fault: '
                    + ", ".join(link(f"{REPO_URL}/pull/{int(n)}", f"#{int(n)}") for n in prs[:12])
                    + (f" and {len(prs) - 12} more" if len(prs) > 12 else "") + "</p>")
     if lists_jobs and jobs:
@@ -458,9 +474,9 @@ def suggestion_body(r, sha=None, full=True):
         others = [v for v in jobs if v != r.get("variant")]
         if others:
             # A matrix suggestion's variant is a label, not one of its jobs: then list them all.
-            what = (f'{len(others)} more job{"s" if len(others) != 1 else ""}' if len(others) < len(jobs)
-                    else f'{len(jobs)} job{"s" if len(jobs) != 1 else ""}')
-            out.append(f'<details class="jobs"><summary>Same failure on {what}</summary>'
+            what = (f'Same failure on {len(others)} other job{"s" if len(others) != 1 else ""}'
+                    if len(others) < len(jobs) else f'All {len(jobs)} jobs' if len(jobs) > 1 else '1 job')
+            out.append(f'<details class="jobs"><summary>{what}</summary>'
                        f'<ul>{"".join(f"<li>{job_link(sha, v)}</li>" for v in others)}</ul></details>')
     return "\n".join(out)
 
@@ -469,14 +485,14 @@ def low_llm(r):
     return r.get("rule") == "llm" and conf_word(r) == "low"
 
 
-def render_suggestion(r, sha=None):
+def render_suggestion(r, sha=None, year=None):
     """A suggested change, in full: title, package, tags, then the details."""
     head = [f'<b>{e(title_of(r))}</b>']
     if r.get("failing"):
         head.append(f'<span class="pkg">{e(r["failing"])}</span>')
     tags = []
     if r.get("class") == "workaround":
-        tags.append('<span title="Restricts where the package is built or tested">workaround</span>')
+        tags.append('<span title="Skips platforms or tests">workaround</span>')
     if r.get("experimental"):
         tags.append('<span title="Failures on experimental platforms do not block the PR">experimental platform</span>')
     if conf_note(r):
@@ -484,18 +500,18 @@ def render_suggestion(r, sha=None):
     if tags:
         head.append(f'<span class="x">{" · ".join(tags)}</span>')
     html_ = (f'<div class="sugg c-{e(r.get("class") or "explanation")}"><div class="sh">{" · ".join(head)}</div>'
-             + suggestion_body(r, sha) + "</div>")
+             + suggestion_body(r, sha, year=year) + "</div>")
     if low_llm(r):
         # Low-confidence LLM answers were never right in the evaluation: folded.
-        html_ = (f'<details class="hint"><summary>Low-confidence LLM hint'
+        html_ = (f'<details class="hint"><summary>LLM diagnosis (low confidence)'
                  f'{": " + e(r["failing"]) if r.get("failing") else ""}</summary>{html_}</details>')
     return html_
 
 
-def render_item(r, sha=None):
-    """A finding as one folded line: title · packages · failures, jobs, where
+def render_item(r, sha=None, year=None):
+    """A failure as one folded line: title · packages · failures, jobs, where
     to fix, confidence; the details inside."""
-    title = "Low-confidence LLM hint" if low_llm(r) else title_of(r)
+    title = "LLM diagnosis (low confidence)" if low_llm(r) else title_of(r)
     head = [f'<b>{e(title)}</b>']
     pkgs = packages_text(r)
     if pkgs:
@@ -506,8 +522,8 @@ def render_item(r, sha=None):
         x.append(f'{r["merged"]} failures, {jobs} job{"s" if jobs != 1 else ""}')
     elif jobs > 1:
         x.append(f"{jobs} jobs")
-    if where_of(r):
-        x.append(f"fix in {where_of(r)}")
+    if where_of(r) and r.get("rule") != "rerun":          # "Jobs to rerun" says it
+        x.append(fix_label(where_of(r)))
     if r.get("preexisting") and not r.get("preexisting_unverified"):
         x.append("pre-existing")
     if r.get("also_failing_in"):
@@ -520,7 +536,7 @@ def render_item(r, sha=None):
     if x:
         head.append(f'<span class="x">{e(" · ".join(x))}</span>')
     return (f'<details class="it"><summary>{" · ".join(head)}</summary>'
-            f'<div>{suggestion_body(r, sha, full=False)}</div></details>')
+            f'<div>{suggestion_body(r, sha, full=False, year=year)}</div></details>')
 
 
 def ready_section(data, shown=5):
@@ -542,13 +558,14 @@ def ready_section(data, shown=5):
     items = []
     for p, passes in rows:
         n = int(p["number"])
-        ci = "CI passes" if passes else f'fails, <a href="#pr-{n}">not because of this PR</a>'
+        ci = "CI passes" if passes else f'fails, <a href="#pr-{n}">not this PR\'s fault</a>'
         items.append(f'<li>{link(f"{REPO_URL}/pull/{n}", f"#{n}", "num")}'
                      f'<span class="t">{e(p.get("title"))}'
                      f'{label_badges(p.get("labels") or [], p.get("stale_labels") or [])}</span>'
                      f'<span class="r">{e(p.get("author") or "?")} · {ci} · {e(day(p.get("updated"), year))}</span></li>')
-    out = (f'<section id="ready"><h2>Seem ready <span class="sub">({len(items)})</span></h2>'
-           '<p class="sub">CI passes, or no failure comes from the PR. Reviews and discussions are not checked '
+    out = (f'<section id="ready"><h2>Ready as far as CI goes <span class="sub">({len(items)})</span></h2>'
+           '<p class="sub">CI passes, or none of the failures is the PR\'s fault. Reviews and discussions are not '
+           'checked '
            '(<a href="#h-ready">more</a>).</p><ul class="ready">' + "".join(items[:shown]) + "</ul>")
     if len(items) > shown:
         out += (f'<details class="more"><summary>{len(items) - shown} more</summary>'
@@ -556,7 +573,7 @@ def ready_section(data, shown=5):
     return out + "</section>"
 
 
-def render_pr(pr, year=None):
+def render_pr(pr, year=None, max_failures=None):
     v = verdict(pr)
     g = groups(pr)
     n = int(pr["number"])
@@ -604,32 +621,33 @@ def render_pr(pr, year=None):
         body.append(f'<p class="note since">Since the previous push '
                     f'({e((since.get("previous_sha") or "")[:12])}): ' + "; ".join(parts) + ".</p>")
     if pr.get("pending"):
-        body.append('<p class="note">Not analysed yet: the run ran out of time. The next run continues.</p>')
+        body.append('<p class="note">Not analysed yet; the next page update will cover it.</p>')
     elif pr.get("result") is None:
         body.append(f'<p class="note">The analysis failed ({e(pr.get("attempts"))} attempts): '
                     f'<code>{e(pr.get("error"))}</code></p>')
     else:
         left = pr["result"].get("unanalysed")
         if left:
-            body.append(f'<p class="note">{e(left)} more distinct failure{"s were" if left != 1 else " was"} not '
-                        f'analysed (each run analyses a few per PR): see the CI results.</p>')
+            per = f" at most {e(max_failures)}" if max_failures else " a few"
+            body.append(f'<p class="note">{e(left)} more failure{"s were" if left != 1 else " was"} not '
+                        f'analysed: each page update analyses{per} per PR. See the CI results.</p>')
         if not pr["result"].get("suggestions"):
             body.append('<p class="note">No build or test failure to analyse.</p>')
         change = merge_similar(g["fix"]) + merge_similar(g["workaround"])
         if change:
             body.append(f'<h4 class="g-change">Change this PR ({len(change)})</h4>')
-            body.extend(render_suggestion(r, sha) for r in change)
+            body.extend(render_suggestion(r, sha, year) for r in change)
         elsewhere = merge_similar(g["elsewhere"])
         if elsewhere:
-            body.append(f'<h4 class="g-else">Not caused by this PR ({len(elsewhere)})</h4>')
-            body.extend(render_item(r, sha) for r in elsewhere)
+            body.append(f'<h4 class="g-else">Fix goes elsewhere ({len(elsewhere)})</h4>')
+            body.extend(render_item(r, sha, year) for r in elsewhere)
         other = merge_similar(g["explanation"])
         if other:
             kinds = ", ".join(dict.fromkeys(title_of(r) for r in other))
             body.append(f'<details class="others"{" open" if v == "other" else ""}><summary>{len(other)} other '
-                        f'finding{"s" if len(other) != 1 else ""}, no change suggested <span class="x">'
+                        f'failure{"s" if len(other) != 1 else ""}, no change suggested <span class="x">'
                         f'({e(shorten(kinds, 90))})</span></summary>'
-                        + "".join(render_item(r, sha) for r in other) + "</details>")
+                        + "".join(render_item(r, sha, year) for r in other) + "</details>")
     body.append("</div>")
     sha = pr.get("sha") or ""
     ci = f' data-ci="{e(BASE + sha)}/variant/"' if SAFE_SHA.fullmatch(sha) else ""
@@ -670,17 +688,19 @@ def chronic(prs, min_prs=2):
         trs = []
         for name, d in rows:
             versions = sorted({v for vs in d.values() for v in vs})
+            def category(j):
+                return JOB_CATEGORIES.get(j.get("category"), j.get("category") or "job")
             cells = " ".join(f'<span class="nw">{link(f"{REPO_URL}/pull/{n}", f"#{n}")}'
-                              f' ({link(jobs[0].get("url"), jobs[0].get("category") or "job")})</span>'
+                              f' ({link(jobs[0].get("url"), category(jobs[0]))})</span>'
                               for n, vs in sorted(d.items()) for jobs in [next(iter(vs.values()))])
             trs.append(f'<tr><td><b>{e(name)}</b><div class="meta">{e(", ".join(versions))}</div></td>'
                        f'<td>{len(d)}</td><td>{cells}</td></tr>')
-        out.append(table(["Reverse dependency (failing versions)", "PRs", "PRs (one failing job each)"], trs))
+        out.append(table(["Reverse dependency (failing versions)", "PRs", "One failing job per PR"], trs))
     else:
         out.append('<p class="note">None among the analysed PRs.</p>')
-    out.append(f'<h3>Other packages where the fix goes, for {min_prs} or more PRs ({len(brows)})</h3>')
+    out.append(f'<h3>Packages to fix that block {min_prs} or more PRs ({len(brows)})</h3>')
     if brows:
-        out.append(table(["Package", "PRs", "PRs"], [
+        out.append(table(["Package", "PRs", "Which PRs"], [
             f'<tr><td><b>{e(p)}</b></td><td>{len(s)}</td><td>'
             + ", ".join(link(f"{REPO_URL}/pull/{n}", f"#{n}") for n in sorted(s)) + "</td></tr>"
             for p, s in brows]))
@@ -851,47 +871,46 @@ def help_section(data):
     llm = data.get("llm") or {}
     limit = f" The list was limited to {e(data['limit'])} PRs." if data.get("limit") else ""
     verdicts = "\n".join(f'<dt class="v-{k}"><span class="v">{e(label)}</span></dt><dd>{e(VERDICT_HELP[k])}.'
-                         + {"ready": ' These PRs <b id="h-ready">seem ready</b>: they are listed under "Seem ready", '
+                         + {"ready": ' These PRs are listed under <b id="h-ready">"Ready as far as CI goes"</b>, '
                                      'with the PRs whose CI passes. Drafts and PRs labelled "do not merge" or "needs '
                                      'reporter action" are left out, unless the author pushed or commented after the '
                                      'label was added. Only CI is checked: not the reviews, nor whether a maintainer '
                                      'asked for changes.',
                             "change": ' Other failures may also need a fix elsewhere ("also blocked by").',
-                            "blocked": " A dependency, or a reverse dependency, of the PR's packages.",
-                            "ci": " The day10 builder, reruns, network errors, cancelled jobs.",
-                            "error": " The run ran out of time (the next one continues), or the analysis failed."
+                            "blocked": " The fix goes in a dependency or a reverse dependency of the PR's packages.",
+                            "error": " A PR not analysed yet is covered by the next page update."
                             }.get(k, "") + "</dd>" for k, label in VERDICTS)
     return f'''<section id="help"><h2>How to read this page</h2>
 <p>Each failing PR gets one verdict, the first of these that applies. The row says what the problem is (the first
-suggested change, the other packages to fix, or the first finding) and how many build and test jobs failed
+suggested change, the other packages to fix, or the first failure) and how many build and test jobs failed
 (network errors, cancelled and skipped jobs are not counted). "CI running" means these are the failures so far.</p>
 <dl class="help">
 {verdicts}
 </dl>
 <dl class="help">
-<dt>Change this PR, Not caused by this PR</dt><dd>In a PR's details, the suggested changes are shown in full;
+<dt>Change this PR, Fix goes elsewhere</dt><dd>In a PR's details, the suggested changes are shown in full;
 the failures whose fix goes in another package, upstream or the CI are folded, one line each, with where the fix
 goes. Similar failures of several packages are merged into one line. The confidence of a suggestion is shown
 only when it is not high.</dd>
 <dt>Labels</dt><dd>The PR's labels on GitHub, set by the opam-repository maintainers. "consider for merge"
 has a filter. A label the author may have answered (they pushed or commented after it was added) says "author
-active since", since maintainers often leave it in place.</dd>
+replied since", since maintainers often leave it in place.</dd>
 <dt>Copy as a PR comment</dt><dd>Copies a summary of the analysis, as Markdown, to paste in a comment on
-the PR. Check it before posting: low-confidence LLM answers are left out, other suggestions are not
+the PR. Check it before posting: low-confidence LLM diagnoses are left out, other suggestions are not
 checked.</dd>
 <dt>Reverse dependency</dt><dd>A package that depends on a package of the PR. CI rebuilds them to check that
 the PR does not break them.</dd>
-<dt>day10 builder</dt><dd>opam-repo-ci builds packages with two systems: the classic builder, and the newer
-day10 builder (the jobs named <code>day10,…</code>). When a job fails only on day10 while the classic
+<dt>day10 builder</dt><dd>opam-repo-ci builds packages with two builders: the main builder, and the newer
+day10 builder (the jobs named <code>day10,…</code>). When a job fails only on day10 while the main
 builder passes on the same system, the problem is in the CI setup, not in the package.</dd>
-<dt>Pre-existing</dt><dd>The failure would happen without the PR: it also failed in the CI of the previous
+<dt>Pre-existing</dt><dd>The package fails without this PR too: it also failed in the CI of the previous
 release (the same job, with the same reason), the PR only adds an upper bound to that package, or
-opam-health-check (which builds every package on master, without tests) sees it failing too. "Also failing in
+opam-health-check (which builds every package on master, without tests) sees it failing too. "Also fails in
 other open PRs" says the same from the other PRs on this page.</dd>
-<dt>LLM diagnosis (unchecked)</dt><dd>For failures that no rule recognises, an LLM (Claude) reads the log and
-suggests a cause. These answers are not checked: in a test on 25 of them, 15 were right, 7 plausible and 3
-wrong. Changes to version bounds or depexts are shown as text to check, and low-confidence answers are
-folded.</dd>
+<dt>LLM diagnosis (unchecked)</dt><dd>For failures the tool cannot explain, an LLM (Claude) reads the log and
+suggests a cause. These diagnoses are not checked: in a test on 25 of them, 15 were right, 7 plausible and 3
+wrong. Changes to version bounds or depexts are shown as text to check, and low-confidence diagnoses are
+folded, as "LLM diagnosis (low confidence)".</dd>
 <dt>Experimental platform</dt><dd>FreeBSD, macOS and some other jobs are experimental: their failures do not
 block a PR.</dd>
 </dl>
@@ -943,9 +962,9 @@ def render(data):
         '<span id="shown" class="meta" aria-live="polite"></span></nav>',
         '<div id="prs">',
     ]
-    parts.extend(render_pr(p, year) for p in prs)
+    parts.extend(render_pr(p, year, data.get("max_failures_per_pr")) for p in prs)
     if not prs:
-        parts.append('<p class="note">No open PR with a failing opam-ci status.</p>')
+        parts.append('<p class="note">No open PR has failing opam-repo-ci jobs.</p>')
     parts.append("</div></section>")
     parts.append(chronic([p for p in prs if not p.get("pending")]))
     parts.append(help_section(data))

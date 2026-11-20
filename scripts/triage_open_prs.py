@@ -311,16 +311,18 @@ def mark_shared_failures(prs):
 def since_last_push(prev, result):
     """What changed between the analysis of a PR's previous head and this
     one: the problems gone, the new ones, and how many remain. Problems are
-    (title, failing package) pairs; reruns and unrecognised failures are left
+    (rule, failing package) pairs, shown with their title (a new wording of
+    a title is not a new problem); reruns and unrecognised failures are left
     out, since they come and go with CI."""
     def keys(res):
-        return {(s.get("title") or s.get("rule") or "", s.get("failing") or s.get("job") or "")
+        return {(s.get("rule") or s.get("title") or "", s.get("failing") or s.get("job") or ""):
+                s.get("title") or s.get("rule") or ""
                 for s in (res or {}).get("suggestions", [])
                 if s.get("rule") not in ("rerun", "unrecognised", "lint")}
     before, after = keys(prev.get("result")), keys(result)
-    fmt = lambda ks: [f"{t}: {f}" if f else t for t, f in sorted(ks)]
-    return {"previous_sha": prev.get("sha"), "fixed": fmt(before - after), "new": fmt(after - before),
-            "still": len(before & after)}
+    fmt = lambda ks, names: sorted(f"{names[k]}: {k[1]}" if k[1] else names[k] for k in ks)
+    return {"previous_sha": prev.get("sha"), "fixed": fmt(before.keys() - after.keys(), before),
+            "new": fmt(after.keys() - before.keys(), after), "still": len(before.keys() & after.keys())}
 
 
 def llm_available():

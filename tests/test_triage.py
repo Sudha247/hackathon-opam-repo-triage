@@ -1065,7 +1065,7 @@ class PageTest(unittest.TestCase):
         unanalysed = self.pr([self.day10])
         unanalysed["result"]["unanalysed"] = 3
         self.assertFalse(self.r.seems_ready(unanalysed))
-        self.assertIn("3 more distinct failures were not analysed", self.r.render_pr(unanalysed))
+        self.assertIn("3 more failures were not analysed", self.r.render_pr(unanalysed))
         self.assertIn("3 more failures were not analysed.", self.r.comment_markdown(unanalysed))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], draft=True)))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], labels=["needs reporter action"])))
@@ -1073,7 +1073,7 @@ class PageTest(unittest.TestCase):
         # A "needs reporter action" label the author acted on since may be stale.
         self.assertTrue(self.r.seems_ready(self.pr([self.day10], labels=["needs reporter action"],
                                                    stale_labels=["needs reporter action"])))
-        self.assertIn("author active since", self.r.label_badges(["needs reporter action"],
+        self.assertIn("(author replied since)", self.r.label_badges(["needs reporter action"],
                                                                  ["needs reporter action"]))
 
     def test_shared_failures(self):
@@ -1195,7 +1195,7 @@ class PageTest(unittest.TestCase):
         self.assertIn("a.1, b.1", item)
         self.assertNotIn("Fix in: this PR", item)
         page = self.r.render_pr(self.pr([a, b], number=3))
-        self.assertIn("Not caused by this PR (1)", page)
+        self.assertIn("Fix goes elsewhere (1)", page)
         self.assertEqual(page.count('<details class="it">'), 1)
 
     def test_compact_job_links(self):
@@ -1235,7 +1235,7 @@ class PageTest(unittest.TestCase):
         self.assertEqual(h(self.pr(two)), "needs fixes in z (2 versions), y.1")
         self.assertEqual(h(self.pr([self.day10])), "Fails only on the day10 builder (x.1)")
         self.assertEqual(h(self.pr([fix]), as_html=False), '`"ocaml" {>= "5.1"}` for colibri2.0.7')
-        self.assertIn("&lt;", h(self.pr([dict(self.day10, title="<b>")])))
+        self.assertIn("&lt;", h(self.pr([dict(self.day10, rule="<b>")])))     # an unknown rule is its own title
         # Fix in "this PR" goes without saying; confidence only when not high.
         card = self.r.render_suggestion(dict(fix, confidence="high"))
         self.assertNotIn("Fix in", card)
@@ -1258,11 +1258,11 @@ class PageTest(unittest.TestCase):
 
     def test_comment_markdown(self):
         md = self.r.comment_markdown(self.pr([self.day10]))
-        self.assertIn("No failure seems to come from this PR", md)
+        self.assertIn("None of the failures is this PR's fault", md)
         llm_low = {"class": "fix", "rule": "llm", "confidence": "low", "fix_in": "this PR", "failing": "z.1",
                    "variant": "v", "title": "LLM diagnosis (unchecked)"}
         md = self.r.comment_markdown(self.pr([self.lint, llm_low]))
-        self.assertNotIn("No failure seems", md)
+        self.assertNotIn("None of the failures", md)
         self.assertNotIn("z.1", md)
         page = self.r.render_pr(self.pr([self.lint]))
         self.assertIn('data-for="md-1"', page)
