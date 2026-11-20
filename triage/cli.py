@@ -1,4 +1,4 @@
-"""Command line."""
+"""Command line: triage opam-repo-ci failures of an ocaml/opam-repository PR."""
 
 import argparse
 import collections
@@ -38,6 +38,9 @@ from .sources import (  # noqa: F401
     Sources,
     find_baseline_commit,
 )
+from .words import (  # noqa: F401
+    counted,
+)
 from .llm import (  # noqa: F401
     LLM_MODEL,
 )
@@ -56,26 +59,30 @@ from .render import (  # noqa: F401
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description="Triage opam-repo-ci failures of an ocaml/opam-repository PR.",
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["summary", "logs", "compare", "suggest", "comment", "review"])
     ap.add_argument("target", nargs="?", help="commit sha or opam.ci.ocaml.org URL")
     ap.add_argument("--pr", type=int, help="opam-repository PR number (uses gh to find the head sha)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--all", action="store_true", help="summary: also show passed/ignored/not-available jobs")
-    ap.add_argument("--match", help="logs: only jobs whose variant matches this regex")
+    ap.add_argument("--match", help="logs, suggest: only the jobs whose CI name (as in the job's URL) matches "
+                                    "this regex")
     ap.add_argument("--category", action="append",
                     help="logs: only these categories (default: everything except network/cancelled/ignored/not-available)")
-    ap.add_argument("--max", type=int, default=30, help="logs: max number of logs to fetch")
+    ap.add_argument("--max", type=int, default=30,
+                    help="logs: logs to fetch; suggest/comment: distinct failures to analyse (default: 30)")
     ap.add_argument("--llm", action="store_true",
-                    help="suggest/comment: ask Claude about failures no rule explains (needs `pip install "
+                    help="suggest/comment: ask Claude about failures the tool cannot explain (needs `pip install "
                          "anthropic` and credentials; costs API tokens; responses are cached)")
     ap.add_argument("--llm-max", type=int, default=5, help="at most this many LLM calls (distinct failures)")
-    ap.add_argument("--llm-model", default=LLM_MODEL)
+    ap.add_argument("--llm-model", default=LLM_MODEL, help=f"the Claude model for --llm (default: {LLM_MODEL})")
     ap.add_argument("--llm-dry-run", action="store_true", help="print the LLM prompts instead of calling the API")
     ap.add_argument("--post", action="store_true",
                     help="comment/review: post it on the PR with gh (default: print it)")
     ap.add_argument("--baseline", help="compare: baseline commit sha/URL (default: the PR of the previous version)")
-    ap.add_argument("--cache-dir", default=".opam-ci-cache")
+    ap.add_argument("--cache-dir", default=".opam-ci-cache",
+                    help="where CI pages, logs and lookups are cached (default: .opam-ci-cache)")
     ap.add_argument("--refresh", action="store_true",
                     help="fetch the commit page again, and the logs of its jobs when needed (after a rebuild)")
     args = ap.parse_args()
@@ -105,7 +112,7 @@ def main():
                 print(out.stdout.strip()[:300] or out.stderr.strip())
             else:
                 print(json.dumps(review, indent=2))
-            print(f"{len(review['comments'])} line comment(s); network requests: "
+            print(f"{counted(len(review['comments']), 'line comment')}; network requests: "
                   + ", ".join(f"{k}={v}" for k, v in NET.items()), file=sys.stderr)
             return
         if args.command == "comment":
@@ -193,7 +200,8 @@ def main():
     for r in results:
         lg = r["log"]
         print("=" * 100)
-        print(f"{r['variant']}  [{r['category']}] builder={lg.get('builder')} base={lg.get('base', '?')[:12]}")
+        builder = {"classic": "main"}.get(lg.get("builder"), lg.get("builder"))
+        print(f"{r['variant']}  [{r['category']}] builder={builder} base={lg.get('base', '?')[:12]}")
         print(r["url"])
         if lg.get("job"):
             print("job:", lg["job"])

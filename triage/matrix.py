@@ -29,6 +29,9 @@ from .ci import (  # noqa: F401
     split_pkg,
     vkey,
 )
+from .words import (  # noqa: F401
+    counted,
+)
 
 
 def matrix_groups(jobs, match):
@@ -144,11 +147,11 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
                              if r.get("failing") == culprit and r.get("rule") == "missing-tool"), None)
             out.append({"variant": label, "failing": culprit or pkg,
                         "fix_in": "the CI environment (day10 builder)", "rule": "builder-specific",
-                        "error": f"Fails only on the day10 builder on {', '.join(dists)}: the classic "
-                                 f"builder passes on the same distributions, architectures and OCaml versions",
+                        "error": f"Fails only on the day10 builder on {', '.join(dists)}; the main builder "
+                                 f"passes there.",
                         "confidence": "high",
-                        "note": f"For example, it fails on {platform_words(twins[0][0])} and passes on "
-                                f"{platform_words(twins[0][1])}."
+                        "note": f"For example, it fails on {platform_words(twins[0][0])} and passes there on the "
+                                f"main builder."
                                 + (f" {evidence}" if evidence else "")
                                 + ("" if "Nothing to change" in (evidence or "")
                                    else " Nothing to change in the package metadata."),
@@ -167,8 +170,8 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
             if op == ">=":
                 gap = f" OCaml versions between {fv[-1]} and {v} were not tested, so the bound may be lower."
             out.append({"variant": label, "failing": owner, "fix_in": where, "rule": "compiler-matrix",
-                        "error": f"Fails on OCaml {', '.join(fv)}, passes on {', '.join(pv)}"
-                                 + (" (tests only)" if tests_only else "")
+                        "error": (f"Tests fail on OCaml {', '.join(fv)}, pass on {', '.join(pv)}" if tests_only
+                                  else f"Fails on OCaml {', '.join(fv)}, passes on {', '.join(pv)}")
                                  + (f"; the failure is in the dependency {culprit}" if culprit else ""),
                         "dep": "ocaml", "old": None,
                         "new": f'"ocaml" {{{filt}}}' + ("   (new line in depends)" if tests_only else ""),
@@ -182,9 +185,10 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
         if dim == "os":
             cond, what = 'os != "win32"', "Windows (" + ", ".join(vals) + ")"
         elif dim == "arch":
-            cond, what = " & ".join(f'arch != "{a}"' for a in vals), "arch " + ", ".join(vals)
+            cond, what = " & ".join(f'arch != "{a}"' for a in vals), ", ".join(vals)
         else:
             cond, what = None, "distributions " + ", ".join(vals)
+        advice = None
         if culprit:
             tool = None
             for r in earlier:
@@ -194,8 +198,11 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
             if dep and any(v.startswith("cygwin") for v in vals):
                 new = f'depexts: ["{dep}"] {{os-distribution = "cygwin"}}   (in {culprit})'
             else:
-                plats = ", ".join(vals)
-                new = f"in {culprit}: a depext for {plats}, or x-ci-accept-failures / available"
+                # Not an opam line: the change is described in the note.
+                new = None
+                advice = (f"Add the missing depext{' for ' + '/'.join(vals) if dim != 'arch' else ''} to {culprit}, "
+                          f"or exclude {'Windows' if dim == 'os' else '/'.join(vals)} there "
+                          f"(`x-ci-accept-failures` or `available`).")
         elif cond and tests_only:
             new = f'"@runtest" {{with-test & {cond}}}   (or the equivalent filter on the test command)'
         elif cond:
@@ -203,17 +210,23 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
         else:
             new = "x-ci-accept-failures: [" + " ".join(f'"{d}"' for d in vals) + "]"
         reason = sorted({(j["reason"] or "")[:120] for j in fails})[0]
-        out.append({"variant": label, "failing": owner, "fix_in": where, "rule": "platform-matrix",
-                    "_distros": (sorted({job_dims(j)["distro"] or job_dims(j)["os"] for j in fails})
-                                 if all(j["platform"][:1] == ["day10"] for j in fails) else None),
-                    "error": f"Fails only on {what}" + (" (tests only)" if tests_only else "")
-                             + (f"; the failure is in the dependency {culprit}" if culprit else "")
-                             + f": {reason}",
-                    "old": None, "new": new, "confidence": "medium",
-                    "note": (f"Nothing to change in {pkg}." if culprit else
-                             "This only hides the problem on those platforms: an upstream fix, or a missing "
-                             "depext, is better."),
-                    "_keys": [failure_key(j) for j in fails], "jobs": [j["variant"] for j in fails]})
+        # The CI's own reason is a sentence ("The compilation of …"): here it follows a colon.
+        reason = reason.lstrip(": ")
+        reason = "t" + reason[1:] if reason.startswith("The ") else reason
+        r = {"variant": label, "failing": owner, "fix_in": where, "rule": "platform-matrix",
+             "_distros": (sorted({job_dims(j)["distro"] or job_dims(j)["os"] for j in fails})
+                          if all(j["platform"][:1] == ["day10"] for j in fails) else None),
+             "error": ("Tests fail" if tests_only else "Fails") + f" only on {what}"
+                      + (f"; the failure is in the dependency {culprit}" if culprit else "")
+                      + f": {reason}",
+             "old": None, "new": new, "confidence": "medium",
+             "note": (f"Nothing to change in {pkg}." + (f" {advice}" if advice else "") if culprit else
+                      "This change only hides the failure on these platforms. Prefer an upstream fix or the "
+                      "missing depext."),
+             "_keys": [failure_key(j) for j in fails], "jobs": [j["variant"] for j in fails]}
+        if advice:
+            r["advice"] = advice
+        out.append(r)
     return out
 
 
@@ -234,16 +247,30 @@ def collapse_systemic(out, threshold=5):
             continue
         names = sorted({r["variant"].split(" [", 1)[0] for r in rs})
         culprits = collections.Counter(r["failing"] for r in rs if r["failing"] not in names)
-        merged.append({
+        if rule == "builder-specific":
+            error = pattern.split(";", 1)[0] + "."
+            note = rs[0].get("note")
+        else:
+            error = pattern.rstrip(".") + "."
+            code, _, hint = (rs[0].get("new") or "").partition("   ")
+            m = re.fullmatch(r"\(in (\S+)\)", hint.strip())
+            fix = (f"Possible fix, in {m.group(1)}: `{code}`." if code and m else
+                   f"Possible fix for each package: `{code}`" + (f" {hint.strip()}." if hint.strip() else ".")
+                   if code else rs[0].get("advice") or "")
+            note = ((("The failure is in a dependency: " if len(culprits) == 1 else "The failure is in dependencies: ")
+                     + ", ".join(f"{d} ({counted(n, 'package')})" for d, n in culprits.most_common(3)) + ". ")
+                    if culprits else "") + fix
+        entry = {
             "variant": f"{len(rs)} packages [{rule}]", "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else ""),
             "fix_in": (rs[0]["fix_in"] if rule == "builder-specific"
                        else "the PR, a shared dependency, or the CI"),
-            "rule": rule + "-systemic", "error": f"{len(rs)} packages: {pattern[:1].lower()}{pattern[1:]}",
+            "rule": rule + "-systemic", "error": error,
             "confidence": "medium",
-            "note": (rs[0].get("note") if rule == "builder-specific" else
-                     (("Failing dependencies: " + ", ".join(f"{d} ({n} packages)" for d, n in culprits.most_common(3))
-                       + ". ") if culprits else "")
-                     + f"Fix per package if needed: {rs[0].get('new', '')}"),
+            "note": note,
             "_keys": [k for r in rs for k in r.get("_keys", [])],
-            "jobs": merge_jobs([], [v for r in rs for v in r.get("jobs", [])])})
+            "jobs": merge_jobs([], [v for r in rs for v in r.get("jobs", [])])}
+        if rule != "builder-specific" and len(culprits) == 1 and sum(culprits.values()) == len(rs):
+            # Every package fails through the same dependency: the fix goes there (shown as such).
+            entry["failing_dep"] = next(iter(culprits))
+        merged.append(entry)
     return merged

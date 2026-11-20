@@ -411,6 +411,9 @@ def describe_job(variant):
         pkg, kind, target = m.groups()
         return (f"{pkg}, reverse dependency of {target}" if target
                 else pkg + {"tests": " (tests)", "lower-bounds": " (lower bounds)"}.get(kind, ""))
+    m = re.match(r"^(\S+) \[[^\]]*\]$", variant or "")
+    if m:            # a label such as "pkg.1 [all build jobs skipped]": the package
+        return m.group(1)
     if variant == "(lint)":
         return "opam lint"
     m = re.match(r"^(\d+ packages) \[", variant or "")

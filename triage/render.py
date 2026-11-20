@@ -32,7 +32,14 @@ from .ci import (  # noqa: F401
     split_pkg,
 )
 from .suggest import (  # noqa: F401
+    fix_label,
     rank,
+    title_of,
+    where_text,
+)
+from .words import (  # noqa: F401
+    counted,
+    short_date,
 )
 from .md import (  # noqa: F401
     SHA,
@@ -78,7 +85,7 @@ def render_summary(sha, data, show_all):
             by_pkg = {}
             for j in rev:
                 by_pkg.setdefault(j["revdep"], []).append(j)
-            print(f"  revdeps with problems: {len(by_pkg)} packages")
+            print(f"  reverse dependencies with problems: {len(by_pkg)}")
             for pkg, js in sorted(by_pkg.items()):
                 # Group identical reasons across platforms.
                 by_reason = {}
@@ -158,10 +165,79 @@ def render_compare(target, info, results, show_all=False):
             print(f"      base {b['platform']:<28} {b['category']:<13} {b['reason'] or ''}")
 
 
+def conf_word(r):
+    """'low' for a confidence of 'low (dependencies released after …)'."""
+    return str(r.get("confidence") or "").split(" ")[0]
+
+
 def jobs_note(r):
-    """' (N failed jobs)' when a suggestion stands for several jobs, else ''."""
+    """'N failed jobs' when a suggestion stands for several jobs, else ''."""
     n = len(r.get("jobs") or [])
-    return f" ({n} failed jobs)" if n > 1 else ""
+    return f"{n} failed jobs" if n > 1 else ""
+
+
+def cut(s, limit):
+    """`s` on one line, cut to `limit` characters at the end of a sentence
+    when there is one in the second half, else with "…" (by md_text)."""
+    s = flat(s)
+    if len(s) <= limit:
+        return s
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s)", s[:limit + 1])]
+    return s[:ends[-1]] if ends and ends[-1] > limit // 2 else s
+
+
+RELEASE_DATE = re.compile(r"release date of (\S+) \((\d{4}-\d\d-\d\d)\)$")
+
+
+def compared_text(r, year=None):
+    """What the candidates of a suggestion are compared with, in words:
+    'the release date of passage.0.1.7 (17 Sep 2025)'."""
+    cw = r.get("compared_with") or "?"
+    m = RELEASE_DATE.match(cw)
+    return f"the release date of {m.group(1)} ({short_date(m.group(2), year)})" if m else cw
+
+
+def candidate_text(r, c, year=None):
+    """One candidate of a suggestion, in words: what CI used and what passes."""
+    if "first_after" in c:
+        m = RELEASE_DATE.match(r.get("compared_with") or "")
+        after = f"{m.group(1)} ({short_date(m.group(2), year)})" if m else compared_text(r, year)
+        return f"CI used {c.get('failing')}; {c.get('first_after')} is the first release after {after}"
+    return f"passes with {c.get('passing')} on {compared_text(r, year)}, fails with {c.get('failing')}"
+
+
+def evidence_text(ev):
+    """'ca-certs-nss 3.103 no, 3.113.1 yes, 3.101-1 (used by CI) no': whether
+    each version defines the identifier, sorted by version, the package
+    named once."""
+    def vkey_of(k):
+        return functools.cmp_to_key(opam_vcmp)(k.split(" ")[1] if " " in k else k)
+    parts, name = [], None
+    for k, v in sorted(ev.items(), key=lambda kv: vkey_of(kv[0])):
+        if v is None:
+            continue
+        k = k.replace(" (installed in failing job)", " (used by CI)")
+        pkg, _, rest = k.partition(" ")
+        parts.append(f"{rest if pkg == name and rest else k} {'yes' if v else 'no'}")
+        name = pkg
+    return ", ".join(parts)
+
+
+def confidence_text(r):
+    """'possible causes (low confidence): dependencies released after …' for
+    the candidates of a suggestion."""
+    m = re.match(r"(\w+)(?: \((.*)\))?$", str(r.get("confidence") or ""))
+    word, why = (m.group(1), m.group(2)) if m else (r.get("confidence"), None)
+    return f"possible causes ({word} confidence)" + (f": {why}" if why else "")
+
+
+def mentions_day10(results):
+    """Whether the output names the day10 builder (then it is explained once)."""
+    return any("day10" in str(r.get(k) or "") for r in results
+               for k in ("job", "variant", "error", "note", "title", "jobs"))
+
+
+DAY10 = ("The day10 builder is the newer of opam-repo-ci's two builders; the other one is the main builder.")
 
 
 def opam_path(pkg):
@@ -183,16 +259,12 @@ def diff_block(r):
     return md_fence("\n".join(lines), "diff") + (f"\n<sub>{md_text(hint)}</sub>" if hint else "")
 
 
-def evidence_line(r, limit=400):
-    """The evidence of a suggestion (or its note), as Markdown."""
+def evidence_line(r, limit=600):
+    """Which versions define the identifier (or the note), as Markdown."""
     ev = r.get("evidence")
     if not ev:
-        return md_text(r.get("note"), limit)
-    def vkey_of(k):
-        return functools.cmp_to_key(opam_vcmp)(k.split(" ")[1] if " " in k else k)
-    parts = [f"{k.replace(' (installed in failing job)', ' (used by CI)')}: {'yes' if v else 'no'}"
-             for k, v in sorted(ev.items(), key=lambda kv: vkey_of(kv[0])) if v is not None]
-    return f"{md_code(flat(r.get('error'))[:150]) or '?'}: present in " + md_text(", ".join(parts), limit)
+        return md_text(cut(r.get("note"), limit), limit)
+    return "Defined in each version: " + md_text(evidence_text(ev), limit)
 
 
 def changelog_details(c):
@@ -226,12 +298,15 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
     out = ["### Automated triage of the opam-repo-ci failures", "",
            f"From the {ci} for commit {md_code(sha[:12]) if sha_ok else '?'}. Nothing was rebuilt: these "
            "suggestions come from the CI logs, the documentation of each package version on ocaml.org, and "
-           "the opam files. Please check them before applying them.", ""]
+           "the opam files. Please check them before applying them."
+           + (" " + DAY10 if mentions_day10(results) else ""), ""]
     if data.get("unfinished"):
-        out += [f"**CI is still running** ({data['unfinished']} of {len(data['jobs'])} jobs not finished): "
-                "these are the failures so far.", ""]
+        out += [f"**CI is still running**: {data['unfinished']} of {counted(len(data['jobs']), 'job')} "
+                f"{'is' if data['unfinished'] == 1 else 'are'} not finished, so these are the failures so far.", ""]
     if data.get("unanalysed"):
-        out += [f"**{data['unanalysed']} more distinct failure(s) were not analysed**: see the CI results.", ""]
+        n = data["unanalysed"]
+        out += [f"**{counted(n, 'more failure')} {'was' if n == 1 else 'were'} not analysed.** See the CI results.",
+                ""]
     fixes = by["fix"]
     if placed:
         out += [f"{placed} suggested change{'s are' if placed > 1 else ' is'} attached to "
@@ -241,17 +316,17 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
         out += [f"#### {'Other suggested' if placed else 'Suggested'} changes ({len(fixes)})", ""]
         for r in fixes:
             path = opam_path(r.get("failing"))
-            out.append(f"**{md_code(path or r.get('failing')) or '?'}**: {md_text(r.get('title') or r.get('rule'))} "
-                       f"({md_text(r.get('confidence'))} confidence){jobs_note(r)}")
+            meta = [md_text(title_of(r)), f"{md_text(conf_word(r))} confidence", jobs_note(r)]
+            out.append(f"**{md_code(path or r.get('failing')) or '?'}**: " + " · ".join(x for x in meta if x))
             if r.get("error"):
-                out.append(f"> {md_text(r['error'], 300)}")
+                out.append(f"> {md_text(cut(r['error'], 300), 300)}")
             if r.get("candidates"):
-                out.append(f"Candidates ({md_text(r.get('compared_with'))}):")
+                out.append(f"Possible causes, compared with {md_text(compared_text(r))}:")
                 out.append(md_fence("\n".join("+ " + flat(c["new"].split("   ")[0]) for c in r["candidates"]), "diff"))
                 for c in r["candidates"]:
                     if c.get("changelog"):
                         out.append(changelog_details(c))
-            else:
+            elif r.get("new"):
                 out.append(diff_block(r))
                 if r.get("alternative"):
                     alt = re.split(r"\s{2,}(?=\()", r["alternative"], maxsplit=1)
@@ -261,10 +336,9 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
                 out.append(f"<sub>{ev}</sub>")
             out.append("")
     elif by["workaround"] and not placed:
-        out += ["No fix could be derived automatically, but a workaround is suggested: restrict where this PR is "
-                "built or tested (below).", ""]
+        out += ["No fix found. The workarounds below skip the failing platforms or tests.", ""]
     elif not placed:
-        out += ["No change to this PR's opam files could be derived automatically.", ""]
+        out += ["No change to this PR's opam files found.", ""]
 
     def details(title, rs, fmt):
         if not rs:
@@ -275,16 +349,26 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
         return body + ["</details>", ""]
 
     def head(r, where=False):
-        exp = " (experimental platform)" if r.get("experimental") else ""
-        what = [md_text(r.get("title") or r.get("rule"))]
-        if where:
-            what.append(f"fix in {md_text(r.get('where') or r.get('fix_in'))}")
+        # "- **pkg** · title · fix in X · 3 failed jobs · pre-existing · experimental platform"
+        title = md_text(title_of(r))
         if r.get("failing"):
-            return f"- **{md_text(r['failing'])}**{exp} ({'; '.join(what)}){jobs_note(r)}"
-        return f"- **{what[0]}**{exp} ({'; '.join([md_text(r.get('job') or r['variant'])] + what[1:])})"
+            parts = [f"**{md_text(r['failing'])}**", title]
+        else:
+            # The job, unless it is only a count ("4 jobs"), which the number of failed jobs says.
+            job = r.get("job") or describe_job(r.get("variant"))
+            parts = [f"**{title}**", "" if re.fullmatch(r"\d+ jobs?", job or "") else md_text(job)]
+        w = where_text(r) if where and r.get("rule") != "rerun" else None     # "Jobs to rerun" says it
+        if w and w != "this PR":
+            parts.append(md_text(fix_label(w)))
+        parts.append(jobs_note(r))
+        if r.get("preexisting") and not r.get("preexisting_unverified"):
+            parts.append("pre-existing")
+        if r.get("experimental"):
+            parts.append("experimental platform")
+        return "- " + " · ".join(p for p in parts if p)
 
     def job_links(r, n=10):
-        # For the entries whose content is the list of jobs (reruns, failures no rule recognises).
+        # For the entries whose content is the list of jobs (reruns, unexplained failures).
         if r.get("rule") not in ("rerun", "unrecognised"):
             return ""
         js = r.get("jobs") or []
@@ -295,22 +379,24 @@ def render_comment(sha, data, results, placed=0, placed_lines=0):
         return (f"<br>Jobs: {', '.join(links)}" + (f" and {len(js) - n} more" if len(js) > n else "")) if js else ""
 
     def note(r):
-        return f"<br>{md_text(r['note'], 300)}" if r.get("note") else ""
+        return f"<br>{md_text(cut(r['note'], 600), 600)}" if r.get("note") else ""
+
+    def error(r):
+        return f": {md_text(cut(r['error'], 300), 300)}" if r.get("error") else ""
 
     def log_link(r):
         url = safe_ci_url(r.get("url"))
         return f" ([log]({url}))" if url else ""
 
-    out += details("Workarounds: restrict where this PR is built or tested", by["workaround"], lambda r: [
-        f"{head(r)}: {md_text(r.get('error'), 220)}",
-        "  " + diff_block(r).replace("\n", "\n  ")])
-    out += details("Not caused by this PR (nothing to change here)", by["elsewhere"],
-                   lambda r: [
-        f"{head(r, where=True)}: {md_text(r.get('error'), 200)}"
+    out += details("Workarounds: skip some platforms or tests", by["workaround"], lambda r: [
+        f"{head(r)}{error(r)}" + note(r)]
+        + (["  " + diff_block(r).replace("\n", "\n  ")] if r.get("new") else []))
+    out += details("Fix goes elsewhere", by["elsewhere"], lambda r: [
+        f"{head(r, where=True)}{error(r)}"
         + (f"<br>Suggested change: {md_code((r.get('new') or '').split('   ')[0])}" if r.get("new") else "")
         + note(r) + job_links(r)])
-    out += details("Other findings (no change suggested)", by["explanation"], lambda r: [
-        f"{head(r)}: {md_text(r.get('error'), 150)}" + note(r) + log_link(r) + job_links(r)])
+    out += details("Other failures (no change suggested)", by["explanation"], lambda r: [
+        f"{head(r)}{error(r)}" + note(r) + log_link(r) + job_links(r)])
     out.append("<sub>Generated by opam_repo_ci_triage.py</sub>")
     return "\n".join(out)
 
@@ -393,9 +479,9 @@ def build_review(sha, data, results, src):
         if not edits:
             continue
         r["_placed"] = True
-        why = f"**{md_text(r.get('rule'))}** ({md_text(r.get('confidence'))} confidence)"
+        why = f"**{md_text(title_of(r))}** · {md_text(conf_word(r))} confidence"
         if r.get("error"):
-            why += f": {md_text(r['error'], 200)}"
+            why += f": {md_text(cut(r['error'], 300), 300)}"
         ev = evidence_line(r, 300)
         for n, replacement in edits:
             comments.append({"path": path, "line": n, "side": "RIGHT",
@@ -406,43 +492,48 @@ def build_review(sha, data, results, src):
 
 
 def render_suggestions(results):
+    if mentions_day10(results):
+        print(DAY10)
     for r in results:
         print("=" * 100)
-        print(f"{r.get('title') or r.get('rule') or 'Note'}: {r.get('job') or r['variant']}")
+        # A lint error's job is "opam lint", and a pattern's "N packages": the title says it.
+        print(title_of(r) + ("" if r.get("variant") == "(lint)" or r.get("rule", "").endswith("-systemic")
+                             else f": {r.get('job') or describe_job(r['variant'])}"))
+        jobs = r.get("jobs") or []
         if r.get("rule") in ("rerun", "unrecognised"):
-            for v in r.get("jobs") or []:
+            for v in jobs:
                 print(f"  job             : {describe_job(v)}")
-        elif len(r.get("jobs") or []) > 1:
-            others = [v for v in r["jobs"] if v != r["variant"]]
-            print(f"  same failure on : {len(r['jobs'])} failed jobs; also "
-                  + ", ".join(describe_job(v) for v in others[:5])
-                  + (f", ... ({len(others) - 5} more)" if len(others) > 5 else ""))
+        elif len(jobs) > 1:
+            others = [v for v in jobs if v != r["variant"]]
+            # A pattern's variant is a label, not one of its jobs: then all are listed.
+            label = (f"same failure on : {counted(len(others), 'other job')}: " if len(others) < len(jobs)
+                     else f"failed jobs     : {len(jobs)}: ")
+            print("  " + label + ", ".join(describe_job(v) for v in others[:5])
+                  + (f" and {len(others) - 5} more" if len(others) > 5 else ""))
+        w = where_text(r)
         if r.get("failing"):
-            print(f"  failing package : {r['failing']}   fix in: {r.get('where') or r.get('fix_in')}"
+            print(f"  failing package : {r['failing']}" + (f"   {fix_label(w)}" if w else "")
                   + ("   (experimental platform: does not block)" if r.get("experimental") else ""))
         if r.get("error"):
             print(f"  error           : {r['error']}")
         if r.get("source"):
             print(f"  looked up in    : {r['source']}")
         if r.get("evidence"):
-            print("  evidence        : " + ", ".join(f"{k}={'yes' if v else ('no' if v is False else '?')}" for k, v in r["evidence"].items()))
+            print(f"  defined in      : {evidence_text(r['evidence'])}")
         for t in r.get("tried", []):
             print(f"  tried           : {t}")
         if r.get("new"):
-            label = {"workaround": "workaround", "elsewhere": "change elsewhere"}.get(r.get("class"), "suggested change")
-            print(f"  {label} ({r.get('confidence')} confidence):")
+            label = {"workaround": "workaround", "elsewhere": "fix goes elsewhere"}.get(r.get("class"), "suggested change")
+            print(f"  {label} ({conf_word(r)} confidence):")
             if r.get("old"):
                 print(f"    - {r['old']}")
             print(f"    + {r['new']}")
             if r.get("alternative"):
                 print(f"    or {r['alternative']}")
         if r.get("candidates"):
-            print(f"  candidates      : {r.get('confidence')}")
+            print(f"  {confidence_text(r)}")
         for c in r.get("candidates", []):
-            if "first_after" in c:
-                print(f"    {c['dep']}: {c['failing']} installed; first release after {r.get('compared_with')} is {c['first_after']}")
-            else:
-                print(f"    {c['dep']}: {c['passing']} passes on {r.get('compared_with')}, {c['failing']} fails")
+            print(f"    {c['dep']}: {candidate_text(r, c)}")
             if c.get("old"):
                 print(f"    - {c['old']}")
             print(f"    + {c['new']}")

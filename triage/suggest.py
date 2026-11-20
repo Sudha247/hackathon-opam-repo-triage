@@ -59,6 +59,9 @@ from .context import (  # noqa: F401
 from .llm import (  # noqa: F401
     apply_llm,
 )
+from .words import (  # noqa: F401
+    counted,
+)
 
 
 def group_key(j):
@@ -177,8 +180,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         name, ver = split_pkg(r.get("failing") or "")
         vs = src.versions(name) if name and ver else []
         if vs and ver in vs and vs[-1] != ver and not r.get("alternative"):
-            r["alternative"] = (f"x-maintained: false  (old release, {name}.{vs[-1]} exists: the next "
-                                f"archiving round can remove it)")
+            r["alternative"] = (f"x-maintained: false  (old release; {name}.{vs[-1]} exists, so the next "
+                                f"archiving round can remove this one)")
 
     # The same suggestion found on several platforms or through several
     # packages is reported once.
@@ -186,6 +189,7 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
     for r in results:
         plat = r.pop("_plat", None)
         k = ((r.get("failing"), (r.get("new") or "").split("   ")[0]) if r.get("new")
+             else (r.get("failing"), r.get("advice")) if r.get("advice")
              else (r.get("failing"), r["rule"], (r.get("note") or "").replace(plat or "\0", "{P}"))
              if r.get("rule") in PER_PACKAGE_RULES else None)
         if k and k in seen:
@@ -236,7 +240,7 @@ def rule_error(job, e, jobs):
     return {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"],
             "failing": job.get("revdep") or job.get("target"), "rule": "rule-error", "fix_in": "unknown",
             "confidence": "low", "error": f"{type(e).__name__}: {str(e)[:300]}",
-            "note": "The tool failed while analysing this log (a bug in the tool): read the log.",
+            "note": "The tool failed while analysing this log, which is a bug in the tool. Read the log.",
             "_key": failure_key(job), "jobs": jobs, "keep": True}
 
 
@@ -344,18 +348,21 @@ def merge_versions(results):
             first[k] = r
             out.append(r)
             continue
-        f["failing"] += ", " + failing
+        if failing not in f["failing"].split(", "):
+            f["failing"] += ", " + failing
         f["jobs"] = merge_jobs(f.get("jobs") or [f["variant"]], r.get("jobs") or [r["variant"]])
         if r.get("fix_in") != "this PR":
             f["fix_in"] = f"{name} (other package)"
         if r.get("note") and r["note"] != f.get("_note0", f.get("note")):
             f.setdefault("_note0", f.get("note"))
+            f.setdefault("_first", f["failing"].split(", ")[0])
             f.setdefault("_similar", []).append(failing)
     for r in out:
         r.pop("_note0", None)
-        similar = r.pop("_similar", None)
+        first = r.pop("_first", None)
+        similar = [x for x in dict.fromkeys(r.pop("_similar", None) or []) if x != first]
         if similar:
-            r["note"] = (r.get("note") or "").rstrip() + f" (The details differ slightly for {', '.join(similar)}.)"
+            r["note"] = (r.get("note") or "").rstrip() + f" This note is for {first}; it differs for {', '.join(similar)}."
     return out
 
 
@@ -368,10 +375,10 @@ def merge_unrecognised(results):
     jobs = merge_jobs([], [v for r in unk for v in (r.get("jobs") or [r["variant"]])])
     names = sorted({r["failing"] for r in unk if r.get("failing")})
     return [r for r in results if r not in unk] + [{
-        "variant": f"{len(jobs)} job{'s' if len(jobs) != 1 else ''}", "rule": "unrecognised", "fix_in": "unknown", "confidence": "low",
+        "variant": counted(len(jobs), "job"), "rule": "unrecognised", "fix_in": "unknown", "confidence": "low",
         "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else "") if names else None,
-        "error": f"{len(jobs)} failed job{'s' if len(jobs) != 1 else ''} that no rule recognises",
-        "note": "Read the logs of these jobs.", "jobs": jobs,
+        "error": f"{counted(len(jobs), 'failed job')} the tool cannot explain",
+        "note": "Read its log." if len(jobs) == 1 else "Read their logs.", "jobs": jobs,
         "experimental": all(r.get("experimental") for r in unk)}]
 
 
@@ -383,28 +390,74 @@ RULE_TITLES = {
     "missing-system-package": "System package not found", "install-missing-files": "Files not built",
     "test-output": "Test output differs", "test-output-ocaml": "Test output depends on the OCaml version",
     "compiler-matrix": "Fails on some OCaml versions", "platform-matrix": "Fails on some platforms",
-    "platform-matrix-systemic": "Fails on some platforms, several packages",
-    "compiler-matrix-systemic": "Fails on some OCaml versions, several packages",
+    # The -systemic titles get the number of packages (see `title_of`).
+    "platform-matrix-systemic": "Fails on some platforms",
+    "compiler-matrix-systemic": "Fails on some OCaml versions",
     "builder-specific": "Fails only on the day10 builder",
-    "builder-specific-systemic": "Fails only on the day10 builder, several packages",
-    "pr-relaxed-available": "`available` relaxed by this PR", "lint": "Lint",
+    "builder-specific-systemic": "Fails only on the day10 builder",
+    "pr-relaxed-available": "`available` relaxed by this PR", "lint": "opam lint error",
     "lint-ci-error": "Lint job failed (CI error)",
     "uninstallable": "Not installable anywhere",
-    "bounded-out": "Not installable on tested platforms, by this PR's bound", "newer-c-compiler": "Newer C compiler",
+    "bounded-out": "This PR's bound excludes every tested platform", "newer-c-compiler": "Newer C compiler",
     "system-library-version": "System library version", "rerun": "Jobs to rerun",
-    "sources": "Source archive cannot be unpacked", "accept-failures-ignored": "Accepted failure not ignored",
-    "unrecognised": "Not recognised", "llm": "LLM diagnosis (unchecked)",
+    "sources": "Source archive cannot be unpacked",
+    "accept-failures-ignored": "x-ci-accept-failures ignored by day10",
+    "unrecognised": "Unexplained failures", "llm": "LLM diagnosis (unchecked)",
     "rule-error": "Analysis failed (tool error)",
     "opam-same-version-reinstall": "opam reinstalls at the same version",
     "needs-git-checkout": "Build needs a git checkout", "install-outside-prefix": "Installs outside the switch",
     "unsupported-arch": "Architecture not supported", "platform-unsupported": "Platform not supported",
-    "health-check-new": "Builds on master, fails here", "lower-bound": "Lower bound too low",
-    "link-error": "Link error", "broken-install": "Incomplete installation in the switch", "ocaml-runtime-api": "OCaml runtime function missing", "test-platform": "Fails on one compiler variant", "health-check-preexisting": "Also failing on master",
+    "health-check-new": "Broken by this PR (builds on master)", "lower-bound": "Lower bound too low",
+    "link-error": "Link error", "broken-install": "Incomplete installation in the switch",
+    "ocaml-runtime-api": "OCaml runtime function missing", "test-platform": "Fails on one compiler variant",
+    "health-check-preexisting": "Also fails on master",
 }
 
 
-WHERE = {"this PR": "this PR", "unknown": "unknown", "CI (rerun)": "the CI",
-         "the CI environment (day10 builder)": "the day10 builder", "the CI environment": "the CI"}
+def title_of(r):
+    """The title of a suggestion: its rule in words, with the number of
+    packages for a pattern merged over several packages."""
+    rule = r.get("rule")
+    if not rule:
+        return r.get("title") or "Note"
+    t = RULE_TITLES.get(rule, rule)
+    m = re.match(r"(\d+) packages \[", r.get("variant") or "") if rule.endswith("-systemic") else None
+    return f"{t} ({m.group(1)} packages)" if m else t
+
+
+# Where the fix goes, in words: "this PR", "{pkg} (another package)",
+# "upstream", "the CI", "rerun" or "nothing to fix"; None when unknown. The
+# stored `fix_in` values stay as they are: the page groups and classifies
+# suggestions with them.
+WHERE = {"this PR": "this PR", "unknown": None, "CI (rerun)": "rerun",
+         "the CI environment (day10 builder)": "the CI", "the CI environment": "the CI",
+         "opam (the CI's opam version)": "the CI", "upstream (the package's source)": "upstream",
+         "nothing (this PR's bound)": "nothing to fix",
+         "the dependency declaring these depexts": "the dependency that declares these depexts (another package)",
+         "the reverse dependencies (other packages)": "these reverse dependencies (other packages)",
+         "the PR, a shared dependency, or the CI": "unknown: one cause shared by these packages"}
+
+
+def where_text(r):
+    """Where the fix of a suggestion goes, in words (see WHERE), or None."""
+    f = r.get("fix_in") or ""
+    if r.get("failing_dep") and f == "the PR, a shared dependency, or the CI":
+        return f"{r['failing_dep']} (another package)"
+    if f in WHERE:
+        return WHERE[f]
+    if f.endswith(" (other package)"):
+        return f[:-len(" (other package)")] + " (another package)"
+    if f.endswith(" (upstream archive)"):
+        return "upstream"
+    return f or None
+
+
+def fix_label(where):
+    """'fix in X', 'fix upstream', or the value alone when it is not a place
+    ("rerun", "nothing to fix")."""
+    if where in ("rerun", "nothing to fix"):
+        return where
+    return "fix upstream" if where == "upstream" else f"fix in {where}"
 
 
 def readable(results):
@@ -412,14 +465,14 @@ def readable(results):
     where the fix goes, and notes as sentences."""
     for r in results:
         if r.get("rule"):
-            r["title"] = RULE_TITLES.get(r["rule"], r["rule"])
+            r["title"] = title_of(r)
         if r.get("variant"):
             r["job"] = describe_job(r["variant"])
-        f = r.get("fix_in") or ""
-        r["where"] = (WHERE.get(f) or (f[:-len(" (other package)")] + ", another package"
-                                       if f.endswith(" (other package)") else f)) if f else None
+        r["where"] = where_text(r)
         for k in ("note", "error"):
             v = (r.get(k) or "").strip()
+            if v and k == "error" and v.endswith(":"):
+                v = v.rstrip(":").rstrip()          # a reason with nothing after it ("x failed:")
             if v and k == "note" and v[-1] not in ".)`!?":
                 v += "."
             if v:
@@ -435,9 +488,10 @@ WORKAROUND_RULES = {"platform-matrix", "missing-system-package"}
 
 
 def classify(r):
-    """'fix' (change in this PR), 'workaround' (restricts where it is built or
-    tested), 'elsewhere' (another package, CI, systemic), or 'explanation'."""
-    has_change = bool(r.get("new") or r.get("candidates"))
+    """'fix' (change in this PR), 'workaround' (skips platforms or tests),
+    'elsewhere' (another package, CI, systemic), or 'explanation'. A change
+    described in words (`advice`) counts as a change."""
+    has_change = bool(r.get("new") or r.get("candidates") or r.get("advice"))
     if r.get("rule") == "rule-error":
         return "explanation"
     if r.get("rule", "").endswith("-systemic") or (r.get("fix_in") and r.get("fix_in") != "this PR"):

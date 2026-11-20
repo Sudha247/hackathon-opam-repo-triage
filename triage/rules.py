@@ -128,7 +128,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         out.update(rule="missing-system-package", failing=owner,
                    fix_in=("this PR" if owner in pr_packages else f"{owner} (other package)") if is_conf
                           else "the dependency declaring these depexts",
-                   error=f"system packages not available on {plat}: {', '.join(names)}",
+                   error=f"System packages not available on {plat}: {', '.join(names)}",
                    new=f'x-ci-accept-failures: ["{plat}"]   (or correct the depext names for {plat})',
                    confidence="medium",
                    note="Either the depext name is wrong for this distribution, the package needs an extra "
@@ -141,7 +141,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         return out
     m = re.search(r"runc run failed: [^\n]{0,120}", text)
     if m:
-        out.update(rule="transient", error="the CI could not start the build container",
+        out.update(rule="transient", error="The CI could not start the build container",
                    note="A CI infrastructure failure (the container did not start). Rerun the job.")
         return out
     m = re.search(r"HTTP error code (5\d\d|429)|Could not resolve host|Connection (?:reset|timed out)", text)
@@ -149,7 +149,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         out.update(rule="transient", error=m.group(0), note="Network error. Rerun the job.")
         return out
     if "failing" not in info:
-        out["note"] = "The log has no opam error block (a dependency, network or solver failure)."
+        out["note"] = "The log has no build error from opam: a dependency failed, or the network or the solver did."
         return out
     fname, fver = info["failing"]
     out["failing"] = f"{fname}.{fver}"
@@ -188,7 +188,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         earlier = [re.sub(r"^[-#] ?", "", l).strip() for l in text[:cut].splitlines()
                    if re.search(r"\bError\b|error:|Parse error|fatal error", l)
                    and not re.search(r"Error report|\[ERROR\] The (compilation|installation)", l)]
-        out["install"] = ("files listed for installation were not built: "
+        out["install"] = ("Files listed for installation were not built: "
                           + ", ".join(f"{n} {x}" for x, n in exts.most_common()))
         if earlier:
             err = earlier[-15:]
@@ -204,7 +204,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
     if re.search(r"has type\s+string\s+but an expression was expected of type\s*$", "\n".join(err), re.M) and \
        re.search(r"=?\s*bytes", "\n".join(err)):
         old, new = constraint_edit(opam_text, "ocaml", "<", "4.06")
-        out.update(rule="safe-string", error="string used where bytes is expected (safe-string, default since OCaml 4.06)",
+        out.update(rule="safe-string", error="String used where bytes is expected (safe-string, default since OCaml 4.06)",
                    dep="ocaml", old=old, new=new, confidence="high")
         return out
 
@@ -328,7 +328,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                 if f"{pkg}.{fver}" in pr_packages and src.upstream(fname, fver, ref) == src.upstream(pkg, fver, ref):
                     out["alternative"] = f'"{pkg}" {{= version}}  (same upstream repository and version)'
                 return out
-        out.setdefault("note", "The identifier was not found in the history of any candidate package.")
+        out.setdefault("note", "The identifier was not found in the history of any dependency the tool checked.")
         return out
 
     if info["test_diff"]:
@@ -357,12 +357,12 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
                             f"expected output upstream fixes it for good.")
             return out
         out["rule"] = "test-output"
-        out["error"] = "test output differs (cram/mdx)"
+        out["error"] = "Test output differs (cram/mdx)"
         return out   # completed by the caller with a passing job's versions
     if out.get("install"):
-        out.update(error=out.pop("install"), note="No rule recognises the earlier build error.")
+        out.update(error=out.pop("install"), note="The tool does not recognise the earlier build error.")
         return out
-    out["note"] = "no rule matched"
+    out["note"] = "Unrecognised error."
     return out
 
 
@@ -400,7 +400,7 @@ def complete_test_output(src, r, job, text, data, cache_dir):
             if log:
                 c["changelog"] = log
             r["candidates"].append(c)
-    r["confidence"] = "low (candidates differ between a passing and the failing job)"
+    r["confidence"] = "low (dependencies whose version differs between a passing job and the failing one)"
 
 
 # C/C++ errors that newer compilers introduced: code that built with an older
@@ -473,7 +473,7 @@ def known_errors(text, full, fname, opam_text, info, dims, platform, deps):
     m = re.search(r"unsupported option '(-m[\w=-]+)' for target '(arm64|aarch64)[^']*'", text)
     if m:
         return {"rule": "platform-unsupported", "confidence": "high", "keep": True,
-                "error": f"the build passes the x86-only flag {m.group(1)} to the {m.group(2)} compiler",
+                "error": f"The build passes the x86-only flag {m.group(1)} to the {m.group(2)} compiler",
                 "note": "The C flags are x86-specific: upstream should only pass them on x86 (dune's "
                         "%{architecture}, or a configurator check). For this release, exclude arm64 with "
                         "`available: arch != \"arm64\"` if every arm64 build fails, or x-ci-accept-failures "
@@ -487,7 +487,7 @@ def known_errors(text, full, fname, opam_text, info, dims, platform, deps):
                 f"the build; conf-bash provides bash."}
     if re.search(r"exception Stack overflow", text) and "flambda" in info.get("_variant", ""):
         return {"rule": "test-platform", "confidence": "medium", "keep": True,
-                "error": "stack overflow with flambda",
+                "error": "Stack overflow with flambda",
                 "note": "Only the flambda compiler overflows: its inlining makes deep recursion use more stack. "
                         "Upstream can make the recursion tail-recursive or less deep; otherwise this extras "
                         "job's failure is usually accepted."}
@@ -503,14 +503,14 @@ def known_errors(text, full, fname, opam_text, info, dims, platform, deps):
     if (re.search(r"fatal: not a git repository", text) and re.search(r"git (describe|rev-parse|log)", text)
             and not re.search(r"Error: (Program|Library) ", text)):     # another cause, with git noise
         return {"rule": "needs-git-checkout", "confidence": "high",
-                "error": "the build runs git, but the release archive is not a git checkout",
+                "error": "The build runs git, but the release archive is not a git checkout",
                 "note": "The build calls git (`git describe` or similar) to find the version. Release archives "
                         "have no .git directory, so this fails everywhere. Fix upstream: take the version from "
                         "the opam file (`%{version}%`) or from dune's `%%VERSION%%` substitution."}
     m = re.search(r"cannot create (?:regular file|directory) '?(/usr/[^':\s]*)'?: Read-only file system", text)
     if m:
         return {"rule": "install-outside-prefix", "confidence": "high",
-                "error": f"the install step writes to {m.group(1)}, outside the opam switch",
+                "error": f"The install step writes to {m.group(1)}, outside the opam switch",
                 "note": "The install command ignores the switch's prefix. Pass the switch's directories to it "
                         "in the opam file, for example `PREFIX=%{prefix}%`, `BINDIR=%{bin}%` or "
                         "`LIBDIR=%{lib}%`, whichever variables the Makefile uses."}
@@ -536,7 +536,7 @@ def known_errors(text, full, fname, opam_text, info, dims, platform, deps):
                         f"conversion API changed in cmdliner 2.0."}
     if re.search(r"checking for ar\.\.\. no", text) and dims["os"] == "win32":
         return {"rule": "platform-unsupported", "confidence": "medium",
-                "error": f"the configure script of {fname} finds no `ar` on {platform}",
+                "error": f"The configure script of {fname} finds no `ar` on {platform}",
                 "new": 'available: os != "win32"   (combined with any existing `available`)', "old": None,
                 "note": f"{fname}'s configure script is not ported to Windows."}
     m = re.search(r"'NotForRedeclaration' is not a member of 'clang::Sema'|has no member named 'getOriginalNamespace'",
@@ -552,7 +552,7 @@ def known_errors(text, full, fname, opam_text, info, dims, platform, deps):
     if re.search(r"the expected type is\s+(?:# )?string option \* Parsetree\.(expression|pattern|core_type)", text):
         old, new = constraint_edit(opam_text, "ocaml", "<", "5.4")
         return {"rule": "stdlib", "dep": "ocaml", "old": old, "new": new, "confidence": "high",
-                "error": "pattern on Parsetree tuples: OCaml 5.4's labelled tuples changed their type",
+                "error": "Pattern on Parsetree tuples: OCaml 5.4's labelled tuples changed their type",
                 "note": "OCaml 5.4 added labelled tuples: the Parsetree's tuple nodes now hold "
                         "(label option * node) pairs. Code matching them directly needs OCaml < 5.4, or an "
                         "update (ppxlib's Ast versions abstract this)."}
@@ -580,7 +580,7 @@ def log_rules(src, err, fname, opam_text, info, job):
     if m:
         ocaml = info.get("ocaml") or "this OCaml"
         return {"rule": "ocaml-runtime-api", "confidence": "medium", "keep": True,
-                "error": f"the C stubs call {m.group(1)}, which OCaml {ocaml}'s runtime does not declare",
+                "error": f"The C stubs call {m.group(1)}, which OCaml {ocaml}'s runtime does not declare",
                 "note": f"{m.group(1)} is not part of this OCaml's C API: it exists only in other OCaml versions, "
                         f"or in another compiler variant such as OxCaml. The package needs an `ocaml` constraint "
                         f"to the versions that have it, or a fix upstream (not a GCC problem, although GCC 14 "
@@ -809,7 +809,7 @@ def dated_candidates(src, r, bad, fname, fver, max_lookups=8):
             c["changelog"] = log
         r["candidates"].append(c)
     r["also_newer"] = [d for _, _, d, _ in newer[3:]]
-    r["confidence"] = "low (dependencies released after the package; check their changelogs)"
+    r["confidence"] = f"low (dependencies released after {fname}.{fver}; check their changelogs)"
     if not cands:
         r["note"] = f"None of the {min(len(deps), max_lookups)} dependencies checked was released after {fname}.{fver} ({day})."
 
@@ -885,7 +885,7 @@ def lower_bounds_rule(src, job, text, r, pr_packages, pr_sha):
         return {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"],
                 "rule": "lower-bound", "failing": target, "fix_in": "this PR" if target in pr_packages
                 else f"{target} (other package)", "dep": found, "old": old, "new": new, "confidence": "medium",
-                "error": f"the lower-bounds job installs {what}, which fails to build",
+                "error": f"The lower-bounds job installs {what}, which fails to build",
                 "note": f"{found}.{downgraded[found][0]}, used in the other jobs, builds. A version in between "
                         f"may build too: this is the bound the CI results support."}
 

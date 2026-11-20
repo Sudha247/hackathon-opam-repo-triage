@@ -108,7 +108,7 @@ CASES = {
     "frama-clang-llvm": (
         "8f970cb1aaa9971525c904c59e168a4ab5169d00", ["--max", "8"],
         [{"failing": "conf-libclang.22", "rule": "system-library-version", "error": "archlinux has LLVM 23"},
-         {"rule": "rerun", "error": "HTTP error code 503"},
+         {"rule": "rerun", "error": "HTTP 503"},
          {"failing": "frama-c.34.0~beta", "rule": "opam-same-version-reinstall"},
          {"not": {"error": "brew"}}]),
     "glfw-accepted-failures": (
@@ -1066,7 +1066,7 @@ class PageTest(unittest.TestCase):
         unanalysed["result"]["unanalysed"] = 3
         self.assertFalse(self.r.seems_ready(unanalysed))
         self.assertIn("3 more distinct failures were not analysed", self.r.render_pr(unanalysed))
-        self.assertIn("3 more distinct failure(s) were not analysed", self.r.comment_markdown(unanalysed))
+        self.assertIn("3 more failures were not analysed.", self.r.comment_markdown(unanalysed))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], draft=True)))
         self.assertFalse(self.r.seems_ready(self.pr([self.day10], labels=["needs reporter action"])))
         self.assertTrue(self.r.seems_ready(self.pr([self.day10], labels=["consider for merge"])))
@@ -1271,7 +1271,7 @@ class PageTest(unittest.TestCase):
         # Only workarounds: the comment says so, as the verdict does ("Change this PR").
         workaround = dict(self.lint, **{"class": "workaround", "rule": "platform-matrix"})
         md = self.r.comment_markdown(self.pr([workaround]))
-        self.assertIn("a workaround is suggested", md)
+        self.assertIn("The workarounds below skip", md)
         self.assertNotIn("No change to this PR", md)
 
 
@@ -1403,7 +1403,7 @@ class EscapingTest(unittest.TestCase):
     def test_llm_change_is_code(self):
         from unittest import mock
         import triage.llm as L
-        r = {"variant": "v", "url": "https://opam.ci.ocaml.org/x", "note": "no rule matched", "error": "E"}
+        r = {"variant": "v", "url": "https://opam.ci.ocaml.org/x", "note": "Unrecognised error.", "error": "E"}
         res = {"fix_in": "this-pr", "confidence": "low", "diagnosis": "d", "verify": "v",
                "change_new": 'depexts: ["a"] {os-distribution = "debian"}\n```\n@x `y`', "package": "x.1"}
         with mock.patch.object(L, "fetch", lambda *a: "log"), mock.patch.object(L, "log_text", lambda t: t), \

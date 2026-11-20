@@ -46,6 +46,10 @@ from .sources import (  # noqa: F401
 from .rules import (  # noqa: F401
     direct_deps,
 )
+from .words import (  # noqa: F401
+    counted,
+    short_date,
+)
 
 
 # A URL that can be pasted in a shell command between single quotes: https,
@@ -139,11 +143,16 @@ def health_summary(notes, src=None):
     """Entries comparing the failing reverse dependencies with opam-health-check
     (master): the ones that also fail there, and the ones that build there."""
     h, run = notes.get("health") or {}, notes.get("run")
-    when = f" (run of {run})" if run else ""
+    when = f"opam-health-check, {short_date(run)}" if run else "opam-health-check"
     out = []
 
     def listing(d):
         return ", ".join(f"{rd} (OCaml {', '.join(sorted({v for v, _ in xs}))})" for rd, xs in sorted(d.items()))
+
+    def names(xs, n=6):
+        if len(xs) > n:
+            return ", ".join(xs[:n]) + f" and {len(xs) - n} more"
+        return xs[0] if len(xs) == 1 else ", ".join(xs[:-1]) + " and " + xs[-1]
     good = h.get("good") or {}
     for rd, xs in sorted(good.items()):
         # Broken by this PR: the usual fix in opam-repository is an upper
@@ -151,13 +160,17 @@ def health_summary(notes, src=None):
         targets = sorted({m.group(1) for _, v in xs for m in [re.search(r",([^,]+),revdeps,", v)] if m})
         target = targets[0] if targets else None
         via = sorted((notes.get("via") or {}).get(rd, ()))
+        ocaml = f"OCaml {', '.join(sorted({v for v, _ in xs}))}"
+        if via:
+            one = len(via) == 1
+            error = (f"{rd} fails with this PR on {ocaml}, and so {'does' if one else 'do'} {names(via)}, which "
+                     f"{'depends' if one else 'depend'} on it and {'builds' if one else 'build'} on master "
+                     f"({when}).")
+        else:
+            error = f"{rd} fails with this PR on {ocaml} but builds on master ({when})."
         r = {"variant": f"{rd}, reverse dependency" + (f" of {target}" if target else ""),
              "rule": "health-check-new", "fix_in": "this PR", "confidence": "medium", "failing": rd,
-             "error": (f"{rd} fails here, so {len(via)} reverse dependenc{'ies' if len(via) > 1 else 'y'} that "
-                       f"build on master in opam-health-check{when} fail too ({', '.join(via[:6])}"
-                       f"{' …' if len(via) > 6 else ''})" if via else
-                       f"{rd} builds on master in opam-health-check{when} but fails here")
-                      + f" (OCaml {', '.join(sorted({v for v, _ in xs}))})",
+             "error": error,
              "note": "Probably broken by this PR: look at it first. opam-health-check builds the newest "
                      "version of each package, without tests.",
              "jobs": sorted({v for _, v in xs})}
@@ -176,21 +189,23 @@ def health_summary(notes, src=None):
             tn, tv = split_pkg(target)
             if tn in direct_deps(opam):
                 old, new = constraint_edit(opam, tn, "<", tv)
+                what = "upper bound"
             else:
                 old, new = None, f'conflicts: [ "{tn}" {{>= "{tv}"}} ]   (added to any existing `conflicts`)'
+                what = "conflict"
             r.update(dep=tn, old=old, new=new,
-                     note=f"Probably broken by {target}. The usual fix in opam-repository is this upper bound in "
-                          f"{rd}'s opam file, in the same PR (or a fixed release of {rn}). opam-health-check "
-                          f"builds the newest version of each package, without tests.")
+                     note=f"Probably broken by {target}. Usual fix: add this {what} to {rd}'s opam file in this "
+                          f"PR, or release a fixed {rn}. opam-health-check builds the newest version of each "
+                          f"package, without tests.")
         out.append(r)
     bad = {**(h.get("bad") or {}), **(h.get("partial") or {})}
     if bad:
-        out.append({"variant": f"{len(bad)} reverse dependenc{'ies' if len(bad) > 1 else 'y'}",
+        out.append({"variant": counted(len(bad), "reverse dependency"),
                     "rule": "health-check-preexisting", "fix_in": "the reverse dependencies (other packages)",
                     "confidence": "high", "failing": ", ".join(sorted(bad)),
-                    "error": f"also fail on master in opam-health-check{when}: {listing(bad)}",
-                    "note": "Pre-existing: these reverse dependencies fail without this PR (or one of their "
-                            "dependencies does). Nothing to change in this PR for them.",
+                    "error": f"These fail on master too ({when}): {listing(bad)}",
+                    "note": "They, or one of their dependencies, fail without this PR. Nothing to change in "
+                            "this PR.",
                     "jobs": sorted({v for xs in bad.values() for _, v in xs})})
     return out
 
@@ -278,12 +293,12 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
             if not hc or hc[1] != ver or d["ocaml"] not in hc[0]:
                 continue
             status, log = hc[0][d["ocaml"]]
-            when = f"OCaml {d['ocaml']}, run of {hc[2]}" if hc[2] else f"OCaml {d['ocaml']}"
+            when = (f"opam-health-check, OCaml {d['ocaml']}, {short_date(hc[2])}" if hc[2]
+                    else f"opam-health-check, OCaml {d['ocaml']}")
             if status == "bad":
-                per_job[j["variant"]] = f"{rd} also fails to build on master in opam-health-check ({when})"
+                per_job[j["variant"]] = f"{rd} also fails to build on master ({when})"
             elif status == "partial":
-                per_job[j["variant"]] = (f"a dependency of {rd} also fails on master in opam-health-check "
-                                         f"({when})")
+                per_job[j["variant"]] = f"a dependency of {rd} also fails on master ({when})"
             if status == "good" and not is_newest(j["target"]):
                 continue
             # A reverse dependency failing because one of its dependencies
@@ -298,8 +313,7 @@ def preexisting_failures(data, sha, base, cache_dir, src=None, notes=None):
                 notes.setdefault("run", hc[2])
             if status == "good" and notes is not None:
                 notes.setdefault("new", {})[failure_key(j)] = (
-                    f"{rd} builds on master in opam-health-check ({when}): this failure is probably caused "
-                    f"by this PR.")
+                    f"{rd} builds on master ({when}), so this PR probably causes this failure.")
     out = {}
     for j in failing:
         out.setdefault(failure_key(j), []).append(per_job.get(j["variant"]))
@@ -334,7 +348,7 @@ def sources_rules(data, cache_dir, match=None):
                      confidence="high",
                      note=f"The source archive contains symlinks, which tar cannot create on {dims['distro']}. "
                           f"Replace them upstream by copies, or add `x-ci-accept-failures: [\"{dims['distro']}\"]` "
-                          f"(or `available: os != \"win32\"`) to this release.")
+                          f"or `available: os != \"win32\"` to this release.")
         else:
             r["note"] = "The archive was downloaded but could not be unpacked. Check the url and the checksum."
         out.append(r)
@@ -351,18 +365,28 @@ def rerun_rules(data, results, match=None):
         return results
     counts = collections.Counter()
     for j in jobs:
-        m = re.search(r"HTTP error code \d+|curl failed|Could not resolve", j["reason"] or "")
-        counts[j["category"] + (f" ({m.group(0)})" if m else "")] += 1
+        m = re.search(r"HTTP error code (\d+)|curl failed|Could not resolve", j["reason"] or "")
+        detail = (f"HTTP {m.group(1)}" + (", rate limit" if m.group(1) == "429" else "") if m and m.group(1)
+                  else m.group(0) if m else None)
+        counts[(j["category"], detail)] += 1
     for r in transient:
-        counts[r["error"]] += len(r.get("jobs") or [r["variant"]])
+        counts[(None, r["error"])] += len(r.get("jobs") or [r["variant"]])
+
+    def what(k, n):
+        cat, detail = k
+        if cat is None:              # a CI tool crash, from the log
+            return f"{detail} ({counted(n, 'job')})"
+        noun = {"network": "network error", "cancelled": "cancelled job"}.get(cat, f"{cat} job")
+        return counted(n, noun) + (f" ({detail})" if detail else "")
     variants = merge_jobs([j["variant"] for j in jobs], [v for r in transient for v in r.get("jobs") or [r["variant"]]])
     exp = sum(j["experimental"] for j in jobs)
-    entry = {"variant": f"{len(variants)} job{'s' if len(variants) != 1 else ''}", "rule": "rerun", "fix_in": "CI (rerun)",
-             "error": ", ".join(f"{n} {k}" for k, n in counts.most_common()),
+    entry = {"variant": counted(len(variants), "job"), "rule": "rerun", "fix_in": "CI (rerun)",
+             "error": ", ".join(what(k, n) for k, n in counts.most_common()),
              "confidence": "high", "jobs": variants,
-             "note": "These jobs failed for reasons unrelated to the packages. Use \"Rebuild failed\" on the "
-                     "CI page (opam-repository maintainers can do it)."
-                     + (f" {exp} of them are on experimental platforms." if exp else "")}
+             "note": "These jobs failed because of the CI, not the packages. An opam-repository maintainer can "
+                     "rerun them with \"Rebuild failed\" on the CI page."
+                     + ((" One of them is on an experimental platform." if exp == 1 else
+                         f" {exp} of them are on experimental platforms.") if exp else "")}
     return [r for r in results if r.get("rule") != "transient"] + [entry]
 
 
@@ -554,7 +578,7 @@ def relaxed_available_rules(data, sha, base, cache_dir, pr_packages):
                         for j in failing})
         out.append({"variant": f"{pkg} [available changed by this PR]", "failing": pkg, "fix_in": "this PR",
                     "rule": "pr-relaxed-available",
-                    "error": f"this PR changes `available` of {pkg} from `{old}` to "
+                    "error": f"This PR changes `available` of {pkg} from `{old}` to "
                              f"`{new or '(removed)'}`; {pkg} now fails on {', '.join(plats)}",
                     "old": f"available: {new}" if new else None,
                     "new": f"available: {old}   (restore it, or narrow it to the platforms that build)",
@@ -712,7 +736,7 @@ def lint_rules(data, src, sha=None, cache_dir=".opam-ci-cache"):
                     r.update(note="This package has `depexts` but is not a conf package: move them into a conf-* "
                                   "package, or ask the maintainers to accept it (they often do).", confidence="medium")
             else:
-                r["note"] = "No rule for this lint message."
+                r["note"] = "The tool has no advice for this lint message."
             if baseline and (name, text) in baseline[1]:
                 prev = (r.get("note") or "").rstrip(".")
                 r["note"] = ((prev + ". " if prev else "") + f"Already reported in the CI of #{baseline[0]} "
@@ -764,7 +788,7 @@ def skipped_rules(data, src, cache_dir, pr_packages, bounds=None):
             continue
         firsts = {c.split(" -> ")[1] for c in chains if " -> " in c}
         r = {"variant": f"{t} [all build jobs skipped]", "failing": t, "fix_in": "this PR", "rule": "uninstallable",
-             "error": "not installable on any tested platform; solver: " + "; ".join(sorted(set(chains))[:3])}
+             "error": "Not installable on any tested platform. Solver: " + "; ".join(sorted(set(chains))[:3])}
         added = (bounds or {}).get(t) or {}
         through = {f.split(" ")[0] for f in firsts}
         if added and through and through <= set(added) and not unknown:

@@ -47,9 +47,9 @@ from .md import (  # noqa: F401
 LLM_MODEL = "claude-opus-5-5"
 
 
-LLM_UNEXPLAINED = ("no rule matched", "No rule recognises the earlier build error.",
+LLM_UNEXPLAINED = ("Unrecognised error.", "The tool does not recognise the earlier build error.",
                    "The identifier has no module path, so the tool cannot tell which package it comes from.",
-                   "The identifier was not found in the history of any candidate package.")
+                   "The identifier was not found in the history of any dependency the tool checked.")
 
 
 LLM_SYSTEM = """You triage failures reported by opam-repo-ci on pull requests to ocaml/opam-repository.
@@ -198,7 +198,7 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         # The note may carry a "Pre-existing: ..." prefix.
         note = re.sub(r"^Pre-existing: .*?\. ", "", r.get("note") or "")
         return not r.get("rule") and not r.get("new") and not r.get("candidates") and \
-            (note in LLM_UNEXPLAINED or note.startswith("no rule matched"))
+            (note in LLM_UNEXPLAINED or note.startswith("Unrecognised error"))
     todo = [r for r in results if r.get("url") and r.get("variant") in jobs and unexplained(r)]
     seen, done, answers = set(), 0, {}
 
@@ -245,7 +245,7 @@ def apply_llm(results, data, src, cache_dir, pr_packages, limit, model, dry_run)
         verify = verify[:1].upper() + verify[1:]
         r.update(rule="llm", failing=pkg, fix_in=fix_in, confidence=res["confidence"],
                  diagnosis=res["diagnosis"], llm_usage=res.get("llm_usage"), log_error=log_err,
-                 note=pre + (f"{res['diagnosis']} " if r.get("error") else "") + f"To check: {verify}")
+                 note=pre + (f"{res['diagnosis']} " if r.get("error") else "") + f"Suggested next step: {verify}")
         if not r.get("error"):
             r["error"] = res["diagnosis"]
         change = res.get("change_new")

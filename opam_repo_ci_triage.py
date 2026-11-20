@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Everything is in the triage/ package; it is re-exported here for the scripts
 # and tests that import this file.
+from triage.words import *  # noqa: E402,F401,F403
 from triage.net import *  # noqa: E402,F401,F403
 from triage.ci import *  # noqa: E402,F401,F403
 from triage.sources import *  # noqa: E402,F401,F403
