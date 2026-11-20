@@ -339,6 +339,87 @@ class ChecksTest(unittest.TestCase):
                       self.t.applied(text, {"new": '"conf-python-3" {build}   (new line in depends)'}))
 
 
+class WhereTest(unittest.TestCase):
+    """Where a fix goes, as data (`where_kind`), and derived from the words of
+    `fix_in` for results stored before it existed."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import where, suggest
+        self.w, self.s = where, suggest
+
+    def test_legacy(self):
+        kind = self.w.where_kind
+        self.assertEqual(kind({"fix_in": "this PR"}), "pr")
+        self.assertEqual(kind({"fix_in": "lwt.5.9.0 (other package)"}), "other-package")
+        self.assertEqual(self.w.where_pkg({"fix_in": "lwt.5.9.0 (other package)"}), "lwt.5.9.0")
+        self.assertEqual(kind({"fix_in": "the dependency declaring these depexts"}), "other-package")
+        self.assertIsNone(self.w.where_pkg({"fix_in": "the dependency declaring these depexts"}))
+        self.assertEqual(kind({"fix_in": "CI (rerun)"}), "rerun")
+        self.assertEqual(kind({"fix_in": "the CI environment (day10 builder)"}), "ci")
+        self.assertEqual(kind({"fix_in": "x.1 (upstream archive)"}), "upstream")
+        self.assertEqual(kind({"fix_in": "nothing (this PR's bound)"}), "none")
+        self.assertEqual(kind({"fix_in": "the PR, a shared dependency, or the CI"}), "unknown")
+        shared = {"fix_in": "the PR, a shared dependency, or the CI", "failing_dep": "dep.1"}
+        self.assertEqual((kind(shared), self.w.where_pkg(shared)), ("other-package", "dep.1"))
+        self.assertEqual(kind({"fix_in": "somewhere new"}), "unknown")
+
+    def test_structured_wins(self):
+        # The words of fix_in are only read when where_kind is missing.
+        r = {"fix_in": "this PR", "where_kind": "ci"}
+        self.assertEqual(self.w.where_kind(r), "ci")
+        self.assertEqual(self.s.where_text(r), "the CI")
+        self.assertEqual(self.s.classify(dict(r, new="x")), "elsewhere")
+        r = {"fix_in": "the maintainers of y (new wording)", "where_kind": "other-package", "where_pkg": "y.1"}
+        self.assertEqual(self.s.where_text(r), "y.1 (another package)")
+        self.assertEqual(self.s.where_text({"where_kind": "other-package", "rule": "missing-system-package"}),
+                         "the dependency that declares these depexts (another package)")
+
+
+class LintTest(unittest.TestCase):
+    """The messages of a failed lint job: findings of this PR, or a CI error."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import context
+        self.c = context
+
+    def rules(self, *messages):
+        data = {"jobs": [{"variant": "(lint)", "kind": "lint", "status": "failed", "target": None,
+                          "url": "https://x/(lint)", "messages": list(messages)}]}
+        return self.c.lint_rules(data, None, None, "/nonexistent")
+
+    def test_warning_is_a_finding(self):
+        # opam-ci-check fails the lint job on a warning alone (#30007).
+        [r] = self.rules("Warning in ocaml-r.0.7.0: Dubious use of 'dune subst'. 'dune subst' should always only "
+                         "be called with {dev}")
+        self.assertEqual((r["rule"], r["failing"], r["where_kind"]), ("lint", "ocaml-r.0.7.0", "pr"))
+        self.assertIn("Dubious use", r["error"])
+        self.assertIn("fails on warnings too", r["note"])
+
+    def test_ci_error(self):
+        [r] = self.rules('Command "git" "-C" "/tmp/git-checkout5e08f64" "reset" "--hard" "-q" "7386318" '
+                         'exited with status 128')
+        self.assertEqual((r["rule"], r["where_kind"]), ("lint-ci-error", "rerun"))
+        self.assertIn("git could not check out", r["note"])
+
+    def test_failed_analysis(self):
+        # The analysis job failed: no build job ran (#31172). Its reason is shown, the fix is in the PR,
+        # unless the CI cancelled it.
+        def data(reason, messages=()):
+            return {"jobs": [{"variant": "(analysis)", "kind": "analysis", "status": "failed", "reason": reason,
+                              "category": "analysis", "url": "https://x/(analysis)", "experimental": False,
+                              "messages": list(messages), "target": None}]}
+        [r] = self.c.analysis_rules(data("Failed to parse packages/x/x.1/opam: unexpected token"), "/nonexistent")
+        self.assertEqual((r["rule"], r["where_kind"]), ("analysis", "pr"))
+        self.assertIn("unexpected token", r["error"])
+        self.assertIn("no build job ran", r["note"])
+        [r] = self.c.analysis_rules(data("Cancelled"), "/nonexistent")
+        self.assertEqual(r["where_kind"], "rerun")
+        [r] = self.c.analysis_rules(data(None, ["Error: x.1 changes files outside packages/"]), "/nonexistent")
+        self.assertIn("outside packages/", r["error"])
+
+
 def job(variant, category="build", reason="The compilation of x failed", experimental=False):
     """A synthetic CI job, as parse_commit_page makes it."""
     sys.path.insert(0, os.path.join(HERE, ".."))
@@ -361,6 +442,14 @@ class RulesTest(unittest.TestCase):
         sys.path.insert(0, os.path.join(HERE, ".."))
         import opam_repo_ci_triage as t
         self.t = t
+
+    def test_rerun_experimental(self):
+        # An entry listing only experimental jobs to rerun says so (it does not hold the PR back).
+        exp = job("macos-homebrew,4.14,x.1", "cancelled", "Cancelled", experimental=True)
+        [r] = self.t.rerun_rules({"jobs": [exp]}, [])
+        self.assertEqual((r["where_kind"], r["experimental"]), ("rerun", True))
+        [r] = self.t.rerun_rules({"jobs": [exp, job("compilers,4.14,x.1", "network", "curl failed")]}, [])
+        self.assertFalse(r["experimental"])
 
     def test_unanalysed_order(self):
         # The PR's own failures are analysed before those of its reverse
@@ -498,6 +587,19 @@ class RulesTest(unittest.TestCase):
         self.assertGreater(json.loads(out.stdout)["unanalysed"], 0)
 
 
+def check_where(test, sugg):
+    """Every suggestion says where its fix goes (`where_kind`), and the same
+    place is derived from its `fix_in` alone, as for results stored before
+    `where_kind` existed."""
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    from triage import where
+    for s in sugg:
+        test.assertIn(s.get("where_kind"), where.WHERE_KINDS, s)
+        old = {k: v for k, v in s.items() if k not in ("where_kind", "where_pkg")}
+        test.assertEqual((where.where_kind(old), where.where_pkg(old)),
+                         (s["where_kind"], s.get("where_pkg")), (s.get("rule"), s.get("fix_in")))
+
+
 def make_test(case):
     def test(self):
         if not os.path.isdir(os.path.join(FIXTURES, case)):
@@ -506,6 +608,7 @@ def make_test(case):
         self.assertEqual(out.returncode, 0, out.stderr[-1000:])
         self.assertIn("offline cache misses: 0", out.stderr, out.stderr[-1500:])
         sugg = json.loads(out.stdout)["suggestions"]
+        check_where(self, sugg)
         for exp in CASES[case][2]:
             if "not" in exp:
                 bad = [s for s in sugg if matches(s, exp["not"])]
@@ -1323,6 +1426,42 @@ class BoundedOutTest(unittest.TestCase):
             b = self.c.pr_added_bounds("base", "sha", "/nonexistent")
         self.assertEqual(sorted(b["kinetic-client.0.0.9"]), ["cmdliner", "ocaml"])   # not fmt: no upper bound
 
+    def added(self, patch):
+        with unittest.mock.patch.object(self.c, "gh_api", lambda *a, **k: self.compare(patch)):
+            return sorted(self.c.pr_added_bounds("base", "sha", "/nonexistent").get("kinetic-client.0.0.9") or {})
+
+    def test_only_tightened_depends(self):
+        # Only a `depends` line whose upper bound is added or lowered: not a changed lower bound, a
+        # loosened bound, nor `conflicts` or `depopts`.
+        self.assertEqual(self.added("""@@ -10,7 +10,7 @@ depends: [
+-  "ocaml" {>= "4.02.0" & < "5.0"}
++  "ocaml" {>= "4.08.0" & < "5.0"}
+-  "lwt" {< "5.0"}
++  "lwt" {< "6.0"}
+-  "fmt" {< "0.10"}
++  "fmt" {< "0.9.1"}
+ ]
+ conflicts: [
+-  "base-domains"
++  "base-domains" {< "0.2"}
+ ]
+ depopts: [
++  "zarith" {< "1.0"}
+ ]
+"""), ["fmt"])
+        # The field comes from the hunk header when the hunk starts inside it.
+        self.assertEqual(self.added("""@@ -20,3 +20,3 @@ conflicts: [
+-  "base-domains"
++  "base-domains" {< "0.2"}
+"""), [])
+
+    def test_unsatisfiable_bound(self):
+        # A typo such as `{>= "3.0" & < "2.0"}` excludes every version: a mistake in the PR, not intended.
+        [r] = self.run_rule({"kinetic-client.0.0.9": {"ocaml": '"ocaml" {>= "4.07" & < "4.06"}'}})
+        self.assertEqual(r["rule"], "uninstallable")
+        self.assertEqual(r["where_kind"], "pr")
+        self.assertIn("no version of ocaml satisfies it", r["note"])
+
     def run_rule(self, bounds):
         jobs = [{"target": "kinetic-client.0.0.9", "kind": "build", "category": "not-available",
                  "variant": f"compilers,{v},kinetic-client.0.0.9", "url": "https://x/" + v}
@@ -1373,9 +1512,14 @@ class PageTest(unittest.TestCase):
         self.assertFalse(self.r.seems_ready(self.pr([self.day10, self.revdep])))
         self.assertTrue(self.r.seems_ready(self.pr([self.day10, dict(self.revdep, preexisting="on master")])))
         self.assertTrue(self.r.seems_ready(self.pr([dict(self.revdep, also_failing_in=[2, 3])])))
+        # ... but not against evidence that it is this PR's (stored before mark_shared_failures skipped them).
+        new = {"class": "fix", "rule": "health-check-new", "fix_in": "this PR", "failing": "y.1", "variant": "v"}
+        self.assertFalse(self.r.seems_ready(self.pr([dict(new, also_failing_in=[2, 3, 4])])))
+        self.assertFalse(self.r.seems_ready(self.pr([dict(self.lint, also_failing_in=[2, 3, 4])])))
         self.assertTrue(self.r.seems_ready(self.pr([dict(self.lint, experimental=True)])))
-        self.assertTrue(self.r.seems_ready(self.pr([{"class": "elsewhere", "rule": "lint-ci-error",
-                                                      "fix_in": "CI (rerun)", "variant": "(lint)"}])))
+        # A lint job that failed before linting did not check anything: not ready, to rerun.
+        self.assertFalse(self.r.seems_ready(self.pr([{"class": "elsewhere", "rule": "lint-ci-error",
+                                                       "fix_in": "CI (rerun)", "variant": "(lint)"}])))
         self.assertFalse(self.r.seems_ready(self.pr([self.lint])))
         # Unexplained failures (only skipped jobs), CI not finished, drafts, labels.
         self.assertFalse(self.r.seems_ready(self.pr([])))
@@ -1417,18 +1561,41 @@ class PageTest(unittest.TestCase):
         import triage_open_prs as T
         rd = "compilers,5.4,x.1,revdeps,{}"
 
-        def entry(n, failing, *suggestions):
-            return {"number": n, "jobs": {"failing_revdeps": {r: [] for r in failing}},
+        def entry(n, failing, *suggestions, target="x.1", category="build"):
+            # The failing reverse dependencies of a PR testing `target`, as jobs_overview stores them.
+            return {"number": n,
+                    "jobs": {"failing_revdeps": {r: [{"variant": f"compilers,5.4,{target},revdeps,{r}",
+                                                      "category": category, "target": target}]
+                                                 for r in failing}},
                     "result": {"suggestions": [{"variant": "v", "jobs": js} for js in suggestions]}}
         prs = {"1": entry(1, ["a.1", "b.1", "c.1", "d.1"],
                           [rd.format("a.1"), rd.format("b.1"), rd.format("c.1")],   # each in one other PR
                           [rd.format("d.1")],                                         # in 3 other PRs
                           [rd.format("d.1"), "compilers,5.4,x.1"],                    # and a non-revdep job
                           [rd.format("a.1"), rd.format("d.1")]),
-               "2": entry(2, ["a.1", "d.1"]), "3": entry(3, ["b.1", "d.1"]), "4": entry(4, ["c.1", "d.1"])}
+               "2": entry(2, ["a.1", "d.1"], target="y.1"), "3": entry(3, ["b.1", "d.1"], target="z.2"),
+               "4": entry(4, ["c.1", "d.1"], target="w.1")}
         T.mark_shared_failures(prs)
         got = [s.get("also_failing_in") for s in prs["1"]["result"]["suggestions"]]
         self.assertEqual(got, [None, [2, 3, 4], None, None])
+
+        # Other releases of the same package do not vouch for each other (two lwt releases break the
+        # same reverse dependencies), nor do other PRs where the reverse dependency fails another way.
+        def shared(*others, suggestion=None):
+            prs = {"1": entry(1, ["d.1"], [rd.format("d.1")])}
+            prs["1"]["result"]["suggestions"] = [dict(suggestion or {}, variant="v", jobs=[rd.format("d.1")])]
+            for k, (target, category) in enumerate(others, 2):
+                prs[str(k)] = entry(k, ["d.1"], target=target, category=category)
+            T.mark_shared_failures(prs)
+            return prs["1"]["result"]["suggestions"][0].get("also_failing_in")
+        self.assertEqual(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build")), [2, 3, 4])
+        self.assertIsNone(shared(("x.2", "build"), ("x.3", "build"), ("w.1", "build")))
+        self.assertIsNone(shared(("y.1", "dependency"), ("z.1", "build"), ("w.1", "build")))
+        # Never on a failure the evidence puts on this PR: it builds on master.
+        self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
+                                 suggestion={"rule": "health-check-new", "fix_in": "this PR"}))
+        self.assertIsNone(shared(("y.1", "build"), ("z.1", "build"), ("w.1", "build"),
+                                 suggestion={"rule": "library-api", "fix_in": "this PR", "where_kind": "pr"}))
 
     def test_stale_labels(self):
         sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -1489,6 +1656,83 @@ class PageTest(unittest.TestCase):
         self.assertEqual(v(self.pr([], result=None)), "error")
         # A draft is never ready: then its CI-only failures say so.
         self.assertEqual(v(self.pr([self.day10], draft=True)), "ci")
+
+    def test_ci_only_is_an_allow_list(self):
+        # "CI only" needs every failure to come from the CI; anything else
+        # not this PR's change nor another package's needs a look.
+        v = self.r.verdict
+        draft = {"draft": True}           # never ready: the verdicts below are not "ready"
+        self.assertEqual(v(self.pr([self.day10], **draft)), "ci")
+        # No suggestion at all, though jobs failed (a failed analysis job, stored before its rule).
+        empty = self.pr([], jobs={"total": 2, "failed": {"analysis": 1}})
+        self.assertEqual(v(empty), "other")
+        self.assertIn("no explanation for the failed jobs (1 analysis failed)", self.r.headline(empty))
+        self.assertIn("No explanation for the failed jobs", self.r.render_pr(empty))
+        unknown = {"class": "explanation", "rule": "unrecognised", "fix_in": "unknown", "failing": "x.1",
+                   "variant": "1 job"}
+        self.assertEqual(v(self.pr([self.day10, unknown], **draft)), "other")
+        self.assertEqual(v(self.pr([dict(unknown, rule="rule-error")], **draft)), "other")
+        systemic = {"class": "explanation", "rule": "platform-matrix-systemic", "variant": "6 packages [p]",
+                    "fix_in": "the PR, a shared dependency, or the CI"}
+        self.assertEqual(v(self.pr([systemic], **draft)), "other")
+        # ... unless every package fails through one dependency: the fix goes there.
+        self.assertEqual(v(self.pr([dict(systemic, failing_dep="dep.1")])), "blocked")
+        own_sources = {"class": "elsewhere", "rule": "sources", "failing": "x.1", "fix_in": "x.1 (upstream archive)",
+                       "variant": "v"}
+        self.assertEqual(v(self.pr([own_sources], **draft)), "other")
+        llm_upstream = {"class": "elsewhere", "rule": "llm", "failing": "x.1", "variant": "v",
+                        "fix_in": "upstream (the package's source)"}
+        self.assertEqual(v(self.pr([self.day10, llm_upstream], **draft)), "other")
+        # Failures beyond --max were not analysed: they may be anything.
+        unanalysed = self.pr([self.day10], **draft)
+        unanalysed["result"]["unanalysed"] = 2
+        self.assertEqual(v(unanalysed), "other")
+
+    def test_needs_a_rerun(self):
+        # Jobs that failed because of the CI were not tested: such a PR is not ready, even when nothing
+        # else points at it.
+        v = self.r.verdict
+        rerun = {"class": "elsewhere", "rule": "rerun", "fix_in": "CI (rerun)", "variant": "7 jobs",
+                 "error": "4 cancelled, 3 network errors (curl failed)"}
+        for sugg in ([rerun], [self.day10, rerun], [dict(self.revdep, preexisting="on master"), rerun]):
+            pr = self.pr(sugg)
+            self.assertFalse(self.r.seems_ready(pr))
+            self.assertEqual(v(pr), "rerun")
+        self.assertEqual(self.r.headline(self.pr([self.day10, rerun]), as_html=False),
+                         "Jobs to rerun (4 cancelled, 3 network errors (curl failed))")
+        lint_ci = {"class": "elsewhere", "rule": "lint-ci-error", "fix_in": "CI (rerun)", "variant": "(lint)"}
+        self.assertEqual(v(self.pr([lint_ci])), "rerun")
+        # Reruns of experimental jobs only do not hold a PR back.
+        self.assertEqual(v(self.pr([dict(rerun, experimental=True)])), "ready")
+        # Anything else of the PR comes first.
+        self.assertEqual(v(self.pr([self.lint, rerun])), "change")
+        self.assertEqual(v(self.pr([self.revdep, rerun])), "blocked")
+        self.assertEqual(v(self.pr([dict(self.lint, new=None, **{"class": "explanation"}), rerun])), "other")
+        page = self.r.render({"prs": [self.pr([rerun])], "generated": "2026-11-20T10:00:00+00:00"})
+        self.assertIn('data-f="rerun"', page)
+        self.assertIn('.v-rerun{', page)
+        self.assertNotIn('<section id="ready">', page)
+        self.assertIn("Needs a rerun", self.r.help_section({}))
+
+    def test_bounded_out(self):
+        # A checked bound (where_kind set by the rule) is the point of the change; one stored before the
+        # check (no where_kind) keeps the PR out of the ready list.
+        b = {"class": "elsewhere", "rule": "bounded-out", "fix_in": "nothing (this PR's bound)", "failing": "x.1",
+             "variant": "x.1 [all build jobs skipped]"}
+        self.assertTrue(self.r.seems_ready(self.pr([dict(b, where_kind="none")])))
+        self.assertFalse(self.r.seems_ready(self.pr([b])))
+        self.assertEqual(self.r.verdict(self.pr([b])), "other")
+
+    def test_unknown_is_an_explanation(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage import suggest
+        self.assertEqual(suggest.classify({"rule": "unrecognised", "fix_in": "unknown"}), "explanation")
+        self.assertEqual(suggest.classify({"rule": "platform-matrix-systemic",
+                                           "fix_in": "the PR, a shared dependency, or the CI"}), "explanation")
+        self.assertEqual(suggest.classify({"rule": "platform-matrix-systemic", "failing_dep": "d.1",
+                                           "fix_in": "the PR, a shared dependency, or the CI"}), "elsewhere")
+        self.assertEqual(suggest.classify({"rule": "builder-specific-systemic",
+                                           "fix_in": "the CI environment (day10 builder)"}), "elsewhere")
 
     def test_verdict_counts_add_up(self):
         prs = [self.pr([self.day10], number=1), self.pr([self.lint, self.revdep], number=2),
@@ -1551,6 +1795,18 @@ class PageTest(unittest.TestCase):
         h = self.r.headline(pr, as_html=False)
         self.assertNotIn("the dependency declaring", h)
         self.assertIn("System package not found (p.1)", h)
+
+    def test_where_kind(self):
+        # The verdict, the headline and the shared-failures table follow
+        # where_kind and where_pkg, whatever the words of fix_in.
+        other = {"class": "elsewhere", "rule": "library-api", "failing": "y.1", "variant": "v",
+                 "fix_in": "the y maintainers", "where_kind": "other-package", "where_pkg": "y.1"}
+        self.assertEqual(self.r.verdict(self.pr([self.day10, other])), "blocked")
+        self.assertEqual(self.r.headline(self.pr([self.day10, other]), as_html=False), "needs a fix in y.1")
+        not_other = dict(self.revdep, where_kind="pr")
+        self.assertNotEqual(self.r.verdict(self.pr([self.day10, not_other])), "blocked")
+        table = self.r.chronic([self.pr([other], number=n) for n in (1, 2)])
+        self.assertIn("<b>y.1</b>", table)
 
     def test_skipped_jobs(self):
         pr = self.pr([dict(self.lint, rule="uninstallable", new=None, **{"class": "explanation"})],

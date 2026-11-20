@@ -28,7 +28,7 @@ the package for the scripts and tests.
 
 | Command | What it does |
 |---|---|
-| `summary` | One record per CI job: status, category (build, build-or-test, dependency, network, cancelled, solver, ignored, not-available, lint), job kind, platform; reverse-dependency failures grouped by package. |
+| `summary` | One record per CI job: status, category (build, build-or-test, dependency, network, cancelled, solver, ignored, not-available, lint, analysis), job kind, platform; reverse-dependency failures grouped by package. |
 | `logs` | For failed jobs: the first `#=== ERROR while …` block, solver output, the final error, the builder (main or day10) and the master commit the PR was merged onto. |
 | `compare` | Classifies failing reverse dependencies against the CI run of the PR that published the previous version of the package: NEW, pre-existing, builder-specific, no-baseline. |
 | `suggest` | Proposes fixes, with the evidence they are based on (see below). Fixes to the PR come first, then workarounds (changes that skip platforms or tests), failures whose fix goes elsewhere (another package, upstream, the CI), and other failures without a change. |
@@ -62,11 +62,15 @@ Common options:
 
 ### suggest
 
-Each suggestion in the `--json` output has machine fields (`rule`, `variant`, `fix_in`, `jobs`) and fields
-for people: `title` (the rule in words), `job` (the CI job in words, e.g. "frama-clang.0.0.21~beta on
-archlinux x86_64, OCaml 5.5 (day10 builder)") and `where` (where the fix goes: "this PR", "pkg (another
-package)", "upstream", "the CI", "rerun" or "nothing to fix"; absent when unknown). Failures that no rule
-recognises are grouped in one "Unexplained failures" entry listing their jobs.
+Each suggestion in the `--json` output has machine fields (`rule`, `variant`, `fix_in`, `jobs`, and
+`where_kind`: where the fix goes, one of `pr`, `other-package`, `upstream`, `ci`, `rerun`, `none` or
+`unknown`, with `where_pkg` naming the other package when known) and fields for people: `title` (the rule
+in words), `job` (the CI job in words, e.g. "frama-clang.0.0.21~beta on archlinux x86_64, OCaml 5.5 (day10
+builder)") and `where` (where the fix goes: "this PR", "pkg (another package)", "upstream", "the CI",
+"rerun" or "nothing to fix"; absent when unknown). The class of a suggestion, the page's verdicts and
+groups follow `where_kind`; `fix_in` is the same place in words (results stored without `where_kind` get it
+from `fix_in`, in `triage/where.py`). Failures that no rule recognises are grouped in one "Unexplained
+failures" entry listing their jobs.
 
 | Failure | Suggestion | Confidence |
 |---|---|---|
@@ -84,7 +88,9 @@ recognises are grouped in one "Unexplained failures" entry listing their jobs.
 | The PR removes or relaxes the `available` filter of an existing version, and that version (or its reverse dependencies) now fails on platforms the old filter excluded and the new one allows (filters on `os`, `arch`, `os-distribution` and `os-family` are evaluated; medium confidence when another variable decides) | restore the old filter, or narrow it to the platforms that build (read from the PR's diff: one GitHub call) | high/medium |
 | A conf package fails on a platform listed in its `x-ci-accept-failures` | CI should have ignored it: CI-environment problem | high |
 | Lint error already reported in the previous release's CI | noted, with the PR number | high |
-| A PR package installs on no platform | the constraint every solver conflict goes through (e.g. `js_of_ocaml-compiler < 5.0.0`) | high |
+| A PR package installs on no platform | the constraint every solver conflict goes through (e.g. `js_of_ocaml-compiler < 5.0.0`); nothing to fix when every conflict goes through an upper bound the PR adds to (or lowers in) `depends`, unless no version satisfies that bound (`{>= "3.0" & < "2.0"}`: a mistake in the PR) | high |
+| The analysis job fails (no build job runs) | its reason, from the CI page or the end of its log; fix in this PR, or rerun when the CI cancelled it | medium |
+| The lint job fails with only `Warning in pkg.ver: …` | a finding of this PR (opam-ci-check fails the job on warnings too); a lint job failing with neither an error nor a warning is a CI error to rerun | high |
 | Lint warning 62 / 41, known false positives | SPDX id detected from the LICENSE text, `%{_:VAR}%`, or "known waiver" | high |
 | Lint warning 68 (missing `license`) | the license of another version of the package in opam-repository, or detected from the upstream LICENSE file | high |
 | Platform or compiler failure on an old release | alternative: `x-maintained: false` when a newer release exists (lets the next archiving round remove it) | medium |
@@ -125,7 +131,7 @@ Failures that would happen without the PR are marked "Pre-existing" in the note:
 - jobs that also failed in the CI run of the PR that published the previous release of the package (same platform, same job, and the same failure: category and reason, the version left out; 2 GitHub calls and one page per package, skipped when the old run has been purged). When the release's own build fails at the same step but the reason does not show the error (`The compilation of … failed at "dune build …"`), the note says so, and the triage page does not count the failure as happening without the PR;
 - reverse dependencies that opam-health-check also sees failing on master (from ocaml.org's MCP `ocaml_package_build_information`; same version and OCaml version, build only, as opam-health-check builds the newest version of each package without tests; one request per package, cached for a day). A run older than 7 days (a stuck service) is not used, and the tool says so (`note:` on stderr).
 
-Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Broken by this PR (builds on master)": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready).
+Reverse dependencies that opam-health-check sees *building* on master are listed in a separate entry, "Broken by this PR (builds on master)": those are the failures most likely caused by the PR. On the triage page, a suggestion whose jobs are all reverse-dependency jobs, and whose reverse dependencies all fail in the same 3 or more other open PRs, says so, with links (and does not keep the PR from seeming ready). Another PR counts only when its failing job tests another package (two releases of one package do not vouch for each other) and fails the same way (the job's category); a failure the analysis puts on this PR ("Broken by this PR") is never marked.
 
 The matrix rules use only the job list (no fetch); the others reuse the log
 already downloaded, plus at most one small lookup.
@@ -252,9 +258,15 @@ publishes the results on the repository's GitHub Pages site:
    right, 7 plausible, 1 wrong and 2 harmful, all the harmful ones being
    version bounds.
 2. `scripts/render_page.py` turns it into `site/index.html`: one static page,
-   no external resources. Each failing PR gets one verdict (not this PR's
-   fault, change this PR, blocked elsewhere, CI only, needs a look), used by
-   the filters, and a headline saying what the problem is; its details show
+   no external resources. Each failing PR gets one verdict, the first that
+   applies: not this PR's fault (every failure also happens without the PR,
+   comes from the CI's setup, or is on an experimental platform), change this
+   PR, blocked elsewhere, CI only (every failure comes from the CI's setup,
+   but the PR is a draft, labelled, or its CI still runs), needs a rerun
+   (jobs that CI did not test: cancelled, network errors, a CI tool crash;
+   nothing else points at the PR), needs a look (anything else, including
+   failures nothing explains). It is used by
+   the filters, and a headline says what the problem is; its details show
    the suggested changes in full and the other failures folded, one line
    each, near-duplicates merged. Above the list, the PRs that are "Ready as
    far as CI goes";

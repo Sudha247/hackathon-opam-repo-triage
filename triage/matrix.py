@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .where import fix_where, pr_or_other
 from .ci import (  # noqa: F401
     FAILING_CATS,
     NEUTRAL,
@@ -122,7 +123,7 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
         culprit = named.pop() if len(named) == 1 and None not in named else None
         owner = culprit or pkg
         tests_only = kind == "tests" or all(j["category"] == "build-or-test" for j in fails)
-        where = "this PR" if owner in pr_packages else f"{owner} (other package)"
+        where = pr_or_other(owner, owner in pr_packages)
         label = f"{pkg} [{kind}{', revdep of ' + target if revdep else ''}]"
         # A day10 failure whose distribution, architecture and OCaml version
         # pass on the classic builder is a problem of the day10 environment,
@@ -146,7 +147,7 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
             evidence = next((r.get("note") for r in earlier
                              if r.get("failing") == culprit and r.get("rule") == "missing-tool"), None)
             out.append({"variant": label, "failing": culprit or pkg,
-                        "fix_in": "the CI environment (day10 builder)", "rule": "builder-specific",
+                        **fix_where("ci", "the CI environment (day10 builder)"), "rule": "builder-specific",
                         "error": f"Fails only on the day10 builder on {', '.join(dists)}; the main builder "
                                  f"passes there.",
                         "confidence": "high",
@@ -169,7 +170,7 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
             gap = ""
             if op == ">=":
                 gap = f" OCaml versions between {fv[-1]} and {v} were not tested, so the bound may be lower."
-            out.append({"variant": label, "failing": owner, "fix_in": where, "rule": "compiler-matrix",
+            out.append({"variant": label, "failing": owner, **where, "rule": "compiler-matrix",
                         "error": (f"Tests fail on OCaml {', '.join(fv)}, pass on {', '.join(pv)}" if tests_only
                                   else f"Fails on OCaml {', '.join(fv)}, passes on {', '.join(pv)}")
                                  + (f"; the failure is in the dependency {culprit}" if culprit else ""),
@@ -213,7 +214,7 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
         # The CI's own reason is a sentence ("The compilation of …"): here it follows a colon.
         reason = reason.lstrip(": ")
         reason = "t" + reason[1:] if reason.startswith("The ") else reason
-        r = {"variant": label, "failing": owner, "fix_in": where, "rule": "platform-matrix",
+        r = {"variant": label, "failing": owner, **where, "rule": "platform-matrix",
              "_distros": (sorted({job_dims(j)["distro"] or job_dims(j)["os"] for j in fails})
                           if all(j["platform"][:1] == ["day10"] for j in fails) else None),
              "error": ("Tests fail" if tests_only else "Fails") + f" only on {what}"
@@ -262,8 +263,8 @@ def collapse_systemic(out, threshold=5):
                     if culprits else "") + fix
         entry = {
             "variant": f"{len(rs)} packages [{rule}]", "failing": ", ".join(names[:6]) + (" ..." if len(names) > 6 else ""),
-            "fix_in": (rs[0]["fix_in"] if rule == "builder-specific"
-                       else "the PR, a shared dependency, or the CI"),
+            **(fix_where("ci", rs[0]["fix_in"]) if rule == "builder-specific"
+               else fix_where("unknown", "the PR, a shared dependency, or the CI")),
             "rule": rule + "-systemic", "error": error,
             "confidence": "medium",
             "note": note,
@@ -272,5 +273,6 @@ def collapse_systemic(out, threshold=5):
         if rule != "builder-specific" and len(culprits) == 1 and sum(culprits.values()) == len(rs):
             # Every package fails through the same dependency: the fix goes there (shown as such).
             entry["failing_dep"] = next(iter(culprits))
+            entry.update(where_kind="other-package", where_pkg=entry["failing_dep"])
         merged.append(entry)
     return merged

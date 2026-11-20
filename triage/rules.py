@@ -28,6 +28,7 @@ from .ci import (  # noqa: F401
     opam_vcmp,
     split_pkg,
 )
+from .where import fix_where, pr_or_other
 from .sources import (  # noqa: F401
     bisect_presence,
     constraint_edit,
@@ -126,8 +127,8 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
         owner = job["revdep"] or job["target"]
         is_conf = split_pkg(owner)[0].startswith("conf-")
         out.update(rule="missing-system-package", failing=owner,
-                   fix_in=("this PR" if owner in pr_packages else f"{owner} (other package)") if is_conf
-                          else "the dependency declaring these depexts",
+                   **(pr_or_other(owner, owner in pr_packages) if is_conf
+                      else fix_where("other-package", "the dependency declaring these depexts")),
                    error=f"System packages not available on {plat}: {', '.join(names)}",
                    new=f'x-ci-accept-failures: ["{plat}"]   (or correct the depext names for {plat})',
                    confidence="medium",
@@ -154,7 +155,7 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
     fname, fver = info["failing"]
     out["failing"] = f"{fname}.{fver}"
     in_pr = f"{fname}.{fver}" in pr_packages
-    out["fix_in"] = "this PR" if in_pr else f"{fname}.{fver} (other package)"
+    out.update(pr_or_other(f"{fname}.{fver}", in_pr))
     ref = pr_sha if in_pr else (info.get("base") or "master")
     opam_text = src.opam_file(fname, fver, ref) or src.opam_file(fname, fver)
     err = info["error_lines"]
@@ -168,7 +169,8 @@ def suggest_for_job(src, job, text, pr_packages, pr_sha):
     plan = re.search(rf"(?m)^\s*- recompile\s+{re.escape(fname)}\s+{re.escape(fver)}\s+(?!.*pinned).*$", text)
     removed = plan and re.search(rf"(?m)^-> removed\s+{re.escape(fname)}\.{re.escape(fver)}\s*$", text[plan.end():])
     if removed and re.search(r"(?m)^remove:", opam_text or ""):
-        out.update(rule="opam-same-version-reinstall", confidence="high", fix_in="opam (the CI's opam version)",
+        out.update(rule="opam-same-version-reinstall", confidence="high",
+                   **fix_where("ci", "opam (the CI's opam version)"),
                    error=f"{fname}.{fver} is recompiled at the same version, removed, then fails to "
                          f"{'install' if info.get('action') == 'installing' else 'build'}",
                    note=f"opam rebuilds {fname}.{fver} at the same version and also removes it, which needs "
@@ -653,12 +655,12 @@ def log_rules(src, err, fname, opam_text, info, job):
         declared = [pk.strip() for pk, flt in re.findall(r"\[([^\]]*)\]\s*\{([^}]*)\}", depexts_text)
                     if family and family in flt]
         if fname.startswith("conf-") and dims["distro"] and dims["distro"] in accepted:
-            r.update(fix_in="the CI environment",
+            r.update(fix_where("ci", "the CI environment"),
                      note=f"{fname} lists {dims['distro']} in x-ci-accept-failures, so CI should have "
                           f"ignored this failure and the failures of the packages that depend on it.",
                      confidence="high")
         elif fname.startswith("conf-") and declared:
-            r.update(fix_in="the CI environment",
+            r.update(fix_where("ci", "the CI environment"),
                      note=f"{fname} declares a depext for {family} ({', '.join(declared)}), but `{tool}` "
                           f"is missing on {platform}: the CI did not install it. Nothing to change in "
                           f"{fname}.", confidence="high")
@@ -887,8 +889,8 @@ def lower_bounds_rule(src, job, text, r, pr_packages, pr_sha):
         what = (f"{fname}.{fver}" if found == fname else f"{found}.{downgraded[found][1]}, which pulls in "
                 f"{fname}.{fver}{via}")
         return {"variant": job["variant"], "url": job["url"], "kind": job["kind"], "experimental": job["experimental"],
-                "rule": "lower-bound", "failing": target, "fix_in": "this PR" if target in pr_packages
-                else f"{target} (other package)", "dep": found, "old": old, "new": new, "confidence": "medium",
+                "rule": "lower-bound", "failing": target, **pr_or_other(target, target in pr_packages),
+                "dep": found, "old": old, "new": new, "confidence": "medium",
                 "error": f"The lower-bounds job installs {what}, which fails to build",
                 "note": f"{found}.{downgraded[found][0]}, used in the other jobs, builds. A version in between "
                         f"may build too: this is the bound the CI results support."}
@@ -910,7 +912,7 @@ def lower_bounds_rule(src, job, text, r, pr_packages, pr_sha):
     named = [c["dep"] for c in out if norm(c["dep"]) in mentioned
              or any(m.startswith(norm(c["dep"])) for m in mentioned if len(norm(c["dep"])) >= 3)]
     r.update(rule="lower-bound", candidates=out, compared_with="the other jobs", confidence="low",
-             failing=target, fix_in="this PR" if target in pr_packages else f"{target} (other package)",
+             failing=target, **pr_or_other(target, target in pr_packages),
              error=r.get("error") or next((l for l in info["error_lines"] if "Error" in l), "build error"),
              note=("The error names " + ", ".join(named) + ": most likely the lower bound to raise. "
                    if named else "")
@@ -985,7 +987,7 @@ def previous_release_bound(src, job, text, info, pr_packages, pr_sha, cache):
         old, new = constraint_edit(cur, dep, op, v)
         return {"variant": job["variant"], "url": job["url"], "kind": job["kind"],
                 "experimental": job["experimental"], "rule": "previous-release-bound", "failing": pkg,
-                "fix_in": "this PR", "dep": dep, "old": old, "new": new, "confidence": "medium",
+                **fix_where("pr", "this PR"), "dep": dep, "old": old, "new": new, "confidence": "medium",
                 "error": f"{dep}.{have} is installed; the previous release {fname}.{prev} excludes it on master "
                          f"(`{line}`)",
                 "note": f"The previous release has this bound in opam-repository (often added after a breakage) "

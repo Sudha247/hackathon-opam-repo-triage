@@ -22,21 +22,26 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from opam_repo_ci_triage import (  # noqa: E402
-    BASE, RULE_TITLES, compared_text, describe_job, fix_label, render_comment, where_text)
+    BASE, RULE_TITLES, compared_text, describe_job, fix_label, render_comment, where_kind, where_pkg, where_text)
 from opam_repo_ci_triage import title_of as rule_title  # noqa: E402
 REPO_URL = "https://github.com/ocaml/opam-repository"
 # One verdict per PR: the first that applies, in this order (see `verdict`).
 VERDICTS = [("ready", "Not this PR's fault"), ("change", "Change this PR"), ("blocked", "Blocked elsewhere"),
-            ("ci", "CI only"), ("other", "Needs a look"), ("error", "Not analysed")]
+            ("ci", "CI only"), ("rerun", "Needs a rerun"), ("other", "Needs a look"), ("error", "Not analysed")]
 VERDICT_LABEL = dict(VERDICTS)
 VERDICT_HELP = {
     "ready": "CI fails, but none of the failures is this PR's fault: each one also fails without this PR, comes "
-             "from the CI, or is on an experimental platform",
+             "from the CI's setup, or is on an experimental platform; every job ran",
     "change": "A change to this PR's opam files is suggested: a fix, or a workaround that skips platforms or "
               "tests",
-    "blocked": "At least one failure must be fixed in another package",
-    "ci": "Nothing points at this PR or at another package: problems of the CI, network errors, cancelled jobs",
-    "other": "Failures in this PR's packages, without a suggested change",
+    "blocked": "At least one failure must be fixed in another package (failures that also happen without this "
+               "PR do not count)",
+    "ci": "Every failure comes from the CI's setup (the day10 builder, the CI's opam), but the PR is a draft, has "
+          "a label that keeps it out of the ready list, or its CI is still running",
+    "rerun": "Some jobs did not run to the end because of the CI (network errors, cancelled jobs, a crash of the "
+             "CI's tools), and nothing else points at this PR: rerun them before merging",
+    "other": "Failures of this PR's packages without a suggested change, failures whose cause is not known, or "
+             "failures the tool cannot explain",
     "error": "The analysis is pending or failed"}
 CHANGE_CLASSES = ("fix", "workaround")
 # Labels of ocaml/opam-repository: "consider for merge" is a filter, and a PR
@@ -44,15 +49,18 @@ CHANGE_CLASSES = ("fix", "workaround")
 # be stale (the author acted after it was added, see triage_open_prs.py).
 MERGE_LABEL, NO_MERGE_LABEL = "consider for merge", "do not merge"
 NOT_READY_LABELS = {NO_MERGE_LABEL, "needs reporter action"}
-# Rules whose failures come from the CI, not from the PR.
-CI_SIDE = {"builder-specific", "builder-specific-systemic", "accept-failures-ignored", "rerun",
-           "opam-same-version-reinstall", "health-check-preexisting", "lint-ci-error",
-           "bounded-out"}
+# Where the fix goes (`where_kind`, see triage/where.py) for failures that
+# do not come from the PR: the CI's setup (or its opam), nothing to fix (a
+# bound the PR adds on purpose). Not "rerun": CI did not test those jobs.
+CI_SIDE = {"ci", "none"}
+# Rules whose failures also happen on master (opam-health-check).
+PREEXISTING_RULES = {"health-check-preexisting"}
 # Job categories (from `summary`), in words.
 JOB_CATEGORIES = {"build": "build failed", "build-or-test": "build or tests failed",
                   "dependency": "a dependency failed", "solver": "no solution", "network": "network error",
                   "cancelled": "cancelled", "sources": "sources not unpacked", "lint": "lint",
-                  "not-available": "skipped (not installable there)", "ignored": "ignored (accepted failure)"}
+                  "not-available": "skipped (not installable there)", "ignored": "ignored (accepted failure)",
+                  "analysis": "analysis failed"}
 NOISE = {"passed", "network", "cancelled", "not-available", "ignored"}
 MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 
@@ -87,9 +95,10 @@ def plural(n):
     return "" if n == 1 else "s"
 
 
-def other_package(fix_in):
-    fix_in = fix_in or ""
-    return fix_in.endswith("(other package)") or fix_in.startswith("the dependency")
+def other_package(r):
+    """Whether the fix of suggestion `r` goes in another package (see where.py:
+    stored suggestions may predate `where_kind`)."""
+    return where_kind(r) == "other-package"
 
 
 def groups(pr):
@@ -111,9 +120,16 @@ def ci_running(pr):
 def not_this_pr(r):
     """Whether a failure is not the PR's: it happens without the PR (pre-existing,
     or also failing in other open PRs), comes from the CI, or is on an
-    experimental platform, whose failures do not block a PR."""
-    return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or r.get("also_failing_in")
-                or r.get("experimental") or r.get("rule") in CI_SIDE)
+    experimental platform, whose failures do not block a PR. Failing in other
+    PRs does not outweigh evidence that the failure is this PR's (it builds
+    on master, say: see mark_shared_failures)."""
+    shared = r.get("also_failing_in") and where_kind(r) != "pr" and r.get("rule") != "health-check-new"
+    # A bound the PR adds on purpose: only as checked since where_kind exists (a lowered upper bound of
+    # `depends` that some version satisfies), not from a result stored before.
+    unchecked = r.get("rule") == "bounded-out" and "where_kind" not in r
+    return bool((r.get("preexisting") and not r.get("preexisting_unverified")) or shared
+                or r.get("experimental") or (where_kind(r) in CI_SIDE and not unchecked)
+                or r.get("rule") in PREEXISTING_RULES)
 
 
 def seems_ready(pr):
@@ -134,8 +150,10 @@ def seems_ready(pr):
 def verdict(pr):
     """The one verdict of a failing PR (a key of VERDICTS), the first that
     applies: not this PR's fault (`seems_ready`), a change to this PR is
-    suggested, another package must be fixed, nothing points at this PR (CI
-    only), or failures of this PR without a suggestion (needs a look)."""
+    suggested, another package must be fixed, every failure comes from the
+    CI's setup (CI only), jobs to rerun and nothing else of this PR (needs a
+    rerun), or anything else (needs a look): failures of this PR without a
+    suggestion, of unknown cause, or not explained at all."""
     if pr.get("pending") or pr.get("result") is None:
         return "error"
     if seems_ready(pr):
@@ -143,10 +161,16 @@ def verdict(pr):
     sugg = pr["result"].get("suggestions", [])
     if any(r.get("class") in CHANGE_CLASSES for r in sugg):
         return "change"
-    if any(other_package(r.get("fix_in")) for r in sugg):
+    # A failure that is not the PR's (it happens on master too, say) does not block it.
+    if any(other_package(r) and not not_this_pr(r) for r in sugg):
         return "blocked"
-    if all(r.get("fix_in") != "this PR" for r in sugg):
+    if not sugg or pr["result"].get("unanalysed"):
+        return "other"
+    if all(where_kind(r) == "ci" for r in sugg):
         return "ci"
+    reruns = [r for r in sugg if where_kind(r) == "rerun" and not not_this_pr(r)]
+    if reruns and all(where_kind(r) in ("ci", "rerun") or not_this_pr(r) for r in sugg):
+        return "rerun"
     return "other"
 
 
@@ -255,16 +279,14 @@ def packages_text(r, n=2):
 
 
 def blocked_by(sugg):
-    """The other packages where a fix goes, in order. A fix_in that is not a
-    package name ("the dependency declaring these depexts") is left out:
-    the headline then names the finding instead."""
+    """The other packages where a fix goes, in order. Another package the
+    analysis cannot name (the dependency declaring some depexts) is left
+    out: the headline then names the finding instead."""
     out = []
     for r in sugg:
-        f = r.get("fix_in") or ""
-        if f.endswith(" (other package)"):
-            name = f[:-len(" (other package)")]
-            if name not in out:
-                out.append(name)
+        name = where_pkg(r)
+        if name and name not in out:
+            out.append(name)
     return out
 
 
@@ -291,7 +313,8 @@ def headline(pr, v=None, as_html=True):
                  else "the analysis failed")
     sugg = pr["result"].get("suggestions", [])
     if not sugg:
-        return t("no build or test failure to analyse")
+        jobs = unexplained_jobs(pr)
+        return t(f"no explanation for the failed jobs ({jobs})" if jobs else "no build or test failure to analyse")
     g = groups(pr)
     parts = []
     if v == "change":
@@ -317,11 +340,14 @@ def headline(pr, v=None, as_html=True):
     elif v == "blocked":
         # The fix goes in a dependency the analysis cannot name (depexts declared
         # by a dependency, say): the first such finding.
-        r = merge_similar([r for r in sugg if other_package(r.get("fix_in"))] or sugg)[0]
+        r = merge_similar([r for r in sugg if other_package(r)] or sugg)[0]
         pkgs = packages_text(r)
         parts.append(t(title_of(r) + (f" ({pkgs})" if pkgs else "")))
+    elif v == "rerun":
+        r = next(r for r in sugg if where_kind(r) == "rerun" and not not_this_pr(r))
+        parts.append(t(title_of(r) + (f" ({shorten(r['error'], 60)})" if r.get("error") else "")))
     else:
-        pool = [r for r in sugg if r.get("fix_in") == "this PR"] if v == "other" else sugg
+        pool = [r for r in sugg if where_kind(r) == "pr"] if v == "other" else sugg
         pool = [r for r in pool if r.get("rule") != "llm"] or pool or sugg
         r = merge_similar(pool)[0]
         pkgs = packages_text(r)
@@ -363,6 +389,13 @@ def copy_block(pr):
             f'{e(md)}</textarea></details>')
 
 
+def unexplained_jobs(pr):
+    """The failed jobs of a PR in words ("1 analysis failed"), network errors,
+    cancelled and skipped jobs left out; None if there are none."""
+    failed = sorted(((pr.get("jobs") or {}).get("failed") or {}).items(), key=lambda kv: -kv[1])
+    return ", ".join(f"{n} {JOB_CATEGORIES.get(c, c)}" for c, n in failed if c not in NOISE) or None
+
+
 def failed_count(pr):
     failed = ((pr.get("jobs") or {}).get("failed") or {})
     return sum(v for k, v in failed.items() if k not in NOISE), sum(failed.values())
@@ -383,7 +416,7 @@ def job_link(sha, variant):
 
 def where_of(r):
     """Where the fix goes, unless it is this PR (implied, or not meaningful
-    for a failure without a change), in words (from `fix_in`, as stored
+    for a failure without a change), in words (from `where_kind`, as stored
     `where` values may be older wordings)."""
     w = where_text(r)
     return None if w in (None, "", "this PR") else w
@@ -651,7 +684,9 @@ def render_pr(pr, year=None, max_failures=None):
             body.append(f'<p class="note">{e(left)} more failure{"s were" if left != 1 else " was"} not '
                         f'analysed: each page update analyses{per} per PR. See the CI results.</p>')
         if not pr["result"].get("suggestions"):
-            body.append('<p class="note">No build or test failure to analyse.</p>')
+            jobs = unexplained_jobs(pr)
+            body.append(f'<p class="note">No explanation for the failed jobs ({e(jobs)}): see the CI results.</p>'
+                        if jobs else '<p class="note">No build or test failure to analyse.</p>')
         change = merge_similar(g["fix"]) + merge_similar(g["workaround"])
         if change:
             body.append(f'<h4 class="g-change">Change this PR ({len(change)})</h4>')
@@ -697,8 +732,8 @@ def chronic(prs, min_prs=2):
             name, _, version = rd.partition(".")
             revdeps[name][n][version] = jobs
         for r in (pr.get("result") or {}).get("suggestions", []):
-            if (r.get("fix_in") or "").endswith(" (other package)"):
-                blamed[(r.get("fix_in") or "").replace(" (other package)", "")].add(n)
+            if where_pkg(r):
+                blamed[where_pkg(r)].add(n)
     rows = sorted(((rd, d) for rd, d in revdeps.items() if len(d) >= min_prs), key=lambda x: (-len(x[1]), x[0]))
     brows = sorted(((p, s) for p, s in blamed.items() if len(s) >= min_prs), key=lambda x: (-len(x[1]), x[0]))
     out = ['<section id="chronic"><h2>Failures shared by several PRs</h2>']
@@ -734,10 +769,10 @@ def chronic(prs, min_prs=2):
 CSS = """
 :root{--bg:#fbfbfa;--fg:#1d1f21;--mut:#5f6368;--card:#fff;--bd:#dadce0;--code:#f3f3f1;--acc:#0b57d0;
 --add:#116329;--addbg:#dafbe1;--del:#82071e;--delbg:#ffebe9;--err:#b3261e;
---ok:#116329;--chg:#b45309;--blk:#6639ba;--ci:#5f6368;--look:#b3261e;--na:#80868b}
+--ok:#116329;--chg:#b45309;--blk:#6639ba;--ci:#5f6368;--rerun:#0b7285;--look:#b3261e;--na:#80868b}
 @media (prefers-color-scheme:dark){:root{--bg:#121416;--fg:#e3e3e3;--mut:#9aa0a6;--card:#1c1f23;--bd:#3c4043;
 --code:#25292e;--acc:#8ab4f8;--add:#7ee2a8;--addbg:#12361f;--del:#ffa198;--delbg:#3d1416;--err:#f28b82;
---ok:#7ee2a8;--chg:#f2b56b;--blk:#d2a8ff;--ci:#9aa0a6;--look:#f28b82;--na:#6f757b}}
+--ok:#7ee2a8;--chg:#f2b56b;--blk:#d2a8ff;--ci:#9aa0a6;--rerun:#66d9e8;--look:#f28b82;--na:#6f757b}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 main{max-width:1000px;margin:0 auto;padding:16px}
@@ -785,7 +820,7 @@ details.pr[open]>summary::before{content:"\\25BE"}
 .lbl{font-size:.75rem;color:var(--mut);border:1px solid var(--bd);border-radius:4px;padding:0 4px;white-space:nowrap}
 .lbl.merge{color:var(--acc);border-color:var(--acc)}.lbl.nomerge{color:var(--err);border-color:var(--err)}
 .lbl.stale{border-style:dashed}
-.v-ready{--v:var(--ok)}.v-change{--v:var(--chg)}.v-blocked{--v:var(--blk)}.v-ci{--v:var(--ci)}
+.v-ready{--v:var(--ok)}.v-change{--v:var(--chg)}.v-blocked{--v:var(--blk)}.v-ci{--v:var(--ci)}.v-rerun{--v:var(--rerun)}
 .v-other{--v:var(--look)}.v-error{--v:var(--na)}.v-all{--v:transparent}
 details.pr.v-error{border-left-style:dashed}
 @media (max-width:600px){details.pr>summary{grid-template-columns:1em auto 1fr}
@@ -897,6 +932,8 @@ def help_section(data):
                                      'asked for changes.',
                             "change": ' Other failures may also need a fix elsewhere ("also blocked by").',
                             "blocked": " The fix goes in a dependency or a reverse dependency of the PR's packages.",
+                            "rerun": ' Opam-repository maintainers can rerun them with "Rebuild failed" on the CI '
+                                     'page. These PRs are not listed as ready: CI did not test those jobs.',
                             "error": " A PR not analysed yet is covered by the next page update."
                             }.get(k, "") + "</dd>" for k, label in VERDICTS)
     return f'''<section id="help"><h2>How to read this page</h2>
@@ -925,7 +962,8 @@ builder passes on the same system, the problem is in the CI setup, not in the pa
 <dt>Pre-existing</dt><dd>The package fails without this PR too: it also failed in the CI of the previous
 release (the same job, with the same reason), the PR only adds an upper bound to that package, or
 opam-health-check (which builds every package on master, without tests) sees it failing too. "Also fails in
-other open PRs" says the same from the other PRs on this page.</dd>
+other open PRs" says the same from the other PRs on this page: PRs of other packages, where the reverse
+dependency fails the same way.</dd>
 <dt>LLM diagnosis (unchecked)</dt><dd>For failures the tool cannot explain, an LLM (Claude) reads the log and
 suggests a cause. These diagnoses are not checked: in a test on 25 of them, 15 were right, 7 plausible and 3
 wrong. Changes to version bounds or depexts are shown as text to check, and low-confidence diagnoses are
