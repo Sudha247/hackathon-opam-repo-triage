@@ -1,75 +1,51 @@
 
+#31309 [new package] reason-to-mlx (0.1.0)
+  author changed reason-to-mlx.0.1.0: field:x-maintenance-intent
+  miss [platform-matrix] reason-to-mlx.0.1.0: "@runtest" {with-test & os != "win32"}   (or the equivalent filter on the test command)
+
+#31293 [new release] eio-chaos, eio-fs and eio-net (0.1.0)
+  author changed eio-chaos.0.1.0: field:checksum, field:x-commit-hash
+  author changed eio-fs.0.1.0: field:checksum, field:x-commit-hash
+  author changed eio-net.0.1.0: field:checksum, field:x-commit-hash
+  (no suggested change; 4 explanations)
+
+#31292 package elpi-json
+  author changed elpi-json.4.1.1: field:runtest
+  (no suggested change; 1 explanations)
+
+#31286 Package querty.0.1.0
+  author changed querty.0.1.0: dep:ocaml
+  HIT  [compiler-matrix] querty.0.1.0: "ocaml" {>= "5.5"}
+
 #31274 [new release] owl (3 packages) (1.3)
   author changed owl-base.1.3: field:x-maintenance-intent
   author changed owl-top.1.3: field:available, field:x-maintenance-intent
   author changed owl.1.3: field:available, field:conflicts, field:x-maintenance-intent
-  miss [platform-matrix] owl.1.3: in owl.1.3: a depext for cygwin, msys2, or x-ci-accept-failures / available
   HIT  [platform-matrix] owl.1.3: available: os != "win32"   (combined with any existing `available`)
 
 #31273 [new release] elpi, ppx_elpi and elpi-lsp (4.1.1)
   author changed elpi.4.1.1: field:runtest
   HIT  [platform-matrix] elpi.4.1.1: "@runtest" {with-test & os != "win32"}   (or the equivalent filter on the test command)
 
-#31250 [new version] ocaml-emcc (1.0.3)
-  author changed ppx_string_interpolation.1.0.0: field:flags
-  author changed ppx_string_interpolation.1.0.1: field:flags
-  author changed ppx_string_interpolation.1.1.0: field:flags
-  author changed raylib.2.4.0: dep:dune
-  miss [platform-matrix] ocaml-emcc.1.0.0: "@runtest" {with-test & os != "win32"}   (or the equivalent filter on the test command)
+#31269 [new release] rhema (0.2.0)
+  author changed rhema.0.2.0: field:runtest
+  HIT  [platform-matrix] rhema.0.2.0: "@runtest" {with-test & os != "win32"}   (or the equivalent filter on the test command)
+
+#31268 [new release] lwt.6.1.3
+  author changed lwt.6.1.3: dep:ppx_devtools-optcomp, field:checksum
+  (miss, not counted) [health-check-new] jext.0.1.1: conflicts: [ "lwt" {>= "6.1.3"} ]   (added to any existing `conflicts`)
+
+#31258 Packages updated: glfw-ocaml (3.4 and 3.5) and conf-glfw3 (plus its au
+  author changed glfw-ocaml.3.4: field:checksum, field:x-maintenance-intent
+  author changed glfw-ocaml.3.5: field:checksum, field:x-maintenance-intent
+  miss [platform-matrix] glfw-ocaml.3.5: x-ci-accept-failures: ["cygwin" "msys2" "opensuse-16.0"]
 
 #31224 [new release] quickjs (0.6.1)
   author changed quickjs.0.6.1: field:runtest
   HIT  [platform-matrix] quickjs.0.6.1: "@runtest" {with-test & os != "win32"}   (or the equivalent filter on the test command)
 
 #31206 Package eventually.0.2.0
-  author changed base_bigstring.v0.14.0: field:available
-  author changed base_bigstring.v0.15.0: field:available
-  author changed base_bigstring.v0.16.0: field:available
-  author changed caqti-async.1.7.0: field:runtest
-  author changed cohttp-curl-async.6.0.0~alpha1: field:runtest
-  author changed eigen.0.0.6: dep:conf-c++
-  author changed eigen.0.1.0: dep:conf-c++
-  author changed eigen.0.1.1: dep:conf-c++
-  author changed eigen.0.1.2: dep:conf-c++
-  author changed eigen.0.1.3: dep:conf-c++
-  author changed eigen.0.1.4: dep:conf-c++
-  author changed eigen.0.1.5: dep:conf-c++
-  author changed eigen.0.1.6: dep:conf-c++
-  author changed eigen.0.2.0: dep:conf-c++
-  author changed eigen.0.2.1: dep:conf-c++
-  author changed eigen.0.3.0: dep:conf-c++
-  author changed eigen.0.3.1: dep:conf-c++
-  author changed eigen.0.3.2: dep:conf-c++
-  author changed eigen.0.3.3: dep:conf-c++, field:x-maintenance-intent
-  author changed eio.0.9: field:available
-  author changed lambda_streams_async.0.1.2: field:runtest
-  author changed mssql.2.0.3: field:runtest
-  author changed mssql.2.1.0: field:runtest
-  author changed mssql.2.2.0: field:runtest
-  author changed public-suffix.0.0.1: dep:alcotest, dep:dmarc, field:runtest
-  author changed public-suffix.0.0.2: dep:alcotest, dep:dmarc, field:runtest
-  author changed routes.0.7.0: dep:alcotest, dep:mdx, field:runtest
-  author changed sihl-type.0.2.0: dep:alcotest
-  author changed sihl-type.0.2.1: dep:alcotest
-  author changed sihl-type.0.2.2: dep:alcotest
-  author changed sihl.0.0.56: dep:alcotest
-  author changed sihl.0.1.0: dep:alcotest
-  author changed sihl.0.1.1: dep:alcotest
-  author changed sihl.0.1.10: dep:alcotest
-  author changed sihl.0.1.2: dep:alcotest
-  author changed sihl.0.1.3: dep:alcotest
-  author changed sihl.0.1.8: dep:alcotest
-  author changed sihl.0.1.9: dep:alcotest
-  author changed sihl.0.3.0~rc2: dep:sihl-token, dep:sihl-user
-  author changed smtml.0.25.0: dep:dolmen, dep:dolmen_model, dep:dolmen_type
-  author changed smtml.0.26.0: dep:dolmen, dep:dolmen_model, dep:dolmen_type
-  author changed smtml.0.27.0: dep:dolmen, dep:dolmen_model, dep:dolmen_type
-  author changed smtml.0.28.0: dep:dolmen, dep:dolmen_model, dep:dolmen_type
-  author changed smtml.0.29.0: dep:dolmen, dep:dolmen_model, dep:dolmen_type
-  author changed smtml.0.30.0: dep:dolmen, dep:dolmen_model, dep:dolmen_type
-  author changed smtml.0.31.0: dep:dolmen, dep:dolmen_model, dep:dolmen_type
-  author changed topojsone.0.1.0: dep:ocaml
-  author changed uunf.18.0.0: dep:debian-13, field:x-ci-accept-failures, field:x-maintenance-intent
+  author changed eventually.0.2.0: dep:dune, field:checksum, field:description
   miss [platform-matrix] eventually.0.2.0: "@runtest" {with-test & os != "win32"}   (or the equivalent filter on the test command)
 
 #31205 graphql-async: disable tests
@@ -79,8 +55,18 @@
   HIT  [lint] graphql-async.0.9.0: license: "MIT"
 
 #31202 routes.0.7.0: disable tests
-  author changed routes.0.7.0: dep:alcotest, dep:mdx, field:runtest
+  author changed routes.0.7.0: dep:alcotest, dep:mdx, dep:ocaml, field:runtest
   (no suggested change; 1 explanations)
+
+#31200 [new release] alcobar (0.5.0)
+  author changed alcobar.0.5.0: field:checksum, field:x-commit-hash
+  (no suggested change; 2 explanations)
+
+#31187 [new release] optint (0.3.1)
+  author changed optint.0.3.1: dep:dune
+  HIT  [dune-lang] optint.0.3.1: "dune" {>= "3.17"}
+  HIT  [lower-bound] optint.0.3.1: 
+  (miss, not counted) [health-check-new] conduit.6.2.3: conflicts: [ "optint" {>= "0.3.1"} ]   (added to any existing `conflicts`)
 
 #31184 [new release] camlid (0.3)
   author changed camlid.0.3: field:runtest
@@ -99,25 +85,14 @@
 
 #31170 [new release] k7 (0.10.0)
   author changed console-eio.0.9.0: dep:matrix
-  (no suggested change; 2 explanations)
+  (no suggested change; 0 explanations)
 
 #31155 [new release] git (4 packages) (3.19.0)
   author changed git-paf.3.19.0: dep:bstr
   HIT  [missing-library] git-paf.3.19.0: "bstr"   (new line in depends)
 
-#31124 [new release] websocket (2 packages) (2.18)
-  author changed websocket-lwt-unix.2.18: dep:lwt, dep:mirage-crypto-rng, dep:ocaml
-  author changed websocket.2.18: dep:ocaml, field:runtest
-  HIT  [library-api] websocket-lwt-unix.2.18: "mirage-crypto-rng" {>= "1.2.0"}
-
-#31110 release utcp 0.0.10 (2026-11-05)
-  author changed utcp.0.0.10: field:version
-  (no suggested change; 1 explanations)
-
-#31107 [new release] lambdapi (4.0.0)
-  author changed lambdapi.4.0.0: dep:alt-ergo, dep:dedukti, dep:dream-httpaf, dep:dream-pure, dep:sedlex, dep:stdlib-shims, field:checksum, field:x-commit-hash
-  HIT  [library-api] lambdapi.4.0.0: "sedlex" {>= "3.3"}
-
-PRs evaluated: 14
-suggested changes to the PR's own files: 15, matching the author's fix: 12 (80%)
-author's changes in packages that failed (dependency/field per package): 31, anticipated: 12 (38%)
+PRs evaluated: 19
+suggested changes to the PR's own files: 17, matching the author's fix: 14 (82%)
+author's changes in packages that failed (dependency/field per package): 26, anticipated: 13 (50%)
+packages that failed and got a new upstream archive (not counted above): 6
+suggestions from today's opam-health-check (not counted above): 2, matching the author's fix: 0

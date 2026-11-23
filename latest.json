@@ -1,11 +1,115 @@
 {
  "totals": {
-  "scored": 15,
-  "hit": 12,
-  "fix_tokens": 31,
-  "fix_covered": 12
+  "scored": 17,
+  "hit": 14,
+  "fix_tokens": 26,
+  "fix_covered": 13,
+  "new_archive": 6,
+  "health_scored": 2,
+  "health_hit": 0
  },
  "prs": [
+  {
+   "pr": 31309,
+   "title": "[new package] reason-to-mlx (0.1.0)",
+   "initial": "289f477bf157d2683a67e24f24802880c54ae542",
+   "final": "f16676258f0a555d8c644b94fdc222fce539b7f3",
+   "actual_fix": {
+    "reason-to-mlx.0.1.0": [
+     "field:x-maintenance-intent"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "reason-to-mlx.0.1.0": [
+     "field:x-maintenance-intent"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "reason-to-mlx.0.1.0",
+     "rule": "platform-matrix",
+     "new": "\"@runtest\" {with-test & os != \"win32\"}   (or the equivalent filter on the test command)",
+     "hit": false,
+     "tokens": [
+      "field:runtest"
+     ]
+    }
+   ],
+   "health_suggestions": [],
+   "explanations": 0
+  },
+  {
+   "pr": 31293,
+   "title": "[new release] eio-chaos, eio-fs and eio-net (0.1.0)",
+   "initial": "0328c53dad961829cec25144e25f8868c5a94f85",
+   "final": "fbab5155d09609f8ccfd04fc831fb0b5b46e67b7",
+   "actual_fix": {
+    "eio-chaos.0.1.0": [
+     "field:checksum",
+     "field:x-commit-hash"
+    ],
+    "eio-fs.0.1.0": [
+     "field:checksum",
+     "field:x-commit-hash"
+    ],
+    "eio-net.0.1.0": [
+     "field:checksum",
+     "field:x-commit-hash"
+    ]
+   },
+   "fix_in_failing_packages": {},
+   "suggestions": [],
+   "health_suggestions": [],
+   "explanations": 4
+  },
+  {
+   "pr": 31292,
+   "title": "package elpi-json",
+   "initial": "dc22031fac16eabd94aa584a2b68f24fd178ceea",
+   "final": "e663b30a34c3b1e1c13b04fc56ce7450c05c2bc4",
+   "actual_fix": {
+    "elpi-json.4.1.1": [
+     "field:runtest"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "elpi-json.4.1.1": [
+     "field:runtest"
+    ]
+   },
+   "suggestions": [],
+   "health_suggestions": [],
+   "explanations": 1
+  },
+  {
+   "pr": 31286,
+   "title": "Package querty.0.1.0",
+   "initial": "8699b0bf7d3fca2fc2a29ded195b01acb5783a33",
+   "final": "f15cc06511dbe495714df6722affc6f0339f1502",
+   "actual_fix": {
+    "querty.0.1.0": [
+     "dep:ocaml"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "querty.0.1.0": [
+     "dep:ocaml"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "querty.0.1.0",
+     "rule": "compiler-matrix",
+     "new": "\"ocaml\" {>= \"5.5\"}",
+     "hit": true,
+     "tokens": [
+      "dep:ocaml"
+     ]
+    }
+   ],
+   "health_suggestions": [],
+   "explanations": 0
+  },
   {
    "pr": 31274,
    "title": "[new release] owl (3 packages) (1.3)",
@@ -40,13 +144,6 @@
     {
      "package": "owl.1.3",
      "rule": "platform-matrix",
-     "new": "in owl.1.3: a depext for cygwin, msys2, or x-ci-accept-failures / available",
-     "hit": false,
-     "tokens": []
-    },
-    {
-     "package": "owl.1.3",
-     "rule": "platform-matrix",
      "new": "available: os != \"win32\"   (combined with any existing `available`)",
      "hit": true,
      "tokens": [
@@ -54,7 +151,8 @@
      ]
     }
    ],
-   "explanations": 1
+   "health_suggestions": [],
+   "explanations": 2
   },
   {
    "pr": 31273,
@@ -82,40 +180,101 @@
      ]
     }
    ],
+   "health_suggestions": [],
    "explanations": 0
   },
   {
-   "pr": 31250,
-   "title": "[new version] ocaml-emcc (1.0.3)",
-   "initial": "bd89efbd861a1d10b1a9bd2138845e744863e327",
-   "final": "319f837d99492237ecbff4d01f65101ebd940ace",
+   "pr": 31269,
+   "title": "[new release] rhema (0.2.0)",
+   "initial": "68c887ea87d0ad8c93f7e569bb6a7520a13d61b2",
+   "final": "91795d9f34ab484fe32135c68c788e51512eb9a0",
    "actual_fix": {
-    "ppx_string_interpolation.1.0.0": [
-     "field:flags"
-    ],
-    "ppx_string_interpolation.1.0.1": [
-     "field:flags"
-    ],
-    "ppx_string_interpolation.1.1.0": [
-     "field:flags"
-    ],
-    "raylib.2.4.0": [
-     "dep:dune"
+    "rhema.0.2.0": [
+     "field:runtest"
     ]
    },
-   "fix_in_failing_packages": {},
+   "fix_in_failing_packages": {
+    "rhema.0.2.0": [
+     "field:runtest"
+    ]
+   },
    "suggestions": [
     {
-     "package": "ocaml-emcc.1.0.0",
+     "package": "rhema.0.2.0",
      "rule": "platform-matrix",
      "new": "\"@runtest\" {with-test & os != \"win32\"}   (or the equivalent filter on the test command)",
-     "hit": false,
+     "hit": true,
      "tokens": [
       "field:runtest"
      ]
     }
    ],
+   "health_suggestions": [],
    "explanations": 0
+  },
+  {
+   "pr": 31268,
+   "title": "[new release] lwt.6.1.3",
+   "initial": "eb1089be5f315d8d5f5d749ad06f42bd92ae5b4b",
+   "final": "4596a50709c0cc1abf8fc8a4c0aec21ca8d7fee5",
+   "actual_fix": {
+    "lwt.6.1.3": [
+     "dep:ppx_devtools-optcomp",
+     "field:checksum"
+    ]
+   },
+   "fix_in_failing_packages": {},
+   "suggestions": [],
+   "health_suggestions": [
+    {
+     "package": "jext.0.1.1",
+     "rule": "health-check-new",
+     "new": "conflicts: [ \"lwt\" {>= \"6.1.3\"} ]   (added to any existing `conflicts`)",
+     "hit": false,
+     "tokens": [
+      "dep:lwt",
+      "field:conflicts"
+     ]
+    }
+   ],
+   "explanations": 7
+  },
+  {
+   "pr": 31258,
+   "title": "Packages updated: glfw-ocaml (3.4 and 3.5) and conf-glfw3 (plus its auxiliary win32 packages).",
+   "initial": "a860a8ab5e4dceafd97705d99210125730709560",
+   "final": "02b50d7ccb00619615f7cb1d2be8b61f86eab5a2",
+   "actual_fix": {
+    "glfw-ocaml.3.4": [
+     "field:checksum",
+     "field:x-maintenance-intent"
+    ],
+    "glfw-ocaml.3.5": [
+     "field:checksum",
+     "field:x-maintenance-intent"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "glfw-ocaml.3.4": [
+     "field:x-maintenance-intent"
+    ],
+    "glfw-ocaml.3.5": [
+     "field:x-maintenance-intent"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "glfw-ocaml.3.5",
+     "rule": "platform-matrix",
+     "new": "x-ci-accept-failures: [\"cygwin\" \"msys2\" \"opensuse-16.0\"]",
+     "hit": false,
+     "tokens": [
+      "field:x-ci-accept-failures"
+     ]
+    }
+   ],
+   "health_suggestions": [],
+   "explanations": 1
   },
   {
    "pr": 31224,
@@ -144,6 +303,7 @@
      ]
     }
    ],
+   "health_suggestions": [],
    "explanations": 0
   },
   {
@@ -152,176 +312,18 @@
    "initial": "9738cca01c16ebc799600fecc413c75bc55690ab",
    "final": "85131769b51c80aa868bb4ce0b1e36272668856e",
    "actual_fix": {
-    "base_bigstring.v0.14.0": [
-     "field:available"
-    ],
-    "base_bigstring.v0.15.0": [
-     "field:available"
-    ],
-    "base_bigstring.v0.16.0": [
-     "field:available"
-    ],
-    "caqti-async.1.7.0": [
-     "field:runtest"
-    ],
-    "cohttp-curl-async.6.0.0~alpha1": [
-     "field:runtest"
-    ],
-    "eigen.0.0.6": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.1.0": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.1.1": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.1.2": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.1.3": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.1.4": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.1.5": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.1.6": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.2.0": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.2.1": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.3.0": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.3.1": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.3.2": [
-     "dep:conf-c++"
-    ],
-    "eigen.0.3.3": [
-     "dep:conf-c++",
-     "field:x-maintenance-intent"
-    ],
-    "eio.0.9": [
-     "field:available"
-    ],
-    "lambda_streams_async.0.1.2": [
-     "field:runtest"
-    ],
-    "mssql.2.0.3": [
-     "field:runtest"
-    ],
-    "mssql.2.1.0": [
-     "field:runtest"
-    ],
-    "mssql.2.2.0": [
-     "field:runtest"
-    ],
-    "public-suffix.0.0.1": [
-     "dep:alcotest",
-     "dep:dmarc",
-     "field:runtest"
-    ],
-    "public-suffix.0.0.2": [
-     "dep:alcotest",
-     "dep:dmarc",
-     "field:runtest"
-    ],
-    "routes.0.7.0": [
-     "dep:alcotest",
-     "dep:mdx",
-     "field:runtest"
-    ],
-    "sihl-type.0.2.0": [
-     "dep:alcotest"
-    ],
-    "sihl-type.0.2.1": [
-     "dep:alcotest"
-    ],
-    "sihl-type.0.2.2": [
-     "dep:alcotest"
-    ],
-    "sihl.0.0.56": [
-     "dep:alcotest"
-    ],
-    "sihl.0.1.0": [
-     "dep:alcotest"
-    ],
-    "sihl.0.1.1": [
-     "dep:alcotest"
-    ],
-    "sihl.0.1.10": [
-     "dep:alcotest"
-    ],
-    "sihl.0.1.2": [
-     "dep:alcotest"
-    ],
-    "sihl.0.1.3": [
-     "dep:alcotest"
-    ],
-    "sihl.0.1.8": [
-     "dep:alcotest"
-    ],
-    "sihl.0.1.9": [
-     "dep:alcotest"
-    ],
-    "sihl.0.3.0~rc2": [
-     "dep:sihl-token",
-     "dep:sihl-user"
-    ],
-    "smtml.0.25.0": [
-     "dep:dolmen",
-     "dep:dolmen_model",
-     "dep:dolmen_type"
-    ],
-    "smtml.0.26.0": [
-     "dep:dolmen",
-     "dep:dolmen_model",
-     "dep:dolmen_type"
-    ],
-    "smtml.0.27.0": [
-     "dep:dolmen",
-     "dep:dolmen_model",
-     "dep:dolmen_type"
-    ],
-    "smtml.0.28.0": [
-     "dep:dolmen",
-     "dep:dolmen_model",
-     "dep:dolmen_type"
-    ],
-    "smtml.0.29.0": [
-     "dep:dolmen",
-     "dep:dolmen_model",
-     "dep:dolmen_type"
-    ],
-    "smtml.0.30.0": [
-     "dep:dolmen",
-     "dep:dolmen_model",
-     "dep:dolmen_type"
-    ],
-    "smtml.0.31.0": [
-     "dep:dolmen",
-     "dep:dolmen_model",
-     "dep:dolmen_type"
-    ],
-    "topojsone.0.1.0": [
-     "dep:ocaml"
-    ],
-    "uunf.18.0.0": [
-     "dep:debian-13",
-     "field:x-ci-accept-failures",
-     "field:x-maintenance-intent"
+    "eventually.0.2.0": [
+     "dep:dune",
+     "field:checksum",
+     "field:description"
     ]
    },
-   "fix_in_failing_packages": {},
+   "fix_in_failing_packages": {
+    "eventually.0.2.0": [
+     "dep:dune",
+     "field:description"
+    ]
+   },
    "suggestions": [
     {
      "package": "eventually.0.2.0",
@@ -333,6 +335,7 @@
      ]
     }
    ],
+   "health_suggestions": [],
    "explanations": 1
   },
   {
@@ -376,7 +379,8 @@
      ]
     }
    ],
-   "explanations": 3
+   "health_suggestions": [],
+   "explanations": 5
   },
   {
    "pr": 31202,
@@ -387,12 +391,79 @@
     "routes.0.7.0": [
      "dep:alcotest",
      "dep:mdx",
+     "dep:ocaml",
      "field:runtest"
     ]
    },
    "fix_in_failing_packages": {},
    "suggestions": [],
+   "health_suggestions": [],
    "explanations": 1
+  },
+  {
+   "pr": 31200,
+   "title": "[new release] alcobar (0.5.0)",
+   "initial": "952c1bf57515980ee939ade07e8a09b3040e161e",
+   "final": "72c42946511ae1cfc0f4fbc47d67681a2a0db89e",
+   "actual_fix": {
+    "alcobar.0.5.0": [
+     "field:checksum",
+     "field:x-commit-hash"
+    ]
+   },
+   "fix_in_failing_packages": {},
+   "suggestions": [],
+   "health_suggestions": [],
+   "explanations": 2
+  },
+  {
+   "pr": 31187,
+   "title": "[new release] optint (0.3.1)",
+   "initial": "c48516b79bf5b91e08877d1211631498fcbe98b6",
+   "final": "83910a8f6a20733de90fcdd822827279971ac3ba",
+   "actual_fix": {
+    "optint.0.3.1": [
+     "dep:dune"
+    ]
+   },
+   "fix_in_failing_packages": {
+    "optint.0.3.1": [
+     "dep:dune"
+    ]
+   },
+   "suggestions": [
+    {
+     "package": "optint.0.3.1",
+     "rule": "dune-lang",
+     "new": "\"dune\" {>= \"3.17\"}",
+     "hit": true,
+     "tokens": [
+      "dep:dune"
+     ]
+    },
+    {
+     "package": "optint.0.3.1",
+     "rule": "lower-bound",
+     "new": "",
+     "hit": true,
+     "tokens": [
+      "dep:dune"
+     ]
+    }
+   ],
+   "health_suggestions": [
+    {
+     "package": "conduit.6.2.3",
+     "rule": "health-check-new",
+     "new": "conflicts: [ \"optint\" {>= \"0.3.1\"} ]   (added to any existing `conflicts`)",
+     "hit": false,
+     "tokens": [
+      "dep:optint",
+      "field:conflicts"
+     ]
+    }
+   ],
+   "explanations": 4
   },
   {
    "pr": 31184,
@@ -420,6 +491,7 @@
      ]
     }
    ],
+   "health_suggestions": [],
    "explanations": 0
   },
   {
@@ -499,6 +571,7 @@
      ]
     }
    ],
+   "health_suggestions": [],
    "explanations": 4
   },
   {
@@ -513,7 +586,8 @@
    },
    "fix_in_failing_packages": {},
    "suggestions": [],
-   "explanations": 2
+   "health_suggestions": [],
+   "explanations": 0
   },
   {
    "pr": 31155,
@@ -541,107 +615,8 @@
      ]
     }
    ],
+   "health_suggestions": [],
    "explanations": 0
-  },
-  {
-   "pr": 31124,
-   "title": "[new release] websocket (2 packages) (2.18)",
-   "initial": "f290556e5d03adbda8dc847188358e06abe16436",
-   "final": "6bc98131d828d2d5d1640e81075a00fed8de4521",
-   "actual_fix": {
-    "websocket-lwt-unix.2.18": [
-     "dep:lwt",
-     "dep:mirage-crypto-rng",
-     "dep:ocaml"
-    ],
-    "websocket.2.18": [
-     "dep:ocaml",
-     "field:runtest"
-    ]
-   },
-   "fix_in_failing_packages": {
-    "websocket-lwt-unix.2.18": [
-     "dep:lwt",
-     "dep:mirage-crypto-rng",
-     "dep:ocaml"
-    ],
-    "websocket.2.18": [
-     "dep:ocaml",
-     "field:runtest"
-    ]
-   },
-   "suggestions": [
-    {
-     "package": "websocket-lwt-unix.2.18",
-     "rule": "library-api",
-     "new": "\"mirage-crypto-rng\" {>= \"1.2.0\"}",
-     "hit": true,
-     "tokens": [
-      "dep:mirage-crypto-rng"
-     ]
-    }
-   ],
-   "explanations": 2
-  },
-  {
-   "pr": 31110,
-   "title": "release utcp 0.0.10 (2026-11-05)",
-   "initial": "901c21591d0ff200a56029ea2e13e0d3ffdb3df4",
-   "final": "fa7d2545b5ac623c4a6bf78423576258ad8fc09a",
-   "actual_fix": {
-    "utcp.0.0.10": [
-     "field:version"
-    ]
-   },
-   "fix_in_failing_packages": {
-    "utcp.0.0.10": [
-     "field:version"
-    ]
-   },
-   "suggestions": [],
-   "explanations": 1
-  },
-  {
-   "pr": 31107,
-   "title": "[new release] lambdapi (4.0.0)",
-   "initial": "5fe799b6cebb0d22cd7b963e1103bd17aa545bae",
-   "final": "f827390a5fdab179c3cf417b9a8f522fa625d8d2",
-   "actual_fix": {
-    "lambdapi.4.0.0": [
-     "dep:alt-ergo",
-     "dep:dedukti",
-     "dep:dream-httpaf",
-     "dep:dream-pure",
-     "dep:sedlex",
-     "dep:stdlib-shims",
-     "field:checksum",
-     "field:x-commit-hash"
-    ]
-   },
-   "fix_in_failing_packages": {
-    "lambdapi.4.0.0": [
-     "dep:alt-ergo",
-     "dep:dedukti",
-     "dep:dream-httpaf",
-     "dep:dream-pure",
-     "dep:sedlex",
-     "dep:stdlib-shims",
-     "field:checksum",
-     "field:x-commit-hash"
-    ]
-   },
-   "suggestions": [
-    {
-     "package": "lambdapi.4.0.0",
-     "rule": "library-api",
-     "new": "\"sedlex\" {>= \"3.3\"}",
-     "hit": true,
-     "tokens": [
-      "dep:sedlex"
-     ]
-    }
-   ],
-   "explanations": 2
   }
  ]
 }

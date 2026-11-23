@@ -1,1 +1,2 @@
 {"date": "2026-11-19", "commit": "41125e90d5abaab570ea8a35ed5c3ea0492e2167", "prs": 14, "errors": 0, "scored": 15, "hit": 12, "fix_tokens": 31, "fix_covered": 12, "precision": 80.0, "recall": 38.70967741935484, "failed": []}
+{"date": "2026-11-23", "commit": "8bebdb3f0f9ef9c1572b9af189b2afee90896e78", "prs": 19, "errors": 0, "scored": 17, "hit": 14, "fix_tokens": 26, "fix_covered": 13, "new_archive": 6, "health_scored": 2, "health_hit": 0, "precision": 82.3529411764706, "recall": 50.0, "failed": []}
