@@ -66,7 +66,7 @@ def exact(line):
     s = re.sub(r'File "[^"]*", line \d+(, characters \d+-\d+)?:?', "", line or "")
     s = re.sub(r"(?:[\w.+-]*/)+[\w.+-]+", "<path>", s)              # paths
     s = re.sub(r"\b[\w.-]+\.(?:ml|mli|c|h|cpp|hpp|cc|rs|dune|opam):\d+(?::\d+)?", "<file>", s)
-    s = re.sub(r"\d+", "N", s)
+    s = re.sub(r"\b\d+\b", "N", s)          # numbers, not the digits of a name (collect2, msys2)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -74,9 +74,10 @@ def masked(line):
     """The group key: also without identifiers and quoted names."""
     s = exact(line)
     s = re.sub(r"[`'\"‘’][^`'\"‘’\s]{1,60}[`'\"‘’]", "'…'", s)              # quoted names, not messages
-    s = re.sub(r"\b[A-Z][\w']*(?:\.[\w']+)+\b", "M.x", s)           # Module.path.ident
-    s = re.sub(r"\b(value|module|constructor|field|type constructor|library|Library|Package|package) [\w.'-]+",
-               r"\1 x", s)
+    s = re.sub(r"\b(?!N(?:\.N)+\b)[A-Z][\w']*(?:\.[\w']+)+\b", "M.x", s)   # Module.path.ident, not N.N
+    # (A library or package name is quoted in the errors, masked above: the word
+    # after "package" in a sentence is not a name.)
+    s = re.sub(r"\b(value|module|constructor|field|type constructor) [\w.'-]+", r"\1 x", s)
     return s
 
 
@@ -103,6 +104,11 @@ def report(items, min_prs, page=None):
     """The digest (GitHub Markdown). Everything in an answer is untrusted (the
     model quotes CI logs and opam files): prose goes through `md_text`, log
     lines and changes are code spans."""
+    # One answer covers the failures that share its error, in several jobs or
+    # packages of a PR, and is repeated on each: counted once per PR.
+    seen = set()
+    items = [(n, r) for n, r in items
+             if not ((k := (n, r.get("failing"), r.get("diagnosis") or r.get("error"))) in seen or seen.add(k))]
     groups = collections.defaultdict(list)
     for n, r in items:
         line = r.get("log_error") or r.get("error") or r.get("diagnosis") or ""

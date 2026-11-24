@@ -340,6 +340,11 @@ def key_error_line(text):
         hit = next((l for l in lines if re.search(rx, l)), None)
         if hit:
             return hit[:300]
+    # No error line (a conf package's check prints nothing), or only test
+    # output ("Passed tests"): opam's line naming the command that failed.
+    m = re.search(r'^\[ERROR\] (The (?:compilation|installation) of \S+ failed at "[^"\n]*")', text, re.M)
+    if m:
+        return m.group(1)[:300]
     return lines[-1][:300] if lines else None
 
 

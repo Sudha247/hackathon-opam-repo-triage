@@ -3842,6 +3842,38 @@ class EscapingTest(unittest.TestCase):
         self.assertIn("[`#123`](https://x.github.io/triage/#pr-123)", md)
         self.assertIn(f"[log]({BASE_URL}", md)
 
+    def test_llm_digest_groups(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+        import llm_digest as D
+        # Numbers, not the digits of names; N.N is not a module path; the word
+        # after "package" is not a name (a name is quoted).
+        self.assertEqual(D.masked('collect2: error: ld returned 1 exit status'),
+                         "collect2: error: ld returned N exit status")
+        self.assertEqual(D.masked('conf-glib-2.1 failed at "pkg-config glib-2.0" on msys2'),
+                         'conf-glib-N.N failed at "pkg-config glib-N.N" on msys2')
+        self.assertEqual(D.masked("no ImageMagick 6 development package is installed"),
+                         "no ImageMagick N development package is installed")
+        self.assertEqual(D.masked("Unbound value Conv.output"), "Unbound value x")
+        # One answer repeated on several jobs or packages of a PR counts once (#29110: 5 times).
+        a = {"rule": "llm", "log_error": "llvm-config: error: missing: /usr/lib/x.a", "diagnosis": "d",
+             "failing": "conf-llvm-static.20", "confidence": "medium"}
+        md = D.report([(29110, a)] * 5 + [(1, dict(a, failing="b.1"))], 2)
+        self.assertTrue(md.startswith("2 LLM answers in 2 PRs (2 medium confidence), in 1 groups"), md[:80])
+
+    def test_key_error_line(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from triage.llm import key_error_line
+        # A check that prints nothing (conf-glib-2 on msys2, #31054), or test output
+        # without an error line (#27694): opam's line naming the command.
+        head = '[ERROR] The compilation of conf-glib-2.1 failed at "pkg-config glib-2.0".\n\n'
+        block = ("#=== ERROR while compiling conf-glib-2.1 ===#\n# exit-code 1\n"
+                 "# output-file ~/x.out\n")
+        self.assertEqual(key_error_line(head + block),
+                         'The compilation of conf-glib-2.1 failed at "pkg-config glib-2.0"')
+        self.assertEqual(key_error_line(head.replace("conf-glib-2.1", "pds.6.55") + block.replace(
+                             "conf-glib-2.1", "pds.6.55") + "### output ###\n# Passed tests\n"),
+                         'The compilation of pds.6.55 failed at "pkg-config glib-2.0"')
+
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--record":
