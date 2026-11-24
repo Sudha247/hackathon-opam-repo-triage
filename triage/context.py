@@ -498,7 +498,7 @@ OS_DISTRIBUTION = {"debian": "debian", "ubuntu": "ubuntu", "fedora": "fedora", "
                    "alpine": "alpine", "archlinux": "arch", "cygwin": "cygwin", "msys2": "msys2",
                    "macos-homebrew": "homebrew", "freebsd": "freebsd"}
 OS_FAMILY = {"debian": "debian", "ubuntu": "debian", "alpine": "alpine", "archlinux": "arch",
-             "cygwin": "windows", "msys2": "windows", "freebsd": "bsd"}
+             "cygwin": "windows", "msys2": "windows", "freebsd": "bsd", "fedora": "fedora"}
 
 
 def platform_vars(job):

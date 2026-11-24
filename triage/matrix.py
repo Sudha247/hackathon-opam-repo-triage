@@ -110,7 +110,8 @@ def matrix_rules(jobs, earlier, match, pr_packages, failing_in_log=None):
     # The failures for which a job's log gave a change: the pass/fail pattern
     # adds only a workaround next to it (liquidsoap 2.4.6, #30906: its tests
     # need base-bytes on OCaml 5, not to be disabled there).
-    from_log = {r.get("_key") for r in earlier if r.get("_key") and (r.get("new") or r.get("candidates"))}
+    from_log = {r.get("_key") for r in earlier
+                if r.get("_key") and (r.get("new") or r.get("candidates") or r.get("advice"))}
     out = []
     for (target, revdep, kind), js in sorted(matrix_groups(jobs, match).items(), key=lambda kv: str(kv[0])):
         pkg = revdep or target

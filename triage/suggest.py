@@ -35,6 +35,7 @@ from .ci import (  # noqa: F401
 )
 from .rules import (  # noqa: F401
     complete_test_output,
+    conf_depext_platforms,
     log_info,
     lower_bounds_rule,
     previous_release_bound,
@@ -130,6 +131,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
             results.append(pb)
         r["_key"] = failure_key(j)
         r["jobs"] = merged[group_key(j)]
+        if "_depexts" in r:
+            conf_depext_platforms(r, {x["variant"]: x for x in data["jobs"]})
         results.append(r)
         if lb:
             lb.update(_key=failure_key(j), jobs=merged[group_key(j)])
@@ -179,6 +182,8 @@ def suggest(sha, data, src, cache_dir, max_logs, match, llm=None):
         r.pop("_keys", None)
         r.pop("_distros", None)
         r.pop("keep", None)
+        r.pop("_depexts", None)
+        r.pop("_check", None)
     if llm and data.get("unfinished") and not llm["dry_run"]:
         # The prompt shows the job's results on the other platforms, which
         # change as jobs finish: each analysis would pay again (the cache key
@@ -359,7 +364,7 @@ def check_changes(results, src, sha, pr_packages):
 # Rules whose entries for several versions of one package are merged.
 MERGE_VERSIONS = {"install-missing-files", "uninstallable", "newer-c-compiler", "system-library-version",
                   "needs-git-checkout", "install-outside-prefix", "test-output-ocaml", "missing-header",
-                  "missing-tool", "missing-library", "missing-pkg-config", "sources"}
+                  "missing-tool", "missing-library", "missing-pkg-config", "sources", "conf-no-depext"}
 
 
 def merge_versions(results):
@@ -442,6 +447,7 @@ RULE_TITLES = {
     "link-error": "Link error", "broken-install": "Incomplete installation in the switch",
     "ocaml-runtime-api": "OCaml runtime function missing", "test-platform": "Fails on one compiler variant",
     "health-check-preexisting": "Also fails on master",
+    "conf-no-depext": "No system package for this platform",
 }
 
 

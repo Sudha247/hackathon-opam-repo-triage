@@ -784,6 +784,97 @@ def c_compiler_rule(text, platform):
     return None
 
 
+def depext_entries(opam_text):
+    """The entries of an opam file's `depexts` field, as (packages, filter)
+    pairs (filter "" when there is none), or None without the field."""
+    m = re.search(r"(?m)^depexts:", opam_text or "")
+    if not m:
+        return None
+    rest = re.split(r"(?m)^[a-z][\w-]*:", opam_text[m.end():], maxsplit=1)[0].strip()
+    rest = rest[1:rest.rfind("]")] if rest.startswith("[") else rest
+    return [(re.findall(r'"([^"]+)"', pkgs), flt or "")
+            for pkgs, flt in re.findall(r'(\[[^\]]*\]|"[^"]*")\s*(?:\{([^}]*)\})?', rest)]
+
+
+def conf_without_depext(fname, opam_text, info, job, platform):
+    """A conf package whose check failed on a platform for which it declares
+    no system package: nothing was installed for the check to find (conf-glib-2
+    on msys2, whose depexts cover Cygwin only, #31054). None when a depext
+    applies there, or when the tool cannot tell (a filter on a variable it does
+    not know for that platform)."""
+    from .context import eval_filter, platform_vars     # context imports this module
+    if not fname.startswith("conf-") or info.get("action") != "compiling":
+        return None
+    m = re.search(r'The compilation of ' + re.escape(fname) + r'\.\S+ failed at "([^"\n]*)"', info.get("_text") or "")
+    entries = depext_entries(opam_text)
+    if not m or entries is None:
+        return None
+    env = platform_vars(job)
+    for _, flt in entries:
+        v = eval_filter(flt, env)
+        if v is not False:
+            return None                     # a depext for this platform (True), or cannot tell (None)
+    # `advice`: a change described in words (the depext to add); `keep`: not
+    # replaced by a workaround from the pattern of passes and failures.
+    r = {"rule": "conf-no-depext", "confidence": "medium", "error": f"{fname} failed at `{m.group(1)}` on {platform}",
+         "advice": f"Add depexts to {fname}", "keep": True, "_depexts": entries, "_check": (fname, m.group(1))}
+    if not entries:
+        r["note"] = (f"{fname} has no depexts at all, so no system package was installed for its check to find. "
+                     f"Add the system packages that provide it, for each platform it supports.")
+        return r
+    distro = job_dims(job)["distro"]
+    r["note"] = (f"{fname} has no depext for {platform}, so no system package was installed for its check to find. "
+                 f"Add the {platform} package that provides it to the depexts of {fname}"
+                 + (f', or list "{distro}" in its `x-ci-accept-failures` if {platform} has no such package.'
+                    if distro else "."))
+    return r
+
+
+def conf_depext_platforms(r, jobs):
+    """Complete a conf-no-depext result `r` with the jobs behind it (`jobs`:
+    variant -> job): the same error on other platforms, where a depext may
+    apply (its check then failed for another reason). Names the platforms
+    without one; the others are said apart."""
+    from .context import eval_filter, platform_vars     # context imports this module
+    entries, (fname, cmd) = r.pop("_depexts"), r.pop("_check")
+    if not entries:
+        r["error"] = f"{fname} failed at `{cmd}`"         # on every platform
+        return
+    without, other, misread = set(), set(), {}
+    for v in r.get("jobs") or [r["variant"]]:
+        j = jobs.get(v)
+        if not j:
+            continue
+        name = job_dims(j)["distro"] or job_dims(j)["os"]
+        env = platform_vars(j)
+        if not all(eval_filter(f, env) is False for _, f in entries):
+            other.add(name)
+            continue
+        without.add(name)
+        # An entry meant for this platform, whose filter does not hold there:
+        # `os-family = "ubuntu"` (conf-rust-llvm, #27642), while opam's
+        # os-family is "debian" on Ubuntu.
+        dist = env.get("os-distribution")
+        if dist and any(f'"{dist}"' in f for _, f in entries):
+            misread[dist] = (f'os-distribution is "{dist}"'
+                             + (f' and its os-family "{env["os-family"]}"' if env.get("os-family") else ""))
+    if not without:
+        return
+    names = sorted(without)
+    one = len(names) == 1
+    r["error"] = f"{fname} failed at `{cmd}` on {', '.join(names)}"
+    r["advice"] = f"Add depexts for {', '.join(names)} to {fname}"
+    r["note"] = (f"{fname} has no depext for {', '.join(names)}, so no system package was installed there for its "
+                 f"check to find. Add the packages that provide it to the depexts of {fname}, or add "
+                 + " ".join(f'"{n}"' for n in names) + " to its `x-ci-accept-failures` if "
+                 + ("that platform has" if one else "these platforms have") + " no such package.")
+    for dist, values in sorted(misread.items()):
+        r["note"] += (f" An entry names {dist}, but its filter does not hold there: on {dist}, opam's {values}.")
+    if other:
+        r["note"] += (f" On {', '.join(sorted(other))} a depext applies (or the tool cannot tell): the check fails "
+                      f"there for another reason.")
+
+
 def log_rules(src, err, fname, opam_text, info, job):
     """Missing dune language version, tool, library or C header."""
     text = "\n".join(err)
@@ -949,7 +1040,7 @@ def log_rules(src, err, fname, opam_text, info, job):
         return {"rule": "missing-header", "error": m.group(0), "confidence": "low",
                 "note": f"A system header is missing on {platform}. Add the depext (or conf-* dependency) that provides "
                         f"{m.group(1)}, or x-ci-accept-failures for the platforms without it."}
-    return None
+    return conf_without_depext(fname, opam_text, info, job, platform)
 
 
 TRIVIAL_DEPS = {"ocaml", "dune", "ocamlfind", "odoc", "ocaml-base-compiler", "ocaml-compiler", "base-unix",

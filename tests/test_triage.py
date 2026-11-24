@@ -394,6 +394,74 @@ class HealthExplainedElsewhereTest(unittest.TestCase):
         self.assertEqual(ids, {id(matrix)})
 
 
+class ConfWithoutDepextTest(unittest.TestCase):
+    """A conf package whose check fails on a platform it has no depext for
+    (#31054: conf-glib-2 on msys2, its depexts cover Cygwin only)."""
+
+    OPAM = ('opam-version: "2.0"\nbuild: [["pkg-config" "glib-2.0"]]\ndepexts: [\n'
+            '  ["libglib2.0-dev"] {os-family = "debian"}\n'
+            '  ["glib2.0"] {os = "win32" & os-distribution = "cygwinports"}\n'
+            '  ["glib2-devel"] {os-distribution = "fedora" & os-version >= "40"}\n]\nflags: conf\n')
+    LOG = '[ERROR] The compilation of conf-glib-2.1 failed at "pkg-config glib-2.0".\n'
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+
+    def rule(self, variant, opam=OPAM, fname="conf-glib-2", log=LOG):
+        from triage.rules import conf_without_depext
+        return conf_without_depext(fname, opam, {"action": "compiling", "_text": log}, job(variant), "here")
+
+    def test_rule(self):
+        r = self.rule("day10,msys2,x86_64,5.4,ocgio.1")
+        self.assertEqual((r["rule"], r["error"]), ("conf-no-depext", "conf-glib-2 failed at `pkg-config glib-2.0` on here"))
+        # A change described in words (on the page, a fix rather than an explanation), kept
+        # next to the workarounds from the pattern of passes and failures.
+        self.assertEqual((r["advice"], r["keep"]), ("Add depexts to conf-glib-2", True))
+        self.assertEqual(r["note"], 'conf-glib-2 has no depext for here, so no system package was installed for its '
+                                    'check to find. Add the here package that provides it to the depexts of '
+                                    'conf-glib-2, or list "msys2" in its `x-ci-accept-failures` if here has no such '
+                                    'package.')
+        # A depext for the platform: another cause. A filter the tool cannot
+        # evaluate there (the Fedora version): no conclusion.
+        self.assertIsNone(self.rule("day10,debian-13,x86_64,5.4,ocgio.1"))
+        self.assertIsNone(self.rule("day10,fedora-43,x86_64,5.4,ocgio.1"))
+        # Not a conf package, another package's failure, no depexts field: nothing.
+        self.assertIsNone(self.rule("day10,msys2,x86_64,5.4,ocgio.1", fname="glib"))
+        self.assertIsNone(self.rule("day10,msys2,x86_64,5.4,ocgio.1", log="[ERROR] The compilation of x.1 failed"))
+        self.assertIsNone(self.rule("day10,msys2,x86_64,5.4,ocgio.1", opam='build: [["true"]]\n'))
+        # Empty depexts (conf-magick-core6, #27798): every platform.
+        r = self.rule("day10,debian-13,x86_64,5.4,ocgio.1", opam="depexts: []\nflags: conf\n")
+        self.assertTrue(r["note"].startswith("conf-glib-2 has no depexts at all"), r["note"])
+
+    def test_platforms_of_the_group(self):
+        # The jobs with the same error on other platforms (#27642): those without
+        # a depext are named, an entry whose filter misses its platform (there,
+        # os-family "ubuntu"; here os "alpine") is pointed out, a platform with a
+        # depext is said apart.
+        from triage.rules import conf_depext_platforms
+        opam = self.OPAM.replace('["glib2.0"]', '["glib-dev"] {os = "alpine"}\n  ["glib2.0"]')
+        vs = ["day10,msys2,x86_64,5.4,a.1", "day10,alpine-3.24,x86_64,5.4,a.1", "day10,debian-13,x86_64,5.4,a.1"]
+        r = dict(self.rule(vs[0], opam=opam), jobs=vs)
+        conf_depext_platforms(r, {v: job(v) for v in vs})
+        self.assertNotIn("_depexts", r)
+        self.assertEqual(r["error"], "conf-glib-2 failed at `pkg-config glib-2.0` on alpine-3.24, msys2")
+        self.assertEqual(r["advice"], "Add depexts for alpine-3.24, msys2 to conf-glib-2")
+        self.assertEqual(r["note"], 'conf-glib-2 has no depext for alpine-3.24, msys2, so no system package was '
+                                    'installed there for its check to find. Add the packages that provide it to the '
+                                    'depexts of conf-glib-2, or add "alpine-3.24" "msys2" to its '
+                                    '`x-ci-accept-failures` if these platforms have no such package. An entry names '
+                                    'alpine, but its filter does not hold there: on alpine, opam\'s os-distribution '
+                                    'is "alpine" and its os-family "alpine". On debian-13 a depext applies (or the '
+                                    'tool cannot tell): the check fails there for another reason.')
+
+    def test_depext_entries(self):
+        from triage.rules import depext_entries
+        self.assertEqual(depext_entries('depexts: [ "libgmp-dev" {os-family = "debian"} "gmp" ]\n'),
+                         [(["libgmp-dev"], 'os-family = "debian"'), (["gmp"], "")])
+        self.assertEqual(depext_entries("depexts: []\n"), [])
+        self.assertIsNone(depext_entries("build: []\n"))
+
+
 class LintTest(unittest.TestCase):
     """The messages of a failed lint job: findings of this PR, or a CI error."""
 
@@ -580,6 +648,9 @@ class RulesTest(unittest.TestCase):
         from_log = {"failing": "x.1", "rule": "missing-library", "new": '"base-bytes" {with-test}',
                     "_key": self.t.failure_key(fails[0])}
         self.assertEqual(self.t.matrix_rules(jobs, [from_log], None, {"x.1"}), [])
+        # A change in words (conf-no-depext): the same.
+        words = dict(from_log, rule="conf-no-depext", new=None, advice="Add depexts for msys2 to x")
+        self.assertEqual(self.t.matrix_rules(jobs, [words], None, {"x.1"}), [])
         # A note without a change: the pattern still gives its suggestion.
         self.assertEqual([r["rule"] for r in self.t.matrix_rules(jobs, [dict(from_log, new=None)], None, {"x.1"})],
                          ["compiler-matrix"])
