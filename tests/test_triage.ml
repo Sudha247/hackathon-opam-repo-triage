@@ -380,6 +380,23 @@ let test_legacy () =
     "shared pkg" (Some "dep.1") (Where.where_pkg shared);
   check_str "new words" "unknown" (kind "somewhere new")
 
+(* An LLM answer has no [where_kind] (suggest removes the rule's), only
+   [fix_in]: [Titles.readable] derives both the kind and the package from it,
+   the package before setting the kind. *)
+let test_readable_from_fix_in () =
+  let r =
+    d [ ("rule", s "llm"); ("fix_in", s "ojs_filetree.0.8.0 (other package)") ]
+  in
+  ignore (Titles.readable [ r ]);
+  Alcotest.(check (option string))
+    "where_kind" (Some "other-package") r.Suggestion.where_kind;
+  Alcotest.(check (option string))
+    "where_pkg" (Some "ojs_filetree.0.8.0")
+    (Suggestion.get r.Suggestion.where_pkg);
+  Alcotest.(check (option string))
+    "where" (Some "ojs_filetree.0.8.0 (another package)")
+    (Suggestion.get r.Suggestion.where)
+
 let test_structured_wins () =
   (* The words of fix_in are only read when where_kind is missing. *)
   let r = d [ ("fix_in", s "this PR"); ("where_kind", s "ci") ] in
@@ -3311,7 +3328,11 @@ let () =
         ] );
       ("SuggestionTest", [ p "round_trip" test_round_trip ]);
       ( "WhereTest",
-        [ p "legacy" test_legacy; p "structured_wins" test_structured_wins ] );
+        [
+          p "legacy" test_legacy;
+          p "structured_wins" test_structured_wins;
+          p "readable_from_fix_in" test_readable_from_fix_in;
+        ] );
       ("HealthExplainedElsewhereTest", [ p "drop" test_drop ]);
       ( "ConfWithoutDepextTest",
         [

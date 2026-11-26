@@ -115,10 +115,12 @@ let readable (results : Suggestion.t list) =
       if Suggestion.nonempty r.rule then r.title <- Some (title_of r);
       if Suggestion.nonempty r.Suggestion.variant then
         r.job <- Some (Ci.describe_job (Suggestion.str r.Suggestion.variant));
-      r.where_kind <- Some (Where.where_kind r);
-      (match Where.where_pkg r with
-      | Some pkg when pkg <> "" -> r.where_pkg <- Set pkg
-      | _ -> r.where_pkg <- Absent);
+      (* Both from the suggestion as it is: once [where_kind] is set,
+         [where_pkg] no longer derives the package from [fix_in] (LLM answers). *)
+      let kind = Where.where_kind r and pkg = Where.where_pkg r in
+      r.where_kind <- Some kind;
+      r.where_pkg <-
+        (match pkg with Some pkg when pkg <> "" -> Set pkg | _ -> Absent);
       r.where <- Suggestion.field_of_option (where_text r);
       (* The note and the error as sentences. *)
       let note = Py.strip (Suggestion.str r.note) in
