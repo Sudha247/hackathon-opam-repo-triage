@@ -328,6 +328,92 @@ let llm_answer_error (out : Json.t) =
             [ ("fix_in", fix_in_enum); ("confidence", confidence_enum) ])
   | _ -> Some "not a JSON object"
 
+module Answer = struct
+  type t = {
+    diagnosis : string field;
+    fix_in : string field;
+    package : string field;
+    change_old : string field;
+    change_new : string field;
+    confidence : string field;
+    verify : string field;
+    extra : (string * Json.t) list;
+    llm_usage : Json.t field;
+  }
+
+  let empty =
+    {
+      diagnosis = Absent;
+      fix_in = Absent;
+      package = Absent;
+      change_old = Absent;
+      change_new = Absent;
+      confidence = Absent;
+      verify = Absent;
+      extra = [];
+      llm_usage = Absent;
+    }
+
+  let of_json (v : Json.t) =
+    let member (a, seen) (k, v) =
+      let str =
+        match v with
+        | `String s -> Some (Set s)
+        | `Null -> Some Null
+        | _ -> None
+      in
+      let a =
+        match (k, str) with
+        | _ when List.mem k seen ->
+            (* a repeated member: the first one is read, as [Json.member] does *)
+            { a with extra = a.extra @ [ (k, v) ] }
+        | "diagnosis", Some f -> { a with diagnosis = f }
+        | "fix_in", Some f -> { a with fix_in = f }
+        | "package", Some f -> { a with package = f }
+        | "change_old", Some f -> { a with change_old = f }
+        | "change_new", Some f -> { a with change_new = f }
+        | "confidence", Some f -> { a with confidence = f }
+        | "verify", Some f -> { a with verify = f }
+        | "llm_usage", _ ->
+            { a with llm_usage = (if v = `Null then Null else Set v) }
+        | _ -> { a with extra = a.extra @ [ (k, v) ] }
+      in
+      (a, k :: seen)
+    in
+    match v with
+    | `Assoc kv -> fst (List.fold_left member (empty, []) kv)
+    | _ -> empty
+
+  let to_json a : Json.t =
+    let field k = function
+      | Absent -> []
+      | Null -> [ (k, `Null) ]
+      | Set x -> [ (k, x) ]
+    in
+    let str k f =
+      field k
+        (match f with
+        | Set s -> Set (`String s)
+        | Absent -> Absent
+        | Null -> Null)
+    in
+    (* the schema's order (that of [llm_required]) *)
+    `Assoc
+      (str "diagnosis" a.diagnosis
+      @ str "fix_in" a.fix_in @ str "package" a.package
+      @ str "change_old" a.change_old
+      @ str "change_new" a.change_new
+      @ str "confidence" a.confidence
+      @ str "verify" a.verify @ a.extra
+      @ field "llm_usage" a.llm_usage)
+end
+
+type reply =
+  | Answer of { answer : Answer.t; names : string list option; cached : bool }
+  | Failed of { message : string; called : bool; later : bool }
+  | Skipped of string
+  | Prompt of string
+
 (* ------------------------------------------------------------------------ *)
 (* The Messages API (what the SDK sends, and how it reports errors) *)
 
@@ -484,52 +570,43 @@ let create_hook = ref messages_create
 (* ------------------------------------------------------------------------ *)
 
 let llm_suggest ?(call = true) src r job text data pr_packages cache_dir model
-    dry_run : Dict.t =
+    dry_run =
   let prompt = !llm_prompt_hook src r job text data pr_packages in
   let names = prompt_names prompt in
   let key =
     String.sub (Net.sha256_hex (model ^ "\n" ^ llm_system ^ "\n" ^ prompt)) 0 32
   in
   let disk = Filename.concat cache_dir ("llm-" ^ key ^ ".json") in
-  if dry_run then
-    if call then Dict.of_list [ ("llm_prompt", `String prompt) ]
-    else Dict.of_list [ ("llm_skipped", `String "beyond the limit") ]
+  if dry_run then if call then Prompt prompt else Skipped "beyond the limit"
   else
     match Net.cached_json disk with
     | Some v -> (
         match llm_answer_error v with
         | Some why ->
-            Dict.of_list
-              [
-                ("llm_error", `String ("unusable cached answer: " ^ why));
-                ("_cached", `Bool true);
-              ]
+            Failed
+              {
+                message = "unusable cached answer: " ^ why;
+                called = false;
+                later = false;
+              }
         | None ->
-            let d = Dict.of_json v in
-            let d = Dict.copy d in
-            Dict.set d "_names" (Json.strings names);
-            Dict.set d "_cached" (`Bool true);
-            d)
+            Answer
+              { answer = Answer.of_json v; names = Some names; cached = true })
     | None
       when (not call)
            ||
            match llm_state.off with
            | Some o when o <> "" -> true
            | _ -> false ->
-        Dict.of_list
-          [
-            ( "llm_skipped",
-              `String
-                (match llm_state.off with
-                | Some o when o <> "" -> o
-                | _ -> "beyond the limit") );
-          ]
+        Skipped
+          (match llm_state.off with
+          | Some o when o <> "" -> o
+          | _ -> "beyond the limit")
     | None when Net.is_offline () ->
         (* Offline (the tests), everything comes from the cache: a missing
            answer is a cache miss, never a paid call. *)
         Net.offline_miss ("llm " ^ key);
-        Dict.of_list
-          [ ("llm_skipped", `String "offline: the answer is not in the cache") ]
+        Skipped "offline: the answer is not in the cache"
     | None -> (
         (* Server-side fallbacks: if the model declines, the API reruns the
          request on a fallback model within the same call. *)
@@ -543,7 +620,7 @@ let llm_suggest ?(call = true) src r job text data pr_packages cache_dir model
               (* A bad key or no permission: every call would fail the same way.
              Not an answer: asked again once the key is fixed. *)
               llm_turn_off err;
-              Dict.of_list [ ("llm_error", `String err); ("off", `Bool true) ]
+              Failed { message = err; called = true; later = true }
             end
             else begin
               (* Overloaded, rate-limited, a server error: asked again in a later run. *)
@@ -552,28 +629,29 @@ let llm_suggest ?(call = true) src r job text data pr_packages cache_dir model
               in
               if transient then llm_transient_failure ()
               else llm_api_answered ();
-              Dict.of_list
-                [ ("llm_error", `String err); ("transient", `Bool transient) ]
+              Failed { message = err; called = true; later = transient }
             end
         | Connection_error m ->
             (* a timeout too *)
             llm_transient_failure ();
-            Dict.of_list
-              [
-                ("llm_error", `String ("connection error: " ^ m));
-                ("transient", `Bool true);
-              ]
+            Failed
+              {
+                message = "connection error: " ^ m;
+                called = true;
+                later = true;
+              }
         | Sdk_error (cls, m) ->
             (* no credentials, another SDK error *)
             let err = cls ^ ": " ^ Util.prefix_chars m 200 in
             llm_turn_off err;
-            Dict.of_list [ ("llm_error", `String err); ("off", `Bool true) ]
+            Failed { message = err; called = true; later = true }
         | Message resp -> (
             llm_api_answered ();
             Net.net_incr "llm";
             match Json.member "stop_reason" resp with
             | `String (("refusal" | "max_tokens") as s) ->
-                Dict.of_list [ ("llm_error", `String ("stopped: " ^ s)) ]
+                Failed
+                  { message = "stopped: " ^ s; called = true; later = false }
             | _ -> (
                 let text =
                   List.find_map
@@ -591,23 +669,30 @@ let llm_suggest ?(call = true) src r job text data pr_packages cache_dir model
                 in
                 match (why, out) with
                 | Some why, _ ->
-                    Dict.of_list
-                      [ ("llm_error", `String ("unusable answer: " ^ why)) ]
+                    Failed
+                      {
+                        message = "unusable answer: " ^ why;
+                        called = true;
+                        later = false;
+                      }
                 | None, None -> assert false
                 | None, Some o ->
                     let usage = Json.member "usage" resp in
-                    let d = Dict.of_json o in
-                    Dict.set d "llm_usage"
-                      (`Assoc
-                         [
-                           ("input", Json.member "input_tokens" usage);
-                           ("output", Json.member "output_tokens" usage);
-                           ("model", Json.member "model" resp);
-                         ]);
-                    Net.write_atomic disk (Json.dumps (Dict.to_json d));
-                    let d = Dict.copy d in
-                    Dict.set d "_names" (Json.strings names);
-                    d)))
+                    let answer =
+                      {
+                        (Answer.of_json o) with
+                        llm_usage =
+                          Set
+                            (`Assoc
+                               [
+                                 ("input", Json.member "input_tokens" usage);
+                                 ("output", Json.member "output_tokens" usage);
+                                 ("model", Json.member "model" resp);
+                               ]);
+                      }
+                    in
+                    Net.write_atomic disk (Json.dumps (Answer.to_json answer));
+                    Answer { answer; names = Some names; cached = false })))
 
 let llm_suggest_hook = ref llm_suggest
 
@@ -818,54 +903,45 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
           with e ->
             (* the log, an opam file or the API failed: the failure stays unrecognised *)
             Some
-              ( Dict.of_list
-                  [
-                    ( "llm_error",
-                      `String
-                        (exn_name e ^ ": "
-                        ^ Util.prefix_chars (Util.exn_text e) 200) );
-                    ("_no_call", `Bool true);
-                  ],
+              ( Failed
+                  {
+                    message =
+                      exn_name e ^ ": "
+                      ^ Util.prefix_chars (Util.exn_text e) 200;
+                    called = false;
+                    later = false;
+                  },
                 None )
         in
         match res with
         | None -> ()
-        | Some (res, log_err) ->
+        | Some (res, log_err) -> (
             (* Only API calls count toward [limit]: not a cached answer, nor a
              failure skipped or failed before asking. *)
-            let cached =
-              Dict.raw res "_cached" <> None
-              &&
-              let v = Dict.truthy res "_cached" in
-              Dict.remove res "_cached";
-              v
+            let called =
+              match res with
+              | Answer { cached; _ } -> not cached
+              | Failed { called; _ } -> called
+              | Skipped _ -> false
+              | Prompt _ -> true
             in
-            let no_call =
-              (not cached)
-              &&
-              let v = Dict.truthy res "_no_call" in
-              Dict.remove res "_no_call";
-              v
-            in
-            if not (cached || no_call || Dict.mem res "llm_skipped") then
-              incr done_;
-            if Dict.mem res "llm_skipped" then begin
-              Hashtbl.replace left sig_ ();
-              if llm_state.off = None then incr beyond
-            end
-            else if Dict.mem res "llm_prompt" then
-              r.llm_prompt <- Dict.str_opt res "llm_prompt"
-            else if Dict.mem res "llm_error" then begin
-              (* A missing package, a bad key or an API error: the failure stays
-               unrecognised; the error is logged, not shown in the suggestion. *)
-              r.llm_error <- Dict.str_opt res "llm_error";
-              if Dict.truthy res "transient" || Dict.truthy res "off" then
+            if called then incr done_;
+            match res with
+            | Skipped _ ->
                 Hashtbl.replace left sig_ ();
-              Printf.eprintf "note: LLM not used for %s: %s\n%!"
-                (Suggestion.str r.Suggestion.variant)
-                (Dict.str res "llm_error")
-            end
-            else Hashtbl.replace answers sig_ (res, log_err)
+                if llm_state.off = None then incr beyond
+            | Prompt p -> r.llm_prompt <- Some p
+            | Failed { message; later; _ } ->
+                (* A missing package, a bad key or an API error: the failure
+                   stays unrecognised; the error is logged, not shown in the
+                   suggestion. *)
+                r.llm_error <- Some message;
+                if later then Hashtbl.replace left sig_ ();
+                Printf.eprintf "note: LLM not used for %s: %s\n%!"
+                  (Suggestion.str r.Suggestion.variant)
+                  message
+            | Answer { answer; names; _ } ->
+                Hashtbl.replace answers sig_ (answer, names, log_err))
       end)
     todo;
   (* Failures with the same signature (the same error on other platforms) share the answer. *)
@@ -873,12 +949,12 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
     (fun r ->
       match Hashtbl.find_opt answers (llm_sig r) with
       | None -> ()
-      | Some (res, log_err) ->
+      | Some ((res : Answer.t), names, log_err) ->
           (* The package to change must be one the input names: one of the
            PR's, or the failing one. Another name is dropped, with the
            model's claim of where the fix goes, and its change is shown as
            text only. *)
-          let named = String.trim (Dict.str res "package") in
+          let named = String.trim (Suggestion.str_field res.package) in
           let pkg =
             if named <> "" then
               checked_package named r
@@ -896,7 +972,7 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
                 | _ -> None)
           in
           let pkg_s = none_str pkg in
-          let res_fix_in = Dict.str res "fix_in" in
+          let res_fix_in = Suggestion.str_field res.fix_in in
           let fix_in =
             match res_fix_in with
             | "this-pr" ->
@@ -930,10 +1006,10 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
           in
           let verify =
             Rx.sub ~count:1 check_verify_that_re ""
-              (String.trim (Dict.str res "verify"))
+              (String.trim (Suggestion.str_field res.verify))
           in
           let verify = String.capitalize_ascii verify in
-          let diagnosis = Dict.str res "diagnosis" in
+          let diagnosis = Suggestion.str_field res.diagnosis in
           let has_error = Suggestion.nonempty r.error in
           Suggestion.update r
             [
@@ -942,7 +1018,7 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
               `Fix_in fix_in;
               `Diagnosis diagnosis;
               `Llm_usage
-                (Option.value ~default:`Null (Dict.get res "llm_usage"));
+                (match res.llm_usage with Set u -> u | Absent | Null -> `Null);
               `Log_error log_err;
               `Note
                 (pre
@@ -951,18 +1027,17 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
             ];
           (* The answer was checked against the schema: a string or nothing. *)
           r.confidence <-
-            Suggestion.field_of_option (Dict.str_opt res "confidence");
+            Suggestion.field_of_option (Suggestion.get res.confidence);
           if not has_error then r.error <- Some diagnosis;
-          let change = Dict.str res "change_new" in
-          let names = Dict.strs_opt res "_names" in
+          let change = Suggestion.str_field res.change_new in
           if
             change <> "" && (not unchecked)
-            && llm_change_as_diff ?names (Dict.str_opt res "change_old") change
+            && llm_change_as_diff ?names (Suggestion.get res.change_old) change
           then
             Suggestion.update r
               [
                 `Old
-                  (match Dict.str_opt res "change_old" with
+                  (match Suggestion.get res.change_old with
                   | Some o when o <> "" -> Some o
                   | _ -> None);
                 `New (Some change);

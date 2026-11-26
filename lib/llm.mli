@@ -69,6 +69,59 @@ type api_result =
 val messages_create : model:string -> prompt:string -> api_result
 (** [client.beta.messages.create(...)] with the SDK's timeout and retry. *)
 
+(** {1 Answers} *)
+
+(** An answer of the model, as the cache keeps it ([llm-KEY.json] in the cache
+    directory, or [.json.gz]): the members of {!llm_schema}, then [llm_usage],
+    added by the tool. *)
+module Answer : sig
+  type t = {
+    diagnosis : string Suggestion.field;
+    fix_in : string Suggestion.field;
+        (** one of "this-pr", "other-package", "upstream", "ci", "unknown" *)
+    package : string Suggestion.field;
+        (** the package to change ([name.version]), or [""] *)
+    change_old : string Suggestion.field;
+        (** the line(s) of the opam file to replace, [""] to add a line *)
+    change_new : string Suggestion.field;  (** the new line(s), or [""] *)
+    confidence : string Suggestion.field;  (** "low", "medium" or "high" *)
+    verify : string Suggestion.field;  (** what a human should check *)
+    extra : (string * Json.t) list;
+        (** members of another name, or of another type than a string, kept as
+            they were read *)
+    llm_usage : Json.t Suggestion.field;
+        (** the tokens and the model of the call:
+            [{"input": n, "output": n, "model": name}] *)
+  }
+  (** A member is absent, [null] or a string; an answer that {!llm_suggest} uses
+      has all of them (it checks them on the JSON first), and [llm_usage]. *)
+
+  val of_json : Json.t -> t
+  (** Reads any JSON object; never fails. A member of another name, a repeated
+      one, or a string member of another type goes to [extra], so that
+      [to_json (of_json v)] has the members of [v]. *)
+
+  val to_json : t -> Json.t
+  (** The string members in the order of {!llm_schema}, then [extra], then
+      [llm_usage] (the order the tool writes them in). *)
+end
+
+(** What {!llm_suggest} gives for one failure. *)
+type reply =
+  | Answer of { answer : Answer.t; names : string list option; cached : bool }
+      (** the model's answer; [names]: the package names it was given
+          ({!prompt_names}; None: not known); [cached]: from the cache, not a
+          call *)
+  | Failed of { message : string; called : bool; later : bool }
+      (** no answer: why; [called]: an API call was made (it counts toward the
+          limit: not for an unusable cached answer, nor an error before the
+          call); [later]: a later call may give one (a transient API error, or
+          the LLM off: credentials refused) *)
+  | Skipped of string
+      (** not asked (beyond the limit, the LLM off, or offline without a cached
+          answer): why *)
+  | Prompt of string  (** with [dry_run]: the prompt (it counts as a call) *)
+
 val llm_suggest :
   ?call:bool ->
   Sources.t ->
@@ -80,16 +133,12 @@ val llm_suggest :
   string ->
   string ->
   bool ->
-  Dict.t
+  reply
 (** [llm_suggest src r job log data pr_packages cache_dir model dry_run]: the
-    model's answer for one failure (cached), with [_names], the package names it
-    was given ({!prompt_names}), or [{"llm_error": ...}] ([transient] when a
-    later call may work, [off] when the LLM is off for the rest of the run:
-    credentials refused), or [{"llm_prompt": ...}] with [dry_run]. [_cached]:
-    the answer (or the unusable answer) comes from the cache; anything else (an
-    answer, an API error, a prompt with [dry_run]) counts as a call. Without
-    [call], or once the LLM is off ({!llm_state}), only a cached answer is
-    given, else [{"llm_skipped": why}]. *)
+    model's answer for one failure (cached), or why there is none, or the prompt
+    with [dry_run]. Without [call], or once the LLM is off ({!llm_state}), only
+    a cached answer is given, else [Skipped]. Offline ([OPAM_CI_OFFLINE]), an
+    answer not in the cache is [Skipped] too, never a call. *)
 
 (** {1 Prompt and answer} *)
 
@@ -161,7 +210,7 @@ val llm_suggest_hook :
   string ->
   string ->
   bool ->
-  Dict.t)
+  reply)
   ref
 
 val key_error_line_hook : (string -> string option) ref

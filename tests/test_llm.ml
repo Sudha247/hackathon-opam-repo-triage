@@ -69,8 +69,8 @@ let result ?(variant = "v") ?(error = "E") ?(failing = "x.1")
   r.unexplained <- unexplained;
   r
 
-(* [_names]: the package names in the prompt (llm_suggest adds them). *)
-let answer_fields ?(names = true) kw =
+(* The model's answer: the members of the schema, [kw] replacing them. *)
+let answer_fields kw =
   let base =
     [
       ("diagnosis", `String "d");
@@ -81,8 +81,6 @@ let answer_fields ?(names = true) kw =
       ("confidence", `String "low");
       ("verify", `String "v");
     ]
-    @
-    if names then [ ("_names", Json.strings [ "x"; "x.1"; "zarith" ]) ] else []
   in
   List.map
     (fun (k, v) ->
@@ -90,7 +88,22 @@ let answer_fields ?(names = true) kw =
     base
   @ List.filter (fun (k, _) -> not (List.mem_assoc k base)) kw
 
-let answer kw = Dict.of_list (answer_fields kw)
+let answer_json kw : Json.t = `Assoc (answer_fields kw)
+
+(* What llm_suggest gives for it, with the package names in the prompt. *)
+let answer kw =
+  Llm.Answer
+    {
+      answer = Llm.Answer.of_json (answer_json kw);
+      names = Some [ "x"; "x.1"; "zarith" ];
+      cached = false;
+    }
+
+let error_of = function Llm.Failed { message; _ } -> message | _ -> ""
+
+let fix_in = function
+  | Llm.Answer { answer; _ } -> Suggestion.str_field answer.fix_in
+  | _ -> ""
 
 let quiet f =
   (* stderr notes are not checked *)
@@ -109,7 +122,7 @@ let apply ?(pr_packages = [ "x.1" ]) ?suggest ?res r =
   (match (suggest, res) with
   | Some s, _ -> Llm.llm_suggest_hook := s
   | None, Some res ->
-      Llm.llm_suggest_hook := fun ?call:_ _ _ _ _ _ _ _ _ _ -> Dict.copy res
+      Llm.llm_suggest_hook := fun ?call:_ _ _ _ _ _ _ _ _ _ -> res
   | None, None -> ());
   quiet (fun () ->
       ignore
@@ -248,16 +261,15 @@ let test_unanswered_counted () =
   let answers = function
     | "v0" -> answer []
     | "v1" ->
-        Dict.of_list
-          [
-            ("llm_error", `String "API error 529: overloaded");
-            ("transient", `Bool true);
-          ]
-    | _ -> Dict.of_list [ ("llm_error", `String "stopped: refusal") ]
+        Llm.Failed
+          { message = "API error 529: overloaded"; called = true; later = true }
+    | _ ->
+        Llm.Failed
+          { message = "stopped: refusal"; called = true; later = false }
   in
   let ask ?(call = true) _ r _ _ _ _ _ _ _ =
     if call then answers (Suggestion.str r.Suggestion.variant)
-    else Dict.of_list [ ("llm_skipped", `String "beyond the limit") ]
+    else Llm.Skipped "beyond the limit"
   in
   Alcotest.(check int) "limit 3" 1 (run_with ~jobs ~suggest:ask (mk ()) 3)
   (* the transient error *);
@@ -359,9 +371,7 @@ let test_errors_leave_the_failure_unrecognised () =
       ((fun () -> message None), "no JSON answer");
       ( (fun () ->
           message
-            (Some
-               (Json.dumps
-                  (Dict.to_json (answer [ ("fix_in", `String "bogus") ]))))),
+            (Some (Json.dumps (answer_json [ ("fix_in", `String "bogus") ])))),
         "unknown fix_in" );
       ((fun () -> message (Some {|{"diagnosis": "d"}|})), "no fix_in");
       ((fun () -> message (Some "[1]")), "not a JSON object");
@@ -373,7 +383,7 @@ let test_errors_leave_the_failure_unrecognised () =
         None (* no credentials turn the LLM off for the run *);
       (Llm.create_hook := fun ~model:_ ~prompt:_ -> create ());
       let res = suggest_once (Printf.sprintf "prompt %d" i) in
-      check_contains why (Dict.str res "llm_error") why)
+      check_contains why (error_of res) why)
     cases;
   Alcotest.(check (list string)) "nothing cached" [] (llm_files ());
   (* A client timeout, one retry: not the SDK's 10 minutes and 2 retries. *)
@@ -382,21 +392,15 @@ let test_errors_leave_the_failure_unrecognised () =
     (Llm.llm_timeout, Llm.llm_max_retries);
   (* A good answer is cached; a damaged cached one is an error, not a crash. *)
   (Llm.create_hook :=
-     fun ~model:_ ~prompt:_ ->
-       message
-         (Some
-            (Json.dumps
-               (Dict.to_json (Dict.of_list (answer_fields ~names:false []))))));
-  Alcotest.(check string)
-    "fix_in" "this-pr"
-    (Dict.str (suggest_once "good") "fix_in");
+     fun ~model:_ ~prompt:_ -> message (Some (Json.dumps (answer_json []))));
+  Alcotest.(check string) "fix_in" "this-pr" (fix_in (suggest_once "good"));
   let cached = llm_files () in
   Alcotest.(check int) "one cached" 1 (List.length cached);
   let oc = open_out (Filename.concat !tmp (List.hd cached)) in
   output_string oc {|{"diagnosis": 3}|};
   close_out oc;
   check_contains "damaged"
-    (Dict.str (suggest_once "good") "llm_error")
+    (error_of (suggest_once "good"))
     "unusable cached answer"
 
 (* apply_llm on [n] distinct failures, [runs] times (each run a new process:
@@ -433,9 +437,7 @@ let test_limit_counts_api_calls_only () =
   (* Three distinct failures, two calls per run: cached answers do not count
      toward the limit, so the second run asks about the third failure, and
      the third run asks nothing. *)
-  let text =
-    Json.dumps (Dict.to_json (Dict.of_list (answer_fields ~names:false [])))
-  in
+  let text = Json.dumps (answer_json []) in
   let create calls =
     incr calls;
     message (Some text)
@@ -520,17 +522,26 @@ let test_llm_change_is_code () =
   in
   r.unexplained <- true;
   let res =
-    Dict.of_list
-      [
-        ("fix_in", `String "this-pr");
-        ("confidence", `String "low");
-        ("diagnosis", `String "d");
-        ("verify", `String "v");
-        ( "change_new",
-          `String "depexts: [\"a\"] {os-distribution = \"debian\"}\n```\n@x `y`"
-        );
-        ("package", `String "x.1");
-      ]
+    Llm.Answer
+      {
+        names = None;
+        cached = false;
+        answer =
+          Llm.Answer.of_json
+            (`Assoc
+               [
+                 ("fix_in", `String "this-pr");
+                 ("confidence", `String "low");
+                 ("diagnosis", `String "d");
+                 ("verify", `String "v");
+                 ( "change_new",
+                   `String
+                     "depexts: [\"a\"] {os-distribution = \"debian\"}\n\
+                      ```\n\
+                      @x `y`" );
+                 ("package", `String "x.1");
+               ]);
+      }
   in
   let r = apply ~res r in
   check_contains "note" (Suggestion.str r.note)
@@ -665,6 +676,49 @@ let test_http_request () =
   | _ -> Alcotest.fail "no connection error");
   Alcotest.(check int) "retried" 2 (List.length !sent)
 
+(* A cached answer reads into Llm.Answer.t and prints back as it was: the
+   members in the schema's order, unknown ones, null apart from absent. *)
+let test_answer_round_trip () =
+  let usage =
+    `Assoc [ ("input", `Int 1); ("output", `Null); ("model", `String "m") ]
+  in
+  let cases : (string * (string * Json.t) list) list =
+    [
+      ("as written", answer_fields [] @ [ ("llm_usage", usage) ]);
+      ("no llm_usage", answer_fields []);
+      ("null llm_usage", answer_fields [] @ [ ("llm_usage", `Null) ]);
+      ( "null members",
+        answer_fields [ ("package", `Null); ("verify", `Null) ]
+        @ [ ("llm_usage", usage) ] );
+      ( "unknown members",
+        answer_fields [] @ [ ("x", `List [ `Int 1 ]); ("y", `Null) ] );
+      (* a member of another type is kept with the unknown ones, after the
+         strings *)
+      ("another type", [ ("fix_in", `String "ci"); ("diagnosis", `Int 3) ]);
+      ("empty", []);
+    ]
+  in
+  List.iter
+    (fun (name, kv) ->
+      let v = `Assoc kv in
+      Alcotest.(check string)
+        name (Json.dumps v)
+        (Json.dumps (Llm.Answer.to_json (Llm.Answer.of_json v))))
+    cases;
+  let a =
+    Llm.Answer.of_json
+      (`Assoc
+         (answer_fields [ ("package", `Null) ]
+         @ [ ("x", `Bool true); ("diagnosis", `String "again") ]))
+  in
+  Alcotest.(check bool) "null" true (a.package = Null);
+  Alcotest.(check bool) "absent" true (a.llm_usage = Absent);
+  Alcotest.(check bool) "first of a repeated member" true (a.diagnosis = Set "d");
+  Alcotest.(check (list string))
+    "extra" [ "x"; "diagnosis" ] (List.map fst a.extra);
+  let a = Llm.Answer.of_json (`Assoc [ ("diagnosis", `Int 3) ]) in
+  Alcotest.(check bool) "not a string" true (a.diagnosis = Absent)
+
 let () =
   Alcotest.run "llm"
     [
@@ -672,6 +726,7 @@ let () =
         [
           Alcotest.test_case "change_shapes" `Quick test_change_shapes;
           Alcotest.test_case "prompt_names" `Quick test_prompt_names;
+          Alcotest.test_case "answer_round_trip" `Quick test_answer_round_trip;
           Alcotest.test_case "unanswered_counted" `Quick test_unanswered_counted;
           Alcotest.test_case "package_checked" `Quick test_package_checked;
           Alcotest.test_case "errors_leave_the_failure_unrecognised" `Quick

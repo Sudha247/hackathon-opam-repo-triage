@@ -1078,7 +1078,7 @@ let test_not_asked_while_ci_runs () =
     Llm.llm_suggest_hook :=
       fun ?call:_ _ _ _ _ _ _ _ _ _ ->
         called := true;
-        Dict.of_list [ ("llm_error", s "fake"); ("transient", `Bool true) ]
+        Llm.Failed { message = "fake"; called = true; later = true }
   in
   let v, _ = run_case ~llm:true ~unfinished:3 ~before "lwt-revdeps" in
   check_false "not called" !called;
@@ -3277,16 +3277,26 @@ let test_llm_change_is_code () =
   in
   r.unexplained <- true;
   let res =
-    Dict.of_list
-      [
-        ("fix_in", s "this-pr");
-        ("confidence", s "low");
-        ("diagnosis", s "d");
-        ("verify", s "v");
-        ( "change_new",
-          s "depexts: [\"a\"] {os-distribution = \"debian\"}\n```\n@x `y`" );
-        ("package", s "x.1");
-      ]
+    Llm.Answer
+      {
+        names = None;
+        cached = false;
+        answer =
+          Llm.Answer.of_json
+            (`Assoc
+               [
+                 ("fix_in", s "this-pr");
+                 ("confidence", s "low");
+                 ("diagnosis", s "d");
+                 ("verify", s "v");
+                 ( "change_new",
+                   s
+                     "depexts: [\"a\"] {os-distribution = \"debian\"}\n\
+                      ```\n\
+                      @x `y`" );
+                 ("package", s "x.1");
+               ]);
+      }
   in
   let saved =
     ( !Llm.fetch_hook,
@@ -3298,7 +3308,7 @@ let test_llm_change_is_code () =
   Llm.log_text_hook := Fun.id;
   (Llm.excerpt_hook := fun ?max_output_lines:_ _ -> [ ("error_block", "e") ]);
   (Llm.key_error_line_hook := fun _ -> Some "e");
-  (Llm.llm_suggest_hook := fun ?call:_ _ _ _ _ _ _ _ _ _ -> Dict.copy res);
+  (Llm.llm_suggest_hook := fun ?call:_ _ _ _ _ _ _ _ _ _ -> res);
   let tmp = tmpdir () in
   Fun.protect
     (fun () ->
