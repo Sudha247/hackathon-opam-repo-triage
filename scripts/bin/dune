@@ -1,0 +1,9 @@
+(executables
+ (names triage_open_prs render_page llm_digest llm_eval accuracy_report)
+ (public_names
+  triage-open-prs
+  render-page
+  llm-digest
+  llm-eval
+  accuracy-report)
+ (libraries scripts))

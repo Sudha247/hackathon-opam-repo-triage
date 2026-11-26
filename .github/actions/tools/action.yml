@@ -1,0 +1,36 @@
+# The tools' executables for the checked-out commit, on the PATH: restored
+# from the cache that the Build workflow fills on each push to master, or
+# built here when it is missing (the build has not finished yet, or the
+# cache entry was evicted).
+name: Tools
+description: Put the opam-ci triage tools on the PATH (prebuilt when possible)
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the prebuilt tools
+      id: restore
+      uses: actions/cache/restore@v6
+      with:
+        path: tools-bin
+        key: tools-${{ github.sha }}
+
+    - if: steps.restore.outputs.cache-hit != 'true'
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: "5.4"
+
+    - name: Build the tools (no prebuilt ones for this commit)
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        # libcurl's headers, for ezcurl (the package conf-libcurl names on Ubuntu)
+        sudo apt-get update && sudo apt-get install -y libcurl4-gnutls-dev
+        opam install . --deps-only --yes
+        opam exec -- dune build --profile release @install
+        mkdir -p tools-bin
+        cp -L _build/install/default/bin/* tools-bin/
+
+    - name: Put them on the PATH
+      shell: bash
+      run: echo "$PWD/tools-bin" >> "$GITHUB_PATH"

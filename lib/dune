@@ -1,0 +1,18 @@
+(library
+ (name triage)
+ (public_name opam-ci-triage.triage)
+ (libraries
+  ezcurl
+  bos
+  fpath
+  uri
+  uucp
+  lambdasoup
+  re
+  yojson
+  camlzip
+  digestif
+  ptime
+  ptime.clock.os
+  unix
+  threads.posix))

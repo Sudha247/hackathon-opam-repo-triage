@@ -1,0 +1,6 @@
+; The scripts of the triage page and of the evaluations, as a library (the
+; tests call their functions); scripts/bin has their executables.
+
+(library
+ (name scripts)
+ (libraries triage tool_version uucp cmdliner unix threads.posix))

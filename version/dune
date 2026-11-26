@@ -1,0 +1,23 @@
+; A digest of the tool's sources (the library and the entry point), computed
+; at build time: the triage page analyses PRs again when it changes (see
+; scripts/triage_open_prs.ml). Sources, not the executable: a rebuild with
+; another compiler release or dependency version is the same tool.
+
+(executable
+ (name gen)
+ (modules gen)
+ (libraries digestif))
+
+(library
+ (name tool_version)
+ (modules tool_version))
+
+(rule
+ (targets tool_version.ml)
+ (deps
+  (glob_files ../lib/*.ml)
+  ../bin/opam_repo_ci_triage.ml)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run ./gen.exe %{deps}))))

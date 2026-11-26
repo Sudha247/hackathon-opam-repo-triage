@@ -1,0 +1,51 @@
+# On each push to master: build the tools (OCaml), run the tests, and keep
+# the executables in the Actions cache under the commit's sha. The other
+# workflows (the hourly triage page above all) restore them instead of
+# building, through .github/actions/tools.
+name: Build
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.4"
+
+      # libcurl's headers, for ezcurl: the package conf-libcurl names on
+      # Ubuntu (opam would install it too, through the depexts).
+      - name: Install libcurl
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-gnutls-dev
+
+      - name: Build and test
+        run: |
+          opam install . --deps-only --with-test --yes
+          opam exec -- dune build --profile release @install
+          opam exec -- dune test --profile release
+
+      # Real files: _build/install/default/bin only has symbolic links.
+      - name: Collect the executables
+        run: |
+          mkdir tools-bin
+          cp -L _build/install/default/bin/* tools-bin/
+          ls -l tools-bin
+
+      - uses: actions/cache/save@v6
+        with:
+          path: tools-bin
+          key: tools-${{ github.sha }}

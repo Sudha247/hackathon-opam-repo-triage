@@ -21,14 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
+      # The tools (OCaml), prebuilt by the Build workflow for this commit.
+      - uses: ./.github/actions/tools
 
       - name: Update the digest issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           site=$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .html_url)
-          python3 scripts/llm_digest.py "${site%/}/data.json" --issue "$GITHUB_REPOSITORY" > digest.md
+          llm-digest "${site%/}/data.json" --issue "$GITHUB_REPOSITORY" > digest.md
           cat digest.md >> "$GITHUB_STEP_SUMMARY"

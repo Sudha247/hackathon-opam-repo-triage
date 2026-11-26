@@ -1,0 +1,16 @@
+; test_cases: suggest on the recorded CI runs of tests/fixtures (offline).
+; The others: unit tests of the library and the scripts.
+
+(tests
+ (names
+  test_cases
+  test_triage
+  test_page_run
+  test_page
+  test_scripts
+  test_llm
+  test_context)
+ (libraries triage scripts alcotest unix threads.posix)
+ (deps
+  %{exe:../bin/opam_repo_ci_triage.exe}
+  (source_tree fixtures)))

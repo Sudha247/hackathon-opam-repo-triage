@@ -1,4 +1,4 @@
-# Hourly: run opam_repo_ci_triage.py `suggest` on the open ocaml/opam-repository
+# Hourly: run `opam-ci-triage suggest` on the open ocaml/opam-repository
 # PRs whose opam-ci status is `failure`, and publish the results on GitHub Pages.
 # Enable: Settings -> Pages -> Source: GitHub Actions, then run it once by hand.
 name: Triage page
@@ -33,9 +33,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
+      # The tools (OCaml), prebuilt by the Build workflow for this commit.
+      - uses: ./.github/actions/tools
 
       # .opam-ci-cache/: pages, logs and lookups of the tool (finished CI results
       # do not change); state/: per-PR head sha and last result, so unchanged PRs
@@ -65,15 +64,11 @@ jobs:
             du -sh .opam-ci-cache
           fi
 
-      - name: Install the Anthropic SDK (only with an API key)
-        if: env.ANTHROPIC_API_KEY != ''
-        run: pip install anthropic
-
       - name: Analyse failing PRs
         id: triage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python3 scripts/triage_open_prs.py --time-budget 2100 --llm-budget 40
+        run: triage-open-prs --time-budget 2100 --llm-budget 40
 
       - name: Save cache and state
         if: always() && steps.triage.outputs.changed != 'false'
@@ -85,7 +80,7 @@ jobs:
           key: triage-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Render the page
-        run: python3 scripts/render_page.py
+        run: render-page
 
       - uses: actions/configure-pages@v6
 

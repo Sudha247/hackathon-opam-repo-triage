@@ -1,0 +1,4 @@
+(executable
+ (name opam_repo_ci_triage)
+ (public_name opam-ci-triage)
+ (libraries triage cmdliner))

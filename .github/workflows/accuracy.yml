@@ -1,5 +1,5 @@
 # Weekly: evaluate the triage tool on recently merged opam-repository PRs
-# (evaluate_closed_prs.py), compare with the previous week, and
+# (evaluate-closed-prs), compare with the previous week, and
 # keep the history on the `accuracy` branch. The job fails, and GitHub
 # notifies, when a suggestion that matched an author's fix last week no
 # longer does, or when precision drops sharply.
@@ -24,9 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
+      # The tools (OCaml), prebuilt by the Build workflow for this commit.
+      - uses: ./.github/actions/tools
 
       # The triage page's cache: most CI pages and logs are already there.
       - name: Restore the tool's cache
@@ -48,7 +47,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 evaluate_closed_prs.py --since "$(date -d '90 days ago' +%F)" --limit 150 \
+          evaluate-closed-prs --since "$(date -d '90 days ago' +%F)" --limit 150 \
             --json eval.json > eval.txt
           tail -3 eval.txt
 
@@ -56,7 +55,7 @@ jobs:
         id: compare
         run: |
           set +e
-          python3 scripts/accuracy_report.py eval.json --history history --commit "$GITHUB_SHA" > report.md
+          accuracy-report eval.json --history history --commit "$GITHUB_SHA" > report.md
           status=$?
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           cp eval.txt history/latest.txt

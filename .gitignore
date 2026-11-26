@@ -1,7 +1,8 @@
 ci-logs/
 .opam-ci-cache/
-__pycache__/
 site/
 state/
 .venv/
 llm-eval/
+_build/
+tools-bin/

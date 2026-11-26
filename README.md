@@ -4,27 +4,58 @@ Tools to triage the failures reported by opam-repo-ci
 (<https://opam.ci.ocaml.org>) on ocaml/opam-repository pull requests, and to
 suggest fixes such as dependency bounds.
 
-- `fetch_ci_logs.py`: download the failed job logs of a CI run into `ci-logs/<sha>/`.
-- `classify_logs.py`: classify and group those logs with rules, marking the groups that need an LLM.
-- `opam_repo_ci_triage.py`: parse a CI run, compare it with a baseline, and suggest fixes (see below).
+- `fetch-ci-logs` (`tools/fetch_ci_logs.ml`): download the failed job logs of a CI run into `ci-logs/<sha>/`.
+- `classify-logs` (`tools/classify_logs.ml`): classify and group those logs with rules, marking the groups that need an LLM.
+- `opam-ci-triage` (`bin/`, `lib/`): parse a CI run, compare it with a baseline, and suggest fixes (see below).
 
-## opam_repo_ci_triage.py
+They are written in OCaml (5.1 or newer):
+
+```sh
+opam install . --deps-only --with-test
+dune build                                  # the tools, in _build/install/default/bin
+dune exec -- opam-ci-triage summary --pr 31275
+```
+
+The code is formatted with ocamlformat 0.29 (`dune fmt`).
+
+The commands below are shown as installed (`opam install .`, or with
+`_build/install/default/bin` on the `PATH`); from the source tree, prefix them
+with `dune exec --`. The scripts read and write paths relative to the current
+directory (`state/`, `site/`, `.opam-ci-cache/`): run them from the
+repository's root.
+
+## opam-ci-triage
 
 Works only from results CI already computed: nothing is built, no Docker, and
-no GitHub token is needed. Python 3 standard library only; `git` is used only
-as a fallback (see "Data sources").
+no GitHub token is needed. HTTP requests go through libcurl (building needs
+its headers: `libcurl4-gnutls-dev` on Debian and Ubuntu, which opam's
+`conf-libcurl` asks for), and `git` is used only as a fallback (see "Data
+sources").
 
 Each command takes a commit sha, an opam.ci.ocaml.org URL, or `--pr N` (the
 PR's current head).
 
-The code is in the `triage/` package, one module per layer, each using only
-the ones before it: `net` (HTTP, GitHub API, git, caches), `ci` (CI pages and
-logs, job names), `sources` (opam files, versions, ocaml.org docs, upstream
-sources), `rules` (one job's log), `matrix` (pass/fail patterns), `context`
+The code is in the `lib/` library (`Triage`), one module per layer, each
+using only the ones before it. First helpers: `Py` (strings, lists, files,
+with the semantics of the Python built-ins the tool was first written with),
+`Rx` (regular expressions with the API and syntax of Python's `re`, on
+ocaml-re), `Json` (printed exactly as Python's `json` module does, so the
+state, cache and page files keep their format), `Dict` (JSON objects built
+member by member: the page's state of each PR, the LLM's cached answers),
+`Proc`, `Http` (through libcurl), `Html`, `Words`, `Md`. Then `Net` (HTTP,
+GitHub API, git, caches), `Ci` (CI pages and logs, job names), `Suggestion`
+(one analysed failure: a record the rules fill in, with the reader and
+printer of its JSON), `Where` (where a fix goes), `Filter` (opam filters on
+the CI platforms),
+`Constraints`, `Loginfo` (facts from a log), `Titles` (rules in words,
+classes, ranking), `Sources` (opam files, versions, ocaml.org docs, upstream
+sources), `Rules` (one job's log), `Matrix` (pass/fail patterns), `Context`
 (PR-level checks: pre-existing failures, opam-health-check, lint, reruns),
-`llm`, `suggest` (runs and merges everything), `render` (text, comment,
-review) and `cli`. `opam_repo_ci_triage.py` is the entry point, and re-exports
-the package for the scripts and tests.
+`Llm`, `Checks` and `Suggest` (runs and merges everything), `Render` (text,
+comment, review) and `Cli`. `bin/opam_repo_ci_triage.ml` is the entry point.
+The scripts of the triage page and of the evaluations are the `scripts/`
+library (their executables are in `scripts/bin/`). Every module of both
+libraries has an interface (`.mli`) that documents it.
 
 | Command | What it does |
 |---|---|
@@ -36,10 +67,10 @@ the package for the scripts and tests.
 | `comment` | A draft PR comment in Markdown from the `suggest` results: diffs for the PR's opam files with their evidence, the rest folded in `<details>`. Printed by default; `--post` posts it with `gh pr comment` (review it first). |
 
 ```sh
-python3 opam_repo_ci_triage.py summary --pr 31275
-python3 opam_repo_ci_triage.py logs 1e2d45eb8b297fea701407d41e2d2af656bd5d9a --match 'revdeps,osc'
-python3 opam_repo_ci_triage.py compare --pr 31275
-python3 opam_repo_ci_triage.py suggest 55ad97d637d37d80b5d186bd7b3850ad263d05f1
+opam-ci-triage summary --pr 31275
+opam-ci-triage logs 1e2d45eb8b297fea701407d41e2d2af656bd5d9a --match 'revdeps,osc'
+opam-ci-triage compare --pr 31275
+opam-ci-triage suggest 55ad97d637d37d80b5d186bd7b3850ad263d05f1
 ```
 
 Common options:
@@ -69,7 +100,7 @@ in words), `job` (the CI job in words, e.g. "frama-clang.0.0.21~beta on archlinu
 builder)") and `where` (where the fix goes: "this PR", "pkg (another package)", "upstream", "the CI",
 "rerun" or "nothing to fix"; absent when unknown). The class of a suggestion, the page's verdicts and
 groups follow `where_kind`; `fix_in` is the same place in words (results stored without `where_kind` get it
-from `fix_in`, in `triage/where.py`). Failures that no rule recognises are grouped in one "Unexplained
+from `fix_in`, in `lib/where.ml`). Failures that no rule recognises are grouped in one "Unexplained
 failures" entry listing their jobs.
 
 | Failure | Suggestion | Confidence |
@@ -161,12 +192,13 @@ jobs; the answer is structured JSON (diagnosis, where the fix goes, the opam
 change if any, confidence, what to verify), shown with `rule: llm`.
 
 ```sh
-pip install anthropic          # and ANTHROPIC_API_KEY, or `ant auth login`
-python3 opam_repo_ci_triage.py suggest --pr 29613 --llm
-python3 opam_repo_ci_triage.py suggest --pr 29613 --llm-dry-run   # print the prompts, no API call
+export ANTHROPIC_API_KEY=...   # or ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile
+opam-ci-triage suggest --pr 29613 --llm
+opam-ci-triage suggest --pr 29613 --llm-dry-run   # print the prompts, no API call
 ```
 
-Model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
+The Messages API is called directly (HTTPS, as the Anthropic SDK does):
+model `claude-opus-5-5` (`--llm-model`), medium effort, server-side refusal
 fallbacks enabled, a 120 s timeout per request and one retry. Responses are
 cached in `.opam-ci-cache/`, so re-runs cost nothing; `--llm-max` counts
 API calls only, not cached answers, so each run adds answers to the earlier
@@ -182,7 +214,7 @@ or CI running).
 
 The LLM gets the failures the rules flag as unexplained (also when a note was
 added since: pre-existing, or opam-health-check's "builds on master"). Its
-answer is checked: an answer that does not follow the schema, an SDK or API
+answer is checked: an answer that does not follow the schema, an API
 error, or a log that cannot be read leaves the failure unrecognised (with an
 `llm_error`), it never fails the analysis. The package it names must be one of
 the PR's or the failing one, or it is dropped (with its claim of where the fix
@@ -195,16 +227,16 @@ Anything else (bounds, depexts, build or install commands, URLs) is shown as
 text to check.
 
 Every Monday, `.github/workflows/llm-digest.yml` groups the LLM answers shown
-on the triage page by the error line of their log (`scripts/llm_digest.py`;
+on the triage page by the error line of their log (`llm-digest`, `scripts/llm_digest.ml`;
 paths, numbers and identifiers masked) and keeps one issue, "LLM diagnoses to
 turn into rules", up to date with the errors answered in two or more PRs: the
 diagnoses, suggested changes and logs of each. Turning one into a rule (most
-go in `known_errors` in `triage/rules.py`, with a case in
-`tests/test_triage.py`) takes it out of the LLM's hands: free, deterministic
+go in `known_errors` in `lib/rules.ml`, with a case in
+`tests/test_cases.ml`) takes it out of the LLM's hands: free, deterministic
 and tested. It does nothing while the page has no LLM answers.
 
 To evaluate it on the PRs of the triage page that have failures no rule recognises, run
-`.venv/bin/python scripts/llm_eval.py --first 5` (then without `--first`): it saves each PR's
+`llm-eval --first 5` (then without `--first`): it saves each PR's
 result in `llm-eval/` and prints the tokens used; `--dry-run` lists the PRs and prompts without
 calling the API.
 
@@ -213,7 +245,13 @@ calling the API.
 `.github/workflows/triage-page.yml` runs every hour (and on demand) and
 publishes the results on the repository's GitHub Pages site:
 
-1. `scripts/triage_open_prs.py` lists the open ocaml/opam-repository PRs with
+The tools are built once per commit, not by each run: `.github/workflows/build.yml`
+builds them and runs the tests on each push to master, and keeps the executables in
+the Actions cache under the commit's sha. The workflows take them from there
+(`.github/actions/tools`), and build them only when they are missing (the build has
+not finished yet, or the cache entry was evicted).
+
+1. `triage-open-prs` (`scripts/triage_open_prs.ml`) lists the open ocaml/opam-repository PRs with
    one GraphQL query (needs a token; the workflow's `GITHUB_TOKEN` is enough),
    keeps those whose `opam-ci` status is `failure`, and runs `suggest <sha>
    --json --max 6` (and `summary`, from the cached page) on each new or updated
@@ -300,7 +338,7 @@ publishes the results on the repository's GitHub Pages site:
    low-confidence ones are folded, as "LLM diagnosis (low confidence)": in an evaluation on 25 answers, 15 were
    right, 7 plausible, 1 wrong and 2 harmful, all the harmful ones being
    version bounds.
-2. `scripts/render_page.py` turns it into `site/index.html`: one static page,
+2. `render-page` (`scripts/render_page.ml`) turns it into `site/index.html`: one static page,
    no external resources. Each failing PR gets one verdict, the first that
    applies: not this PR's fault (every failure also happens without the PR,
    comes from the CI's setup, or is on an experimental platform; an LLM
@@ -324,8 +362,8 @@ are pruned whole, a month after their last use). Rules only: the LLM fallback is
 enabled (see the comment in the workflow).
 
 ```sh
-python3 scripts/triage_open_prs.py --limit 4   # locally: needs GITHUB_TOKEN, GH_TOKEN or gh
-python3 scripts/render_page.py                 # site/index.html
+triage-open-prs --limit 4   # locally: needs GITHUB_TOKEN, GH_TOKEN or gh
+render-page                 # site/index.html
 ```
 
 To enable it:
@@ -337,31 +375,36 @@ To enable it:
 
 ## Tests
 
-`tests/test_triage.py` runs `suggest` on 15 recorded CI runs (ortools,
+`tests/test_cases.ml` runs `suggest` on 51 recorded CI runs (ortools,
 colibri2, why3find, hol_light, binaryen, oonnxx, chatoyant, lwt revdeps,
-graphql-async, ocaml-r, git-paf, websocket, lambdapi, dns-certify, unikraft) and checks
+graphql-async, ocaml-r, git-paf, websocket, lambdapi, dns-certify, unikraft, ...) and checks
 the fixes verified by hand or made by the PR authors. They run offline
 (`OPAM_CI_OFFLINE=1`): pages, logs, opam files, doc lookups and git objects come
-from `tests/fixtures/<case>/` (2.2 MB), and any cache miss fails the test.
+from `tests/fixtures/<case>/`, and any cache miss fails the test. The other
+test executables are unit tests: `test_triage` (sources, ocaml.org lookups,
+network failures, rules), `test_context`, `test_llm`, `test_page` (the page and
+the Markdown escaping), `test_page_run` (the page's runs and state) and
+`test_scripts`.
 
 ```sh
-python3 tests/test_triage.py              # ~4 s, no network
-python3 tests/test_triage.py -k why3find  # one case
-python3 tests/test_triage.py --record     # re-record the fixtures (online)
+dune test                                          # every test, no network
+dune exec tests/test_cases.exe -- test why3find    # one case
+dune exec tests/test_cases.exe -- --record         # re-record the fixtures (online)
+dune exec tests/test_cases.exe -- --top-up         # add the ocaml.org answers they miss
 ```
 
-To add a case: put its commit and expected suggestions in `CASES`, then
-`--record <case>`.
+To add a case: put its commit and expected suggestions in `cases`
+(`tests/test_cases.ml`), then `--record <case>`.
 
 ## Evaluation on merged PRs
 
-`evaluate_closed_prs.py` runs `suggest` on the initial version (before the
+`evaluate-closed-prs` (`tools/evaluate_closed_prs.ml`) runs `suggest` on the initial version (before the
 first force-push, or the first commit) of recently merged PRs whose opam-repo-ci
 run failed, and compares the suggestions with what the author changed before the
 merge. Needs a logged-in `gh`.
 
 ```sh
-python3 evaluate_closed_prs.py --since 2026-08-01 --limit 200
+evaluate-closed-prs --since 2026-08-01 --limit 200
 ```
 
 On 200 PRs merged since 2026-08-01 (16 evaluable, rules only, no LLM): 13 of
@@ -371,7 +414,7 @@ anticipated.
 
 A weekly GitHub Action (`.github/workflows/accuracy.yml`, Mondays, or by
 hand) runs the evaluation on the PRs merged in the last 90 days and compares
-it with the previous run (`scripts/accuracy_report.py`). The totals move with
+it with the previous run (`accuracy-report`, `scripts/accuracy_report.ml`). The totals move with
 the sample; the check that matters is on the PRs evaluated both times: a
 suggestion that matched the author's fix and no longer does is a regression
 of the tool. The job then fails (so GitHub notifies), as it does when
