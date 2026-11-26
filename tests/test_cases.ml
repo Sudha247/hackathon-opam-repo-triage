@@ -158,6 +158,25 @@ let cases =
             ({|new|}, {|"mirage-crypto-rng" {>= "1.2.0"}|});
           ];
       ] );
+    (* The same run with the LLM fallback, its answer in the fixture (an
+       --llm call recorded on 2026-11-26; offline, a missing answer is a
+       cache miss, never an API call). The answer puts the fix in another
+       package: the place names it. Its version bound is text to check, not
+       a diff. Re-recording this case calls the API (with
+       ANTHROPIC_API_KEY set) and may get another answer. *)
+    ( {|websocket-bound-llm|},
+      {|f290556e5d03adbda8dc847188358e06abe16436|},
+      [ {|--max|}; {|6|}; {|--llm|}; {|--llm-max|}; {|1|} ],
+      [
+        Has
+          [
+            ({|rule|}, {|llm|});
+            ({|failing|}, {|ojs_filetree.0.8.0|});
+            ({|where|}, {|ojs_filetree.0.8.0 (another package)|});
+            ({|where_pkg|}, {|ojs_filetree.0.8.0|});
+          ];
+        Not [ ({|rule|}, {|llm|}); ({|new|}, {|js_of_ocaml|}) ];
+      ] );
     ( {|lambdapi-bound|},
       {|5fe799b6cebb0d22cd7b963e1103bd17aa545bae|},
       [ {|--max|}; {|6|} ],

@@ -375,12 +375,14 @@ To enable it:
 
 ## Tests
 
-`tests/test_cases.ml` runs `suggest` on 51 recorded CI runs (ortools,
+`tests/test_cases.ml` runs `suggest` on 52 recorded CI runs (ortools,
 colibri2, why3find, hol_light, binaryen, oonnxx, chatoyant, lwt revdeps,
 graphql-async, ocaml-r, git-paf, websocket, lambdapi, dns-certify, unikraft, ...) and checks
 the fixes verified by hand or made by the PR authors. They run offline
 (`OPAM_CI_OFFLINE=1`): pages, logs, opam files, doc lookups and git objects come
-from `tests/fixtures/<case>/`, and any cache miss fails the test. The other
+from `tests/fixtures/<case>/`, and any cache miss fails the test. One case
+(`websocket-bound-llm`) runs with `--llm`, its answer in the fixture: offline, a
+missing LLM answer is a cache miss too, never an API call. The other
 test executables are unit tests: `test_triage` (sources, ocaml.org lookups,
 network failures, rules), `test_context`, `test_llm`, `test_page` (the page and
 the Markdown escaping), `test_page_run` (the page's runs and state) and

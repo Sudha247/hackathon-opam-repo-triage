@@ -513,6 +513,12 @@ let llm_suggest ?(call = true) src r job text data pr_packages cache_dir model
                 | Some o when o <> "" -> o
                 | _ -> "beyond the limit") );
           ]
+    | None when Net.is_offline () ->
+        (* Offline (the tests), everything comes from the cache: a missing
+           answer is a cache miss, never a paid call. *)
+        Net.offline_miss ("llm " ^ key);
+        Dict.of_list
+          [ ("llm_skipped", `String "offline: the answer is not in the cache") ]
     | None -> (
         (* Server-side fallbacks: if the model declines, the API reruns the
          request on a fallback model within the same call. *)
