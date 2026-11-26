@@ -119,7 +119,7 @@ type data = {
   jobs : job list;
   mutable unfinished : int;
   mutable unanalysed : int;
-  mutable health_stale : Json.t option;
+  mutable health_stale : string option;
   mutable llm_unanswered : int option;
   mutable sha : string option;
 }

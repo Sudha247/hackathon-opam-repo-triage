@@ -584,7 +584,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
         else begin
           if Suggestion.nonempty_field r.Suggestion.new_ then
             add [ diff_block r ];
-          if Suggestion.nonempty r.alternative then begin
+          if r.alternative <> None then begin
             (* also without [new]: a change described in the note. Python: \s{2,}(?=\() *)
             let a = Suggestion.str r.alternative in
             let alt =
@@ -669,9 +669,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
     let parts =
       parts
       @
-      if
-        Suggestion.nonempty r.preexisting
-        && not (r.preexisting_unverified = Some true)
+      if r.preexisting <> None && not (r.preexisting_unverified = Some true)
       then [ "pre-existing" ]
       else []
     in
@@ -1039,10 +1037,10 @@ let render_suggestions (results : Suggestion.t list) =
         if Suggestion.nonempty_field r.old then
           Printf.printf "    - %s\n" (Suggestion.str_field r.old);
         Printf.printf "    + %s\n" (Suggestion.str_field r.Suggestion.new_);
-        if Suggestion.nonempty r.alternative then
+        if r.alternative <> None then
           Printf.printf "    or %s\n" (Suggestion.str r.alternative)
       end
-      else if Suggestion.nonempty r.alternative then
+      else if r.alternative <> None then
         (* a change described in the note, and an alternative *)
         Printf.printf "  alternative     : %s\n" (Suggestion.str r.alternative);
       if Suggestion.list r.candidates <> [] then
@@ -1077,7 +1075,7 @@ let render_suggestions (results : Suggestion.t list) =
           (String.concat ", " (Suggestion.list r.also_newer));
       if Suggestion.nonempty r.note then
         Printf.printf "  note            : %s\n" (Suggestion.str r.note);
-      if Suggestion.nonempty r.llm_prompt then
+      if r.llm_prompt <> None then
         print_endline
           ("  LLM prompt (dry run):\n    "
           ^ Util.replace (Suggestion.str r.llm_prompt) "\n" "\n    "))

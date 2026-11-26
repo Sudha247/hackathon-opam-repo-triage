@@ -53,8 +53,7 @@ let packages_re = Rx.v {|(\d+) packages \[|}
 
 let title_of (r : Suggestion.t) =
   match r.rule with
-  | None | Some (Other "") -> (
-      match r.title with Some t when t <> "" -> t | _ -> "Note")
+  | None -> ( match r.title with Some t when t <> "" -> t | _ -> "Note")
   | Some rule -> (
       let t =
         match rule_title rule with Some t -> t | None -> Rule.to_string rule
@@ -109,9 +108,8 @@ let fix_label where =
 let readable (results : Suggestion.t list) =
   List.iter
     (fun r ->
-      if r.rule <> None && r.rule <> Some (Other "") then
-        r.title <- Some (title_of r);
-      if Suggestion.nonempty r.Suggestion.variant then
+      if r.rule <> None then r.title <- Some (title_of r);
+      if r.Suggestion.variant <> None then
         r.job <- Some (Ci.describe_job (Suggestion.str r.Suggestion.variant));
       (* Both from the suggestion as it is: once [where_kind] is set,
          [where_pkg] no longer derives the package from [fix_in] (LLM answers). *)
@@ -154,7 +152,7 @@ let classify r =
   let has_change =
     Suggestion.nonempty_field r.Suggestion.new_
     || Suggestion.list r.candidates <> []
-    || Suggestion.nonempty r.advice
+    || r.advice <> None
   in
   let k = Where.where_kind r in
   if r.rule = Some Rule_error || k = Unknown then "explanation"

@@ -271,11 +271,11 @@ let merge_unrecognised results =
     List.filter
       (fun r ->
         not
-          (Suggestion.nonempty (Option.map Rule.to_string r.rule)
+          (r.rule <> None
           || Suggestion.nonempty_field r.Suggestion.new_
           || Suggestion.list r.candidates <> []
           || Suggestion.nonempty r.error
-          || Suggestion.nonempty r.llm_prompt))
+          || r.llm_prompt <> None))
       results
   in
   if unk = [] then results

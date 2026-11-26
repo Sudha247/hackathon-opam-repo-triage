@@ -199,8 +199,7 @@ let groups (pr : E.t) =
   if pending pr then []
   else
     Util.group_by
-      (fun r ->
-        match r.class_ with Some c when c <> "" -> c | _ -> "explanation")
+      (fun r -> match r.class_ with Some c -> c | None -> "explanation")
       (suggestions_of pr)
 
 let group g k = Option.value ~default:[] (List.assoc_opt k g)
@@ -230,8 +229,7 @@ let not_this_pr r =
     (* a where_kind of another name is kept in [extra]: stored since *)
     && not (List.mem_assoc "where_kind" r.extra)
   in
-  Suggestion.nonempty r.preexisting
-  && not (r.preexisting_unverified = Some true)
+  (r.preexisting <> None && not (r.preexisting_unverified = Some true))
   || shared
   || r.Suggestion.experimental = Some true
   || (ci_side r && not unchecked)
@@ -372,8 +370,7 @@ let combine rs =
       m.Suggestion.experimental <-
         Some (List.for_all (fun r -> r.Suggestion.experimental = Some true) rs);
       m.preexisting <-
-        (if List.for_all (fun r -> Suggestion.nonempty r.preexisting) rs then
-           r0.preexisting
+        (if List.for_all (fun r -> r.preexisting <> None) rs then r0.preexisting
          else None);
       let conf r = Suggestion.get r.confidence in
       let key c =
@@ -786,7 +783,7 @@ let comment_markdown (pr : E.t) =
   let results =
     List.filter
       (fun r ->
-        Suggestion.nonempty r.class_
+        r.class_ <> None
         && not
              (r.rule = Some Llm
              && String.starts_with ~prefix:"low"
@@ -884,10 +881,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
   let jobs = Suggestion.list r.Suggestion.jobs in
   let lists_jobs = Titles.has_rule [ Rerun; Unrecognised ] r in
   let meta = ref [] in
-  if
-    Suggestion.nonempty r.Suggestion.variant
-    && Suggestion.nonempty r.Suggestion.url
-    && not lists_jobs
+  if r.Suggestion.variant <> None && r.Suggestion.url <> None && not lists_jobs
   then
     meta :=
       !meta
@@ -942,7 +936,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
             (e_s (Suggestion.str_field r.Suggestion.new_));
         ]
       @
-      if Suggestion.nonempty r.alternative then
+      if r.alternative <> None then
         [
           Printf.sprintf "<span class=\"alt\">or %s</span>"
             (e_s (Suggestion.str r.alternative));
@@ -951,7 +945,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
     in
     add ("<pre class=\"diff\">" ^ String.concat "\n" diff ^ "</pre>")
   end
-  else if Suggestion.nonempty r.alternative then
+  else if r.alternative <> None then
     (* a change described in the note, and an alternative *)
     add
       (Printf.sprintf
@@ -1212,9 +1206,7 @@ let render_item ?sha ?year r =
     @ (match where_of r with
       | Some w when r.rule <> Some Rerun -> [ Titles.fix_label w ]
       | _ -> []) (* "Jobs to rerun" says it *)
-    @ (if
-         Suggestion.nonempty r.preexisting
-         && not (r.preexisting_unverified = Some true)
+    @ (if r.preexisting <> None && not (r.preexisting_unverified = Some true)
        then [ "pre-existing" ]
        else [])
     @ (if Suggestion.list r.also_failing_in <> [] then
@@ -1243,7 +1235,7 @@ let render_item ?sha ?year r =
     (suggestion_body ?sha ~full:false ?year r)
 
 (* The author of a PR, "?" when unknown. *)
-let author (p : E.t) = match p.author with Set a when a <> "" -> a | _ -> "?"
+let author (p : E.t) = match p.author with Set a -> a | Absent | Null -> "?"
 
 let ready_section ?(shown = 5) (data : Page_data.t) =
   let rows =
@@ -1426,10 +1418,7 @@ let render_pr ?year ?max_failures (pr : E.t) =
     @ [
         Printf.sprintf "<span>commit %s \xc2\xb7 analysed %s UTC</span>"
           (e_s (Util.prefix_chars (Option.value ~default:"" sha) 12))
-          (time16
-             (match pr.analysed_at with
-             | None | Some "" -> "never"
-             | Some s -> s));
+          (time16 (Option.value ~default:"never" pr.analysed_at));
       ];
   let lookups = failed_lookups pr in
   if lookups > 0 then
@@ -1446,7 +1435,7 @@ let render_pr ?year ?max_failures (pr : E.t) =
             lookups (plural lookups);
         ];
   (match Page_data.get pr.last_error with
-  | Some last_error when last_error <> "" && E.has_result pr ->
+  | Some last_error when E.has_result pr ->
       (* A newer analysis of the same commit failed: this result is the previous one. *)
       bar :=
         !bar
@@ -1496,7 +1485,7 @@ let render_pr ?year ?max_failures (pr : E.t) =
         ^ String.concat "; " parts ^ ".</p>")
   | None -> ());
   (match E.result pr with
-  | Some { health_stale = Some stale; _ } when stale <> "" ->
+  | Some { health_stale = Some stale; _ } ->
       add
         (Printf.sprintf
            "<p class=\"note\">opam-health-check's latest results are from %s, \
@@ -1851,7 +1840,7 @@ repository</a>).</p></section>|}
          (Option.value ~default:0 llm.calls)
      else "LLM diagnoses are not enabled.")
     (match llm.off with
-    | Set off when off <> "" -> " They were turned off during this update."
+    | Set _ -> " They were turned off during this update."
     | _ -> "")
 
 (* Why the LLM was turned off during an update (see triage_open_prs), shown under the lead. *)
@@ -2051,9 +2040,7 @@ let render_feed (data : Page_data.t) =
                     ])
               (Util.take 5 (merge_similar (group g k))))
           [ "fix"; "workaround"; "elsewhere"; "explanation" ];
-        let updated =
-          match pr.analysed_at with Some v when v <> "" -> v | _ -> gen
-        in
+        let updated = Option.value ~default:gen pr.analysed_at in
         out :=
           !out
           @ [

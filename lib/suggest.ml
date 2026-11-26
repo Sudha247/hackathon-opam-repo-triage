@@ -45,7 +45,7 @@ let drop_health_explained_elsewhere (notes : Context.notes) results pr_packages
       (fun r ->
         r.rule = Some Library_api
         && Suggestion.nonempty_field r.Suggestion.new_
-        && Suggestion.nonempty r.dep
+        && r.dep <> None
         && not (List.mem (Suggestion.str r.dep) names))
       results
   in
@@ -227,7 +227,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
   in
   (match new_notes.notes_health_stale with
   | Some d when d <> "" ->
-      data.health_stale <- Some (`String d)
+      data.health_stale <- Some d
       (* reported in the JSON output and on the page *)
   | _ -> ());
   let elsewhere =
@@ -333,8 +333,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
         in
         match Util.last_opt vs with
         | Some latest
-          when List.mem ver vs && latest <> ver
-               && not (Suggestion.nonempty r.alternative) ->
+          when List.mem ver vs && latest <> ver && r.alternative = None ->
             r.alternative <-
               Some
                 (Printf.sprintf
@@ -371,7 +370,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
                              (Suggestion.str_field r.Suggestion.new_)));
                    ]),
               None )
-          else if Suggestion.nonempty r.advice then
+          else if r.advice <> None then
             ( Some
                 (`List
                    [ `String "advice"; failing; `String (Option.get r.advice) ]),

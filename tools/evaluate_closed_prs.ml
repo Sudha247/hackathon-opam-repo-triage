@@ -90,8 +90,7 @@ let merged_prs since limit =
 
 let initial_commit pr =
   match Json.to_list (pr |. "timelineItems" |. "nodes") with
-  | fp :: _ when Json.truthy (fp |. "beforeCommit") ->
-      Some (fp |. "beforeCommit")
+  | fp :: _ when fp |. "beforeCommit" <> `Null -> Some (fp |. "beforeCommit")
   | _ -> (
       match Json.to_list (pr |. "commits" |. "nodes") with
       | n :: _ -> Some (n |. "commit")

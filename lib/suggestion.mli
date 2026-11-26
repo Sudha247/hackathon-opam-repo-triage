@@ -172,10 +172,18 @@ val str : string option -> string
 (** The string, or [""]. *)
 
 val nonempty : string option -> bool
-(** Whether the string is set and not [""]. *)
+(** Whether the string is set and not [""]. Only for the members that can be set
+    to [""]: the texts the rules compute ([error], [note], [source], from lists
+    that may be empty), and [confidence] (stored as [""] by older versions). The
+    other string members are never [""] (the rules set them to names, variants
+    and fixed words, and no stored suggestion has one): an option match says
+    whether they are set. *)
 
 val str_field : string field -> string
+
 val nonempty_field : string field -> bool
+(** The same, for [new], [old] and [failing] (computed opam text and package
+    lists). *)
 
 val list : 'a list option -> 'a list
 (** The list, or [[]]. *)

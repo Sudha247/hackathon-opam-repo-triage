@@ -237,7 +237,6 @@ module E = Page_data.Entry
 type 'a field = 'a Suggestion.field = Absent | Null | Set of 'a
 
 let get = Suggestion.get
-let truthy_str = function Some s -> s <> "" | None -> false
 let nonzero = function Some n -> n <> 0 | None -> false
 
 (* A member copied from the PR as listed: null when the listing lacks it. *)
@@ -286,7 +285,7 @@ let tried_run (prev : E.t option) (p : E.t) =
   match prev with
   | None -> false
   | Some prev ->
-      truthy_str (get prev.last_error)
+      get prev.last_error <> None
       && get prev.sha = get p.sha
       && prev.last_error_ci_state <> Absent
       && prev.last_error_ci_state = listed p.ci_state
@@ -377,7 +376,7 @@ let summary_jobs (summary : Json.t option) =
           | Null -> Null);
         s_target = member "target" j;
         s_revdep = Json.str_opt "revdep" j;
-        s_experimental = Json.truthy (Json.member "experimental" j);
+        s_experimental = Json.member "experimental" j = `Bool true;
       })
     (match summary with Some s -> Json.list "jobs" s | None -> [])
 
@@ -420,7 +419,7 @@ let reuse ?now_ ?digest (prev : E.t option) (p : E.t) version llm =
          max_attempts times at most, even as jobs finish. *)
       commit
       && ((digest <> None && digest = get pv.ci_digest)
-         || ((not (has_result pv)) && truthy_str (get pv.error)))
+         || ((not (has_result pv)) && get pv.error <> None))
     else commit
   in
   let same_commit = ref (same && has_result pv) in
@@ -468,7 +467,7 @@ let reuse ?now_ ?digest (prev : E.t option) (p : E.t) version llm =
   if
     (not !same) && prev <> None
     && get pv.sha = get p.sha
-    && truthy_str (get pv.last_error)
+    && get pv.last_error <> None
     && has_result pv
     && ((not (ci_changed prev p)) || tried_run prev p)
   then

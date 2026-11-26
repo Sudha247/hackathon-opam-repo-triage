@@ -588,9 +588,9 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
                       when b.category = j.category
                            && reason b info_prev = reason j target -> (
                         let pr =
-                          if Dict.truthy info "pr" then
-                            "#" ^ json_text (Option.get (Dict.get info "pr"))
-                          else Util.prefix_chars info_sha 12
+                          match Dict.get info "pr" with
+                          | Some pr -> "#" ^ json_text pr
+                          | None -> Util.prefix_chars info_sha 12
                         in
                         let why =
                           Printf.sprintf

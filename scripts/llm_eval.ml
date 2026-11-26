@@ -40,7 +40,7 @@ let unrecognised (pr : E.t) =
        (fun (r : Suggestion.t) ->
          r.rule = Some Unrecognised
          || not
-              (Suggestion.nonempty (Option.map Rule.to_string r.rule)
+              (r.rule <> None
               || Suggestion.nonempty_field r.new_
               || Suggestion.list r.candidates <> []))
        (E.suggestions pr))
@@ -169,7 +169,7 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
             Printf.printf "#%d: %d prompts  %s\n%!" n
               (List.length
                  (List.filter
-                    (fun (r : Suggestion.t) -> Suggestion.nonempty r.llm_prompt)
+                    (fun (r : Suggestion.t) -> r.llm_prompt <> None)
                     sugg))
               (Util.prefix_chars (E.str p.title) 60)
           else begin

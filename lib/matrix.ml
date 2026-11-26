@@ -161,7 +161,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
         | Some k
           when Suggestion.nonempty_field r.Suggestion.new_
                || Suggestion.list r.candidates <> []
-               || Suggestion.nonempty r.advice ->
+               || r.advice <> None ->
             Some k
         | _ -> None)
       earlier

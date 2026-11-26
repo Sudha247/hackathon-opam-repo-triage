@@ -741,13 +741,13 @@ let llm_todo (results : Suggestion.t list) (data : Ci.data) =
      have gained a prefix since: pre-existing, new on master). *)
   let unexplained r =
     r.Suggestion.unexplained
-    && (not (Suggestion.nonempty (Option.map Rule.to_string r.rule)))
+    && (not (r.rule <> None))
     && (not (Suggestion.nonempty_field r.Suggestion.new_))
     && Suggestion.list r.candidates = []
   in
   List.filter
     (fun r ->
-      Suggestion.nonempty r.Suggestion.url
+      r.Suggestion.url <> None
       && List.mem (Suggestion.str r.Suggestion.variant) jobs
       && unexplained r)
     results

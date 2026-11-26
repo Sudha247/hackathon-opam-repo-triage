@@ -47,10 +47,8 @@ let upstream_suffix = " (upstream archive)"
    several packages). *)
 let legacy (r : Suggestion.t) : Where_kind.t * string option =
   let f = Suggestion.str r.fix_in in
-  if
-    f = "the PR, a shared dependency, or the CI"
-    && Suggestion.nonempty r.failing_dep
-  then (Other_package, r.failing_dep)
+  if f = "the PR, a shared dependency, or the CI" && r.failing_dep <> None then
+    (Other_package, r.failing_dep)
   else
     match List.assoc_opt f legacy_kinds with
     | Some k -> (k, None)

@@ -535,7 +535,10 @@ let group results =
             ("count", `Int (List.length rs));
             ("pr_packages", set "pr_package" rs);
             ( "needs_llm",
-              `Bool (List.exists (fun r -> Dict.truthy r "needs_llm") rs) );
+              `Bool
+                (List.exists
+                   (fun r -> Dict.get r "needs_llm" = Some (`Bool true))
+                   rs) );
             ( "failing_packages",
               Json.strings
                 (List.sort_uniq compare
@@ -614,7 +617,9 @@ let print_report title results groups verbose =
     in
     let rule_hits =
       List.length
-        (List.filter (fun r -> not (Dict.truthy r "needs_llm")) results)
+        (List.filter
+           (fun r -> not (Dict.get r "needs_llm" = Some (`Bool true)))
+           results)
     in
     Printf.printf
       "  %d failed jobs -> %d groups; %d/%d jobs classified by a specific \

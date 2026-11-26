@@ -322,7 +322,7 @@ let suggest_command args sha (data : data) =
                   ]
                 else [])
              @ (match data.health_stale with
-               | Some v when Json.truthy v -> [ ("health_stale", v) ]
+               | Some v -> [ ("health_stale", `String v) ]
                | _ -> [])
              @ [ ("suggestions", `List (List.map Suggestion.to_json results)) ]
              ))

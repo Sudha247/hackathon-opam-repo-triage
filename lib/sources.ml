@@ -467,7 +467,7 @@ let mcp_call ?max_age src tool args : Json.t * bool =
                         | _ -> raise (Mcp_failure "no content")
                       in
                       let v =
-                        if Json.truthy (Json.member "isError" res) then begin
+                        if Json.member "isError" res = `Bool true then begin
                           let t = first_text () in
                           if strict then
                             `Assoc
@@ -559,7 +559,7 @@ let mcp_versions src name =
                 out @ List.filter (function `Assoc _ -> true | _ -> false) vs
               in
               if
-                (not (Json.truthy (Json.member "truncated" d)))
+                Json.member "truncated" d <> `Bool true
                 || vs = []
                 || List.length out >= 5000
               then Some out
@@ -649,7 +649,7 @@ let changelog ?since ?until src pkg =
               (function `String s -> s | v -> Json.dumps v)
               (Json.to_list vs);
           text = content;
-          truncated = Json.truthy (Json.member "truncated" d);
+          truncated = Json.member "truncated" d = `Bool true;
         }
   | _ -> None
 
@@ -863,7 +863,11 @@ let api_history src pkg mods kind ident versions =
                         && Json.member "resolved_module" d <> `String path
                         && not
                              (Json.member "resolved_by" d = `String "identifier"
-                             && not (Json.truthy (Json.member "unchecked" d)))
+                             &&
+                             (* the names it could not check, if any *)
+                             match Json.member "unchecked" d with
+                             | `List (_ :: _) -> false
+                             | _ -> true)
                       then None
                       else
                         let statuses = Odict.create () in

@@ -103,7 +103,7 @@ type data = {
   mutable unfinished : int;  (** jobs still running or queued *)
   mutable unanalysed : int;
       (** distinct failures beyond [--max] that nothing explains *)
-  mutable health_stale : Json.t option;
+  mutable health_stale : string option;
       (** the date of an opam-health-check run too old to compare with *)
   mutable llm_unanswered : int option;
       (** failures left for the LLM that it did not answer *)
