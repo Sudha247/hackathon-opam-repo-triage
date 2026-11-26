@@ -27,12 +27,14 @@ let load source : Json.t =
          ~timeout:60. source)
   else Json.parse (In_channel.with_open_bin source In_channel.input_all)
 
+module E = Page_data.Entry
+
 (** The suggestions of a [suggest --json] result. *)
-let suggestions result =
-  List.map Suggestion.of_json (Json.list "suggestions" result)
+let suggestions (result : Page_data.Result.t) =
+  Page_data.Result.suggestions result
 
 (** Number of failures of a PR that no rule recognises, in the page's data. *)
-let unrecognised pr =
+let unrecognised (pr : E.t) =
   List.length
     (List.filter
        (fun (r : Suggestion.t) ->
@@ -41,7 +43,7 @@ let unrecognised pr =
               (Suggestion.nonempty (Option.map Rule.to_string r.rule)
               || Suggestion.nonempty_field r.new_
               || Suggestion.list r.candidates <> []))
-       (suggestions (Json.member "result" pr)))
+       (E.suggestions pr))
 
 let usage result =
   let calls =
@@ -63,11 +65,11 @@ let usage result =
     List.fold_left (fun a (_, o, _) -> a + Json.to_int o) 0 uniq )
 
 let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
-  let data = load data in
+  let data = Page_data.of_json (load data) in
   let prs =
     List.filter
-      (fun p -> Json.truthy (Json.member "sha" p) && unrecognised p > 0)
-      (Json.list "prs" data)
+      (fun (p : E.t) -> E.str p.sha <> "" && unrecognised p > 0)
+      (Page_data.prs data)
   in
   let prs =
     List.stable_sort (fun a b -> compare (unrecognised b) (unrecognised a)) prs
@@ -80,41 +82,31 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
     match max_ with
     | Some n when n > 0 -> string_of_int n
     | _ -> (
-        match Json.member "max_failures_per_pr" data with
-        | v when Json.truthy v -> (
-            match v with
-            | `Int n -> string_of_int n
-            | `String s -> s
-            | v -> Json.dumps v)
+        match data.max_failures_per_pr with
+        | Set n when n <> 0 -> string_of_int n
         | _ -> "6")
   in
   let total = ref (0, 0, 0) in
   Printf.printf "%d PRs with failures no rule recognises (data from %s)\n%!"
     (List.length prs)
-    (match Json.member "generated" data with
-    | `String s -> s
-    | `Null -> "?"
-    | v -> Json.dumps v);
+    (Option.value ~default:"?" data.generated);
   List.iter
-    (fun p ->
-      let n =
-        match Json.member "number" p with
-        | `Int n -> n
-        | `String s -> int_of_string s
-        | v -> Json.to_int v
-      in
+    (fun (p : E.t) ->
+      let n = E.number p in
       let outf = Filename.concat out (Printf.sprintf "%d.json" n) in
       let res =
         if Sys.file_exists outf && not dry_run then
           Some
-            ( Json.parse (In_channel.with_open_bin outf In_channel.input_all),
+            ( Page_data.Result.of_json
+                (Json.parse
+                   (In_channel.with_open_bin outf In_channel.input_all)),
               "already done" )
         else begin
           let cmd =
             [
               tool ();
               "suggest";
-              Json.str "sha" p;
+              E.str p.sha;
               "--json";
               "--max";
               max_logs;
@@ -126,12 +118,23 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
           let proc = Proc.run ~cwd:(root ()) ~timeout:1800. cmd in
           match Json.parse_opt proc.stdout with
           | Some (`Assoc _ as v) ->
-              let d = Dict.of_json v in
-              Dict.set d "pr_title" (Json.member "title" p);
-              let res = Dict.to_json d in
+              let res = Page_data.Result.of_json v in
+              (* the PR's title, for grading *)
+              let res =
+                {
+                  res with
+                  extra =
+                    List.remove_assoc "pr_title" res.extra
+                    @ [
+                        ( "pr_title",
+                          match p.title with Set t -> `String t | _ -> `Null );
+                      ];
+                }
+              in
               if not dry_run then begin
                 let oc = open_out_bin outf in
-                output_string oc (Json.dumps ~indent:1 res);
+                output_string oc
+                  (Json.dumps ~indent:1 (Page_data.Result.to_json res));
                 close_out oc;
                 let oc =
                   open_out_bin
@@ -168,7 +171,7 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
                  (List.filter
                     (fun (r : Suggestion.t) -> Suggestion.nonempty r.llm_prompt)
                     sugg))
-              (Util.prefix_chars (Json.str "title" p) 60)
+              (Util.prefix_chars (E.str p.title) 60)
           else begin
             let calls, tin, tout = usage res in
             let a, b, c = !total in

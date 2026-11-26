@@ -9,17 +9,17 @@
     Each failing PR gets one verdict (see {!verdict}), shown as a coloured word
     and border, and a headline saying what the problem is (see {!headline}).
 
-    PRs and the page data are the JSON of data.json; suggestions are read as
-    {!Triage.Suggestion.t}. *)
+    The page data and its PRs are read as {!Page_data} records (suggestions as
+    {!Triage.Suggestion.t}). *)
 
 val main : unit -> unit
 (** Run [render-page] with the command line's arguments: writes the page and its
     Atom feed (feed.xml, beside it). *)
 
-val render : Triage.Json.t -> string
+val render : Page_data.t -> string
 (** The page, from the page data. *)
 
-val render_feed : Triage.Json.t -> string
+val render_feed : Page_data.t -> string
 (** An Atom feed with one entry per analysed PR. An entry's id changes with the
     PR's head commit, so a feed reader shows each new analysis. *)
 
@@ -28,7 +28,7 @@ val base : string
 
 (** {1 Verdicts} *)
 
-val verdict : Triage.Json.t -> string
+val verdict : Page_data.Entry.t -> string
 (** The one verdict of a failing PR, the first that applies: "error" (not
     analysed: no result, or its analysis is pending), "ready" (not this PR's
     fault: {!seems_ready}), "change" (a change to this PR is suggested),
@@ -43,7 +43,7 @@ val verdict_label : string -> string
 val verdict_help : string -> string
 (** What a verdict means, for the page's help. *)
 
-val seems_ready : Triage.Json.t -> bool
+val seems_ready : Page_data.Entry.t -> bool
 (** A PR whose CI fails, but no failure points at the PR. Its CI must have
     finished, and its failures must have been explained: a PR whose only
     "failures" are skipped jobs may not be installable anywhere. *)
@@ -56,7 +56,7 @@ val not_this_pr : Triage.Suggestion.t -> bool
     master, say: see {!Triage_open_prs.mark_shared_failures}), nor counts for
     jobs to rerun (CI did not test them). *)
 
-val ci_running : Triage.Json.t -> bool
+val ci_running : Page_data.Entry.t -> bool
 (** Whether the PR's CI is still running: its opam-ci status is pending and the
     analysis did not find the CI page finished. The status stays pending for
     good when a job never starts (lint after a failed analysis). A result kept
@@ -66,13 +66,12 @@ val ci_running : Triage.Json.t -> bool
 
 (** {1 Parts of the page} *)
 
-val headline : ?v:string -> ?as_html:bool -> Triage.Json.t -> string
+val headline : ?v:string -> ?as_html:bool -> Page_data.Entry.t -> string
 (** What the problem of a PR is, in a few words: the first change to this PR
     (package and new constraint), else the other packages to fix, else the first
     finding. [v]: its verdict, if known. *)
 
-val render_pr :
-  ?year:string -> ?max_failures:Triage.Json.t -> Triage.Json.t -> string
+val render_pr : ?year:string -> ?max_failures:int -> Page_data.Entry.t -> string
 (** A PR's section. [year]: the current year, left out of dates; [max_failures]:
     the failures analysed per PR, to say why some were not. *)
 
@@ -101,18 +100,18 @@ val job_link : string option -> string -> string
     written and the script builds the href: a full URL per job made up most of
     the page. *)
 
-val ready_section : ?shown:int -> Triage.Json.t -> string
+val ready_section : ?shown:int -> Page_data.t -> string
 (** The PRs that seem ready: CI passes, or no failure points at the PR. Drafts
     and PRs with a label that holds them are left out. *)
 
-val chronic : ?min_prs:int -> Triage.Json.t list -> string
+val chronic : ?min_prs:int -> Page_data.Entry.t list -> string
 (** Reverse dependencies (by package name) failing on several PRs (at least
     [min_prs]), and other packages blamed by several PRs. *)
 
-val help_section : Triage.Json.t -> string
+val help_section : Page_data.t -> string
 (** The page's help: the verdicts, how the PRs are analysed, and what the LLM
     fallback did in this update (its calls, whether it was turned off). *)
 
-val comment_markdown : Triage.Json.t -> string
+val comment_markdown : Page_data.Entry.t -> string
 (** The PR comment of the [comment] command, from a PR's stored analysis.
     Low-confidence LLM answers are left out, as they are folded on the page. *)

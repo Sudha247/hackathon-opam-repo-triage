@@ -1,22 +1,82 @@
 open Triage
 
-let num (v : Json.t) = match Json.to_float_opt v with Some f -> f | None -> 0.
+(* The evaluation of [evaluate-closed-prs --json]: its totals and its rows,
+   one per PR. *)
 
-let rates t =
-  let p =
-    if Json.truthy (Json.member "scored" t) then
-      Some (100. *. num (Json.member "hit" t) /. num (Json.member "scored" t))
-    else None
+type totals = {
+  hit : int option;
+  scored : int option;
+  fix_covered : int option;
+  fix_tokens : int option;
+  health_hit : int option;
+  health_scored : int option;
+  members : (string * Json.t) list;  (** every member, as read *)
+}
+
+let totals_of_json (v : Json.t) =
+  let members = match v with `Assoc kv -> kv | _ -> [] in
+  let int k =
+    match List.assoc_opt k members with Some (`Int n) -> Some n | _ -> None
   in
-  let r =
-    if Json.truthy (Json.member "fix_tokens" t) then
-      Some
-        (100.
-        *. num (Json.member "fix_covered" t)
-        /. num (Json.member "fix_tokens" t))
-    else None
-  in
-  (p, r)
+  {
+    hit = int "hit";
+    scored = int "scored";
+    fix_covered = int "fix_covered";
+    fix_tokens = int "fix_tokens";
+    health_hit = int "health_hit";
+    health_scored = int "health_scored";
+    members;
+  }
+
+type scored = {
+  package : string;
+  rule : string;
+  hit : bool;
+  tokens : string list;
+}
+(** A suggestion of a row, scored against the author's fix. *)
+
+let scored_of_json (v : Json.t) =
+  {
+    package = Json.str "package" v;
+    rule = Json.str "rule" v;
+    hit = Json.member "hit" v = `Bool true;
+    tokens = Json.to_str_list (Json.member "tokens" v);
+  }
+
+type row = {
+  pr : int option;
+  initial : string option;  (** the PR's first commit *)
+  error : string option;  (** the tool failed on it *)
+  suggestions : scored list;
+  health_suggestions : scored list;  (** counted apart *)
+}
+
+let row_of_json (v : Json.t) =
+  let scored k = List.map scored_of_json (Json.list k v) in
+  {
+    pr = (match Json.member "pr" v with `Int n -> Some n | _ -> None);
+    initial = Json.str_opt "initial" v;
+    error = (if Json.mem "error" v then Some (Json.str "error" v) else None);
+    suggestions = scored "suggestions";
+    health_suggestions = scored "health_suggestions";
+  }
+
+type evaluation = { totals : totals; prs : row list }
+
+let evaluation_of_json (v : Json.t) =
+  {
+    totals = totals_of_json (Json.member "totals" v);
+    prs = List.map row_of_json (Json.list "prs" v);
+  }
+
+let ratio a b =
+  match b with
+  | Some b when b <> 0 ->
+      Some (100. *. float (Option.value ~default:0 a) /. float b)
+  | _ -> None
+
+let rates (t : totals) = (ratio t.hit t.scored, ratio t.fix_covered t.fix_tokens)
 
 (** The suggestions of a PR that matched the author's fix, as comparable keys:
     the ones counted in the totals and the ones counted apart
@@ -25,16 +85,13 @@ let rates t =
 let hits row =
   List.sort_uniq compare
     (List.filter_map
-       (fun s ->
-         if Json.truthy (Json.member "hit" s) then
-           Some
-             ( Json.str "package" s,
-               Json.str "rule" s,
-               Json.to_str_list (Json.member "tokens" s) )
-         else None)
-       (Json.list "suggestions" row @ Json.list "health_suggestions" row))
+       (fun s -> if s.hit then Some (s.package, s.rule, s.tokens) else None)
+       (row.suggestions @ row.health_suggestions))
 
 let diff a b = List.filter (fun x -> not (List.mem x b)) a
+
+(* A PR's number, as Python's str() printed it. *)
+let pr_text = function Some n -> string_of_int n | None -> "None"
 let pct = function None -> "n/a" | Some x -> Printf.sprintf "%.0f%%" x
 
 (* Python's str() of a JSON number. *)
@@ -47,24 +104,23 @@ let s (v : Json.t) =
   | v -> Json.dumps v
 
 let run ~current ~history ~commit ~max_drop ~min_scored () =
-  let cur =
+  let cur_json =
     Json.parse (In_channel.with_open_bin current In_channel.input_all)
   in
+  let cur = evaluation_of_json cur_json in
   Util.makedirs history;
   let latest = Filename.concat history "latest.json" in
   let prev =
     if Sys.file_exists latest then
-      Some (Json.parse (In_channel.with_open_bin latest In_channel.input_all))
+      Some
+        (evaluation_of_json
+           (Json.parse (In_channel.with_open_bin latest In_channel.input_all)))
     else None
   in
-  let t = Json.member "totals" cur in
+  let t = cur.totals in
   let p, r = rates t in
-  let rows =
-    List.filter (fun x -> not (Json.mem "error" x)) (Json.list "prs" cur)
-  in
-  let errors =
-    List.filter (fun x -> Json.mem "error" x) (Json.list "prs" cur)
-  in
+  let rows = List.filter (fun x -> x.error = None) cur.prs in
+  let errors = List.filter (fun x -> x.error <> None) cur.prs in
   let out = ref [] in
   let add l = out := List.rev_append l !out in
   add
@@ -83,10 +139,14 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
       "| | This run | Previous run |";
       "|---|---|---|";
     ];
-  let pt = Option.map (Json.member "totals") prev in
+  let pt = Option.map (fun p -> p.totals) prev in
   let pp, pr_ = match pt with Some pt -> rates pt | None -> (None, None) in
-  let g k = s (Json.member k t)
-  and pg k = match pt with Some pt -> s (Json.member k pt) | None -> "" in
+  let g k = s (Option.value ~default:`Null (List.assoc_opt k t.members))
+  and pg k =
+    match pt with
+    | Some pt -> s (Option.value ~default:`Null (List.assoc_opt k pt.members))
+    | None -> ""
+  in
   add
     [
       Printf.sprintf
@@ -108,10 +168,11 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
          else "none")
       ^ " |";
     ];
+  let has_health t = List.mem_assoc "health_scored" t.members in
   let prev_has_health =
-    match pt with Some pt -> Json.mem "health_scored" pt | None -> false
+    match pt with Some pt -> has_health pt | None -> false
   in
-  if Json.mem "health_scored" t then
+  if has_health t then
     add
       [
         Printf.sprintf
@@ -123,7 +184,7 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
            else "none")
         ^ " |";
       ];
-  if prev <> None && Json.mem "health_scored" t && not prev_has_health then
+  if prev <> None && has_health t && not prev_has_health then
     (* evaluate_closed_prs changed on 2026-11-20: each file of the PR compared
        between its two versions (rebased PRs), new archives and
        opam-health-check counted apart. *)
@@ -139,9 +200,8 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
       let before =
         List.filter_map
           (fun x ->
-            if Json.mem "error" x then None
-            else Some ((Json.member "pr" x, Json.member "initial" x), x))
-          (Json.list "prs" prev)
+            if x.error <> None then None else Some ((x.pr, x.initial), x))
+          prev.prs
       in
       (* dict: the last row of a key wins *)
       let find k =
@@ -152,15 +212,15 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
       let lost = ref [] and gained = ref [] and common = ref 0 in
       List.iter
         (fun x ->
-          match find (Json.member "pr" x, Json.member "initial" x) with
+          match find (x.pr, x.initial) with
           | None -> ()
           | Some y ->
               incr common;
               List.iter
-                (fun k -> lost := !lost @ [ (Json.member "pr" x, k) ])
+                (fun k -> lost := !lost @ [ (x.pr, k) ])
                 (diff (hits y) (hits x));
               List.iter
-                (fun k -> gained := !gained @ [ (Json.member "pr" x, k) ])
+                (fun k -> gained := !gained @ [ (x.pr, k) ])
                 (diff (hits x) (hits y)))
         rows;
       add [ ""; Printf.sprintf "PRs evaluated both times: %d." !common ];
@@ -168,7 +228,7 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
         String.concat ", "
           (List.map
              (fun (n, (pkg, rule, _)) ->
-               Printf.sprintf "#%s %s (%s)" (s n) pkg rule)
+               Printf.sprintf "#%s %s (%s)" (pr_text n) pkg rule)
              l)
       in
       if !gained <> [] then
@@ -191,7 +251,7 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
       end;
       match (p, pp) with
       | Some p', Some pp'
-        when Json.to_int (Json.member "scored" t) >= min_scored
+        when Option.value ~default:0 t.scored >= min_scored
              && pp' -. p' >= max_drop ->
           failed :=
             !failed
@@ -205,9 +265,8 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
     (fun x ->
       add
         [
-          Printf.sprintf "- #%s: the tool failed: `%s`"
-            (s (Json.member "pr" x))
-            (Util.suffix_chars (Json.str "error" x) 150);
+          Printf.sprintf "- #%s: the tool failed: `%s`" (pr_text x.pr)
+            (Util.suffix_chars (Option.value ~default:"" x.error) 150);
         ])
     errors;
   if !failed <> [] then
@@ -223,7 +282,7 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
         ("errors", `Int (List.length errors));
       ]
   in
-  Dict.update record (Json.to_assoc t);
+  Dict.update record t.members;
   Dict.update record
     [ ("precision", fl p); ("recall", fl r); ("failed", Json.strings !failed) ];
   let oc =
@@ -235,7 +294,7 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
   output_string oc (Json.dumps (Dict.to_json record) ^ "\n");
   close_out oc;
   let oc = open_out_bin latest in
-  output_string oc (Json.dumps ~indent:1 cur);
+  output_string oc (Json.dumps ~indent:1 cur_json);
   close_out oc;
   exit (if !failed <> [] then 1 else 0)
 

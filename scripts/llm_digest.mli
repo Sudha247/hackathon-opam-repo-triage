@@ -23,10 +23,10 @@ val main : unit -> unit
 (** Run [llm-digest] with the command line's arguments. *)
 
 val report :
-  ?page:string -> (Triage.Json.t * Triage.Suggestion.t) list -> int -> string
+  ?page:string -> (int option * Triage.Suggestion.t) list -> int -> string
 (** [report ~page answers min_prs]: the digest (GitHub Markdown) of the LLM
-    answers, each with the number of its PR; the groups seen in at least
-    [min_prs] PRs are the candidates for a rule. An answer repeated on the
+    answers, each with the number of its PR (if known); the groups seen in at
+    least [min_prs] PRs are the candidates for a rule. An answer repeated on the
     failures that share its error counts once per PR. [page]: the triage page,
     for links. Everything in an answer is untrusted (the model quotes CI logs
     and opam files): prose goes through {!Triage.Md.md_text}, log lines and

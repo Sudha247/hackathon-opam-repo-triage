@@ -9,8 +9,13 @@ module T = Scripts.Triage_open_prs
 let json =
   Alcotest.testable (fun f v -> Format.pp_print_string f (Json.dumps v)) ( = )
 
+module E = Scripts.Page_data.Entry
+
 let j s = Json.parse s
-let d s = Dict.of_json (j s)
+let d s = E.of_json (j s)
+
+(* An entry of a state file, as triage_open_prs reads it. *)
+let typed x = E.of_json (Dict.to_json x)
 let triple = Alcotest.(triple bool bool bool)
 
 let iso_at t =
@@ -19,10 +24,10 @@ let iso_at t =
     (t.tm_mon + 1) t.tm_mday t.tm_hour t.tm_min t.tm_sec
 
 (* dict(d, k=v) *)
-let with_ (x : Dict.t) kv =
-  let y = Dict.copy x in
+let with_ (x : E.t) kv =
+  let y = Dict.of_json (E.to_json x) in
   Dict.update y kv;
-  y
+  E.of_json (Dict.to_json y)
 
 let tmpdir () =
   let d = Filename.temp_file "test-page-run" "" in
@@ -324,21 +329,22 @@ let failed_analysis =
 
 let pr ?(kw = []) () =
   with_
-    (Dict.of_list
-       [
-         ("number", `Int 1);
-         ("title", `String "t");
-         ("url", `String "u");
-         ("draft", `Bool false);
-         ("updated", `String "2026-11-20T00:00:00Z");
-         ("sha", `String sha_a);
-         ("author", `String "x");
-         ("labels", `List []);
-         ("stale_labels", `List []);
-         ("ci_state", `String "FAILURE");
-         ("ci_url", `Null);
-         ("ci_created", `String "2026-11-20T10:00:00Z");
-       ])
+    (E.of_json
+    @@ `Assoc
+         [
+           ("number", `Int 1);
+           ("title", `String "t");
+           ("url", `String "u");
+           ("draft", `Bool false);
+           ("updated", `String "2026-11-20T00:00:00Z");
+           ("sha", `String sha_a);
+           ("author", `String "x");
+           ("labels", `List []);
+           ("stale_labels", `List []);
+           ("ci_state", `String "FAILURE");
+           ("ci_url", `Null);
+           ("ci_created", `String "2026-11-20T10:00:00Z");
+         ])
     kw
 
 type env = { tmp : string; state : string }
@@ -617,12 +623,14 @@ let test_deferred_new_commit_drops_old_fields () =
   save e
     [
       ( "1",
-        with_
-          (pr ~kw:[ ("ci_state", `String "PENDING") ] ())
-          (Json.to_assoc
-             (j
-                {|{"result": {"suggestions": []}, "ci_unfinished": 7, "llm": true, "mcp_errors": 2, "net_errors": 1,
-                             "tool_version": "v", "analysed_at": "2026-11-20T10:00:00+00:00"}|}))
+        Dict.of_json
+          (E.to_json
+             (with_
+                (pr ~kw:[ ("ci_state", `String "PENDING") ] ())
+                (Json.to_assoc
+                   (j
+                      {|{"result": {"suggestions": []}, "ci_unfinished": 7, "llm": true, "mcp_errors": 2, "net_errors": 1,
+                             "tool_version": "v", "analysed_at": "2026-11-20T10:00:00+00:00"}|}))))
       );
     ];
   let state, calls, _ =
@@ -927,7 +935,7 @@ let test_kept_result_during_a_rebuild () =
   Alcotest.(check (pair string string))
     "states" ("FAILURE", "PENDING")
     (Dict.str (entry state) "ci_state", Dict.str (entry state) "ci_state_now");
-  Alcotest.(check bool) "running" true (T.ci_running (entry state));
+  Alcotest.(check bool) "running" true (T.ci_running (typed (entry state)));
   let state, _, _ = run_main ~summary_ok:false e [ rebuilding ] in
   Alcotest.(check string)
     "still pending" "PENDING"
@@ -1377,13 +1385,13 @@ let test_git_host_down_asked_again_a_day_later () =
 (* ------------------------------------------------------------------------ *)
 (* PageTest: shared failures and stale labels (functions of this script). *)
 
-let prs_of l = List.map (fun (k, v) -> (k, Dict.of_json v)) l
+let prs_of l = List.map (fun (k, v) -> (k, E.of_json v)) l
 
-let also (prs : (string * Dict.t) list) k i =
+let also (prs : (string * E.t) list) k i =
   let s =
     List.nth
       (Json.list "suggestions"
-         (Option.get (Dict.get (List.assoc k prs) "result")))
+         (Json.member "result" (E.to_json (List.assoc k prs))))
       i
   in
   match Json.member "also_failing_in" s with

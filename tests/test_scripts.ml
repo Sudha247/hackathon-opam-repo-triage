@@ -109,9 +109,9 @@ let test_llm_digest () =
   in
   let items =
     [
-      (`Int 123, sugg r);
-      (`Int 456, good);
-      (`Int 789, with_ [ ("log_error", `String ("other " ^ hostile)) ]);
+      (Some 123, sugg r);
+      (Some 456, good);
+      (Some 789, with_ [ ("log_error", `String ("other " ^ hostile)) ]);
     ]
   in
   let md = ref "" in
@@ -152,7 +152,7 @@ let test_llm_digest_groups () =
   let b = a () in
   b.Suggestion.failing <- Set "b.1";
   let md =
-    D.report (List.init 5 (fun _ -> (`Int 29110, a ())) @ [ (`Int 1, b) ]) 2
+    D.report (List.init 5 (fun _ -> (Some 29110, a ())) @ [ (Some 1, b) ]) 2
   in
   Alcotest.(check bool)
     (Util.prefix_chars md 80) true
@@ -167,6 +167,56 @@ let test_masked_quotes () =
   eq "spaces" "a 'b c' d" (D.masked "a 'b c' d");
   eq "N.N" "version N.N.N of M.x" (D.masked "version 1.2.3 of Foo.Bar")
 
+(* The page's data read and printed back: nothing is lost, the members of
+   another name or type included (as stored by another version). *)
+let test_page_data_round_trip () =
+  let module P = Scripts.Page_data in
+  let rec sorted (v : Json.t) : Json.t =
+    match v with
+    | `Assoc kv ->
+        `Assoc (List.sort compare (List.map (fun (k, v) -> (k, sorted v)) kv))
+    | `List l -> `List (List.map sorted l)
+    | v -> v
+  in
+  let same msg (v : Json.t) (w : Json.t) =
+    Alcotest.(check string) msg (Json.dumps (sorted v)) (Json.dumps (sorted w))
+  in
+  let entry =
+    Json.parse
+      {|{"number": 1, "title": null, "draft": false, "author": null, "labels": ["a"],
+         "ci_state": null, "ci_state_now": null, "ci_unfinished": null, "seconds": 1.5,
+         "result": {"sha": "s", "pr": null, "suggestions": [{"rule": "x-new", "where_kind": "elsewhere"}],
+                    "errors": {"mcp-errors": 1}, "future": [1]},
+         "jobs": {"total": 3, "failed": {"build": 1, "weird": 2},
+                  "failing_revdeps": {"r.1": [{"variant": "v", "category": null, "target": null, "url": "u"}]}},
+         "since_base": {"sha": "b", "result": {"suggestions": []}},
+         "since_last_push": {"previous_sha": "b", "fixed": [], "new": ["x"], "still": 2},
+         "last_error_ci_state": null, "llm_calls": null, "attempts": "two", "unknown": {"x": 1}}|}
+  in
+  same "entry" entry (P.Entry.to_json (P.Entry.of_json entry));
+  let e = P.Entry.of_json entry in
+  Alcotest.(check bool) "wrong type" true (e.attempts = None);
+  let data =
+    `Assoc
+      [
+        ("generated", `String "g");
+        ("limit", `Null);
+        ("llm", Json.parse {|{"enabled": true, "calls": 0, "off": null}|});
+        ( "run",
+          Json.parse
+            {|{"github_api_calls": 1, "tool_requests": {"http": 2}, "analysed": 1, "note": "x"}|}
+        );
+        ("prs", `List [ entry ]);
+        ("passing", `List [ Json.parse {|{"number": 2, "draft": true}|} ]);
+        ("future", `Bool true);
+      ]
+  in
+  same "data" data (P.to_json (P.of_json data));
+  let state =
+    `Assoc [ ("updated", `String "u"); ("prs", `Assoc [ ("1", entry) ]) ]
+  in
+  same "state" state (P.State.to_json (P.State.of_json state))
+
 let () =
   Alcotest.run "scripts"
     [
@@ -176,4 +226,6 @@ let () =
           Alcotest.test_case "groups" `Quick test_llm_digest_groups;
           Alcotest.test_case "masked quotes" `Quick test_masked_quotes;
         ] );
+      ( "page_data",
+        [ Alcotest.test_case "round trip" `Quick test_page_data_round_trip ] );
     ]

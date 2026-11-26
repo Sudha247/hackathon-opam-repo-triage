@@ -18,28 +18,28 @@ let load source : Json.t =
          ~timeout:60. source)
   else Json.parse (In_channel.with_open_bin source In_channel.input_all)
 
+let llm_answers n sugg =
+  List.filter_map
+    (fun (r : Suggestion.t) -> if r.rule = Some Llm then Some (n, r) else None)
+    sugg
+
 (** (PR number, suggestion) for every LLM answer. *)
 let answers sources =
   List.concat_map
     (fun src ->
-      let d = load src in
-      if Json.mem "prs" d then (* the page's data.json *)
-        List.concat_map
-          (fun p ->
-            List.filter_map
-              (fun r ->
-                if Json.str_opt "rule" r = Some "llm" then
-                  Some (Json.member "number" p, Suggestion.of_json r)
-                else None)
-              (Json.list "suggestions" (Json.member "result" p)))
-          (Json.list "prs" d)
-      else (* one `suggest --json` output *)
-        List.filter_map
-          (fun r ->
-            if Json.str_opt "rule" r = Some "llm" then
-              Some (Json.member "pr" d, Suggestion.of_json r)
-            else None)
-          (Json.list "suggestions" d))
+      match load src with
+      | `Assoc kv as d when List.mem_assoc "prs" kv ->
+          (* the page's data.json *)
+          List.concat_map
+            (fun p ->
+              llm_answers
+                (Page_data.Entry.number_opt p)
+                (Page_data.Entry.suggestions p))
+            (Page_data.prs (Page_data.of_json d))
+      | d ->
+          (* one `suggest --json` output *)
+          let res = Page_data.Result.of_json d in
+          llm_answers (Suggestion.get res.pr) (Page_data.Result.suggestions res))
     sources
 
 let file_line_characters_re =
@@ -165,13 +165,13 @@ let py_str (v : Json.t) =
 (** A reference to opam-repository PR [n] that GitHub does not turn into a
     cross-reference (a "mentioned this" event on the PR): a link to the PR on
     the triage page when it is known, else a code span. *)
-let pr_ref ?page (n : Json.t) =
-  let n = if Json.truthy n then py_str n else "" in
-  if not (Util.isdigit n) then "?"
-  else
-    match page with
-    | Some page -> Printf.sprintf "[`#%s`](%s#pr-%s)" n page n
-    | None -> Md.md_code ("ocaml/opam-repository#" ^ n)
+let pr_ref ?page (n : int option) =
+  match n with
+  | Some n when n > 0 -> (
+      match page with
+      | Some page -> Printf.sprintf "[`#%d`](%s#pr-%d)" n page n
+      | None -> Md.md_code ("ocaml/opam-repository#" ^ string_of_int n))
+  | _ -> "?"
 
 let https_za_z0_re =
   Rx.v {|(https://[A-Za-z0-9.-]+/(?:[A-Za-z0-9._~-]+/)*)data\.json|}
@@ -267,7 +267,8 @@ let report ?page items min_prs =
       let pr_list =
         List.sort_uniq compare
           (List.filter_map
-             (fun (n, _, _) -> if Json.truthy n then Some n else None)
+             (fun (n, _, _) ->
+               match n with Some n when n <> 0 -> Some n | _ -> None)
              v)
       in
       let pkgs =
@@ -285,7 +286,8 @@ let report ?page items min_prs =
           Printf.sprintf "### %s" (if code = "" then "?" else code);
           "";
           "- PRs: "
-          ^ String.concat ", " (List.map (fun n -> pr_ref ?page n) pr_list);
+          ^ String.concat ", "
+              (List.map (fun n -> pr_ref ?page (Some n)) pr_list);
           (Printf.sprintf "- Failing packages: %s"
              (Md.md_text (String.concat ", " (Util.take 12 pkgs)))
           ^ if List.length pkgs > 12 then " \xe2\x80\xa6" else "");

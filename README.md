@@ -41,8 +41,8 @@ and processes the standard library lacks), `Odict` (tables that keep their
 order), `Date`, `Rx` (regular expressions with the API and syntax of Python's `re`, on
 ocaml-re), `Json` (printed exactly as Python's `json` module does, so the
 state, cache and page files keep their format), `Dict` (JSON objects built
-member by member, on `Odict`: the page's state of each PR, the LLM's cached
-answers),
+member by member, on `Odict`: the LLM's cached answers, the baseline of
+`compare`),
 `Proc`, `Http` (through libcurl), `Html`, `Words`, `Md`. Then `Net` (HTTP,
 GitHub API, git, caches), `Ci` (CI pages and logs, job names; the statuses,
 categories and kinds of jobs as variants), `Rule` (the names of the rules),
@@ -58,7 +58,10 @@ sources), `Rules` (one job's log), `Matrix` (pass/fail patterns), `Context`
 `Llm`, `Checks` and `Suggest` (runs and merges everything), `Render` (text,
 comment, review) and `Cli`. `bin/opam_repo_ci_triage.ml` is the entry point.
 The scripts of the triage page and of the evaluations are the `scripts/`
-library (their executables are in `scripts/bin/`). Every module of both
+library (their executables are in `scripts/bin/`); they read and write the
+page's state and data (`state/prs.json`, `site/data.json`) as the records of
+`Page_data`.
+ Every module of both
 libraries has an interface (`.mli`) that documents it.
 
 | Command | What it does |

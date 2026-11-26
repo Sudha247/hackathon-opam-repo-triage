@@ -9,7 +9,7 @@ let max_attempts = 3
 let attempts_expire = 24. *. 3600.
 
 (* Failed-job categories (from [summary]) that are not about the package itself. *)
-let noise = [ "passed"; "network"; "cancelled"; "not-available"; "ignored" ]
+let noise = Ci.Category.[ passed; Network; Cancelled; Not_available; Ignored ]
 
 (* Transient LLM failures in a row after which the LLM is not asked again in
    a run (LLM_BREAKER of the tool's LLM fallback). *)
@@ -190,25 +190,26 @@ let list_open_prs token =
               (to_list (member "contexts" (member "status" head)));
           let ci = !ci in
           let p =
-            Dict.of_list
-              [
-                ("number", member "number" n);
-                ("title", member "title" n);
-                ("url", member "url" n);
-                ("draft", member "isDraft" n);
-                ("updated", member "updatedAt" n);
-                ("sha", member "headRefOid" n);
-                ("author", member "login" (member "author" n));
-                ( "labels",
-                  `List
-                    (List.map
-                       (fun lb -> member "name" lb)
-                       (to_list (member "nodes" (member "labels" n)))) );
-                ("stale_labels", strings (stale_labels n));
-                ("ci_state", member "state" ci);
-                ("ci_url", member "targetUrl" ci);
-                ("ci_created", member "createdAt" ci);
-              ]
+            Page_data.Entry.of_json
+            @@ `Assoc
+                 [
+                   ("number", member "number" n);
+                   ("title", member "title" n);
+                   ("url", member "url" n);
+                   ("draft", member "isDraft" n);
+                   ("updated", member "updatedAt" n);
+                   ("sha", member "headRefOid" n);
+                   ("author", member "login" (member "author" n));
+                   ( "labels",
+                     `List
+                       (List.map
+                          (fun lb -> member "name" lb)
+                          (to_list (member "nodes" (member "labels" n)))) );
+                   ("stale_labels", strings (stale_labels n));
+                   ("ci_state", member "state" ci);
+                   ("ci_url", member "targetUrl" ci);
+                   ("ci_created", member "createdAt" ci);
+                 ]
           in
           prs := p :: !prs
         end)
@@ -231,6 +232,17 @@ let last_error =
     "last_error_refreshed";
   ]
 
+module E = Page_data.Entry
+
+type 'a field = 'a Suggestion.field = Absent | Null | Set of 'a
+
+let get = Suggestion.get
+let truthy_str = function Some s -> s <> "" | None -> false
+let nonzero = function Some n -> n <> 0 | None -> false
+
+(* A member copied from the PR as listed: null when the listing lacks it. *)
+let listed = function Absent -> Null | f -> f
+
 (** Seconds since the date [iso] (from [now ()]), or None. *)
 let age ?now_ iso =
   match iso with
@@ -240,56 +252,53 @@ let age ?now_ iso =
       | Some t -> Some (Option.value ~default:(Unix.gettimeofday ()) now_ -. t)
       | None -> None)
 
-let get_result d = Dict.get d "result"
-let has_result d = get_result d <> None
+let has_result = E.has_result
 
-let attempts_used ?now_ (prev : Dict.t option) =
+let attempts_used ?now_ (prev : E.t option) =
   match prev with
   | None -> 0
   | Some prev -> (
       let at =
-        match Dict.str_opt prev "last_error_at" with
+        match prev.last_error_at with
         | Some s when s <> "" -> Some s
-        | _ -> Dict.str_opt prev "analysed_at"
+        | _ -> prev.analysed_at
       in
       match age ?now_ at with
       | Some last when last >= attempts_expire -> 0
-      | _ -> Dict.int prev "attempts")
+      | _ -> Option.value ~default:0 prev.attempts)
 
-let ci_changed (prev : Dict.t option) (p : Dict.t) =
+let ci_changed (prev : E.t option) (p : E.t) =
   match prev with
   | None -> false
   | Some prev ->
-      if Dict.str_opt prev "sha" <> Dict.str_opt p "sha" then false
+      if get prev.sha <> get p.sha then false
       else
-        let pc = Dict.str p "ci_created" and qc = Dict.str prev "ci_created" in
+        let pc = E.str p.ci_created and qc = E.str prev.ci_created in
         if pc <> "" && qc = "" then true
         else
           let newer = pc <> "" && qc <> "" && pc > qc in
-          newer || Dict.get prev "ci_state" <> Dict.get p "ci_state"
+          newer || get prev.ci_state <> get p.ci_state
 
 (** Whether the last failed attempt to redo [prev]'s analysis (its result kept,
     see main) was for the CI run of [p]: the same commit, status and status date
     ([last_error_ci_state], [last_error_ci_created]). *)
-let tried_run (prev : Dict.t option) (p : Dict.t) =
+let tried_run (prev : E.t option) (p : E.t) =
   match prev with
   | None -> false
   | Some prev ->
-      Dict.truthy prev "last_error"
-      && Dict.str_opt prev "sha" = Dict.str_opt p "sha"
-      && Dict.mem prev "last_error_ci_state"
-      && Dict.raw prev "last_error_ci_state"
-         = Some (Option.value ~default:`Null (Dict.raw p "ci_state"))
-      && Dict.get prev "last_error_ci_created" = Dict.get p "ci_created"
+      truthy_str (get prev.last_error)
+      && get prev.sha = get p.sha
+      && prev.last_error_ci_state <> Absent
+      && prev.last_error_ci_state = listed p.ci_state
+      && get prev.last_error_ci_created = get p.ci_created
 
-let needs_refresh (prev : Dict.t option) (p : Dict.t) =
+let needs_refresh (prev : E.t option) (p : E.t) =
   match prev with
   | None -> true
   | Some pv ->
-      if Dict.str_opt pv "sha" <> Dict.str_opt p "sha" then true
-      else if Dict.truthy pv "refresh_pending" then true
-      else if tried_run prev p && Dict.truthy pv "last_error_refreshed" then
-        false
+      if get pv.sha <> get p.sha then true
+      else if pv.refresh_pending = Some true then true
+      else if tried_run prev p && pv.last_error_refreshed = Some true then false
       else ci_changed prev p
 
 (** [ci_state_now]: opam-ci's status as listed now, when the result kept in
@@ -297,64 +306,92 @@ let needs_refresh (prev : Dict.t option) (p : Dict.t) =
     or failed, or whose CI page could not be read): the page shows such a PR on
     hold while that status is pending, not ready from the previous run's result
     (see Render_page.ci_running). *)
-let note_listed_ci (entry : Dict.t) (p : Dict.t) =
-  if has_result entry && ci_changed (Some entry) p then
-    Dict.set entry "ci_state_now"
-      (Option.value ~default:`Null (Dict.raw p "ci_state"))
-  else Dict.remove entry "ci_state_now"
+let note_listed_ci (entry : E.t) (p : E.t) =
+  entry.ci_state_now <-
+    (if has_result entry && ci_changed (Some entry) p then listed p.ci_state
+     else Absent);
+  entry.extra <- List.remove_assoc "ci_state_now" entry.extra
 
-let ci_running (e : Dict.t) =
-  if Dict.mem e "ci_state_now" then
-    Dict.raw e "ci_state_now" = Some (`String "PENDING")
-  else
-    Dict.str_opt e "ci_state" = Some "PENDING"
-    && Dict.raw e "ci_unfinished" <> Some (`Int 0)
+let ci_running (e : E.t) =
+  match e.ci_state_now with
+  | Set s -> s = "PENDING"
+  | Null -> false
+  | Absent -> e.ci_state = Set "PENDING" && e.ci_unfinished <> Set 0
 
 (** The analysis that [since_last_push] compares commit [sha]'s with: the
     previous head's result, or the one kept when the first analysis of a newer
     commit was deferred or failed ([since_base]), or None. Only what
     [since_last_push] reads is kept. *)
-let since_base (prev : Dict.t option) sha : Json.t option =
+let since_base (prev : E.t option) sha : E.t option =
   match prev with
-  | Some pv when Dict.str_opt pv "sha" <> Some sha && has_result pv ->
+  | Some pv when get pv.sha <> Some sha && has_result pv ->
       let sugg =
         List.map
-          (fun s ->
-            let s = Suggestion.of_json s in
-            `Assoc
-              (List.filter_map
-                 (fun (k, v) -> Option.map (fun v -> (k, `String v)) v)
-                 [
-                   ("rule", Option.map Rule.to_string s.rule);
-                   ("title", s.title);
-                   ("failing", Suggestion.get s.Suggestion.failing);
-                   ("job", s.Suggestion.job);
-                 ]))
-          (Json.list "suggestions" (Option.get (get_result pv)))
+          (fun (s : Suggestion.t) ->
+            let r = Suggestion.create () in
+            r.rule <- s.rule;
+            r.title <- s.title;
+            r.failing <-
+              (match s.failing with Set f -> Set f | Absent | Null -> Absent);
+            r.job <- s.job;
+            r)
+          (E.suggestions pv)
       in
-      Some
-        (`Assoc
-           [
-             ("sha", Option.value ~default:`Null (Dict.raw pv "sha"));
-             ("result", `Assoc [ ("suggestions", `List sugg) ]);
-           ])
+      let base = E.create () in
+      base.sha <- listed pv.sha;
+      base.result <- Set { Page_data.Result.empty with suggestions = Some sugg };
+      Some base
   | _ -> (
-      match Option.bind prev (fun pv -> Dict.get pv "since_base") with
-      | Some base when Json.truthy base && Json.member "sha" base <> `String sha
-        ->
+      match Option.bind prev (fun pv -> pv.since_base) with
+      | Some base when E.to_json base <> `Assoc [] && base.sha <> Set sha ->
           Some base
       | _ -> None)
 
+type summary_job = {
+  s_variant : string field;
+  s_url : string field;
+  s_status : string;  (** "" when absent *)
+  s_category : Ci.Category.t field;
+  s_target : string field;
+  s_revdep : string option;
+  s_experimental : bool;
+}
+(** A job of [summary --json] (the tool's output), as far as the page needs it:
+    the members a revdep job of the PR's entry keeps are null when absent
+    ({!Page_data.Revdep_job}). *)
+
+let summary_jobs (summary : Json.t option) =
+  let member k j =
+    match Json.member k j with `String s -> Set s | _ -> Null
+  in
+  List.map
+    (fun j ->
+      {
+        s_variant = member "variant" j;
+        s_url = member "url" j;
+        s_status = Json.str "status" j;
+        s_category =
+          (match member "category" j with
+          | Set c -> Set (Ci.Category.of_string c)
+          | Absent -> Absent
+          | Null -> Null);
+        s_target = member "target" j;
+        s_revdep = Json.str_opt "revdep" j;
+        s_experimental = Json.truthy (Json.member "experimental" j);
+      })
+    (match summary with Some s -> Json.list "jobs" s | None -> [])
+
 (** A digest of the job statuses of a CI page (from [summary --json]). While
+
     opam-ci's status is pending, the analysis of a PR is kept as long as the
     digest is unchanged: the status stays pending for good when a job never
     starts (lint after a failed analysis). *)
-let ci_digest (summary : Json.t option) =
-  let jobs = match summary with Some s -> Json.list "jobs" s | None -> [] in
+let ci_digest (summary : summary_job list) =
   let jobs =
     List.sort compare
-      (List.map (fun j -> [ Json.str "variant" j; Json.str "status" j ]) jobs)
+      (List.map (fun j -> [ E.str j.s_variant; j.s_status ]) summary)
   in
+
   let s = Json.dumps (`List (List.map Json.strings jobs)) in
   String.sub Digestif.SHA256.(to_hex (digest_string s)) 0 16
 
@@ -367,24 +404,23 @@ let llm_off_text = function
       "Anthropic's API failed several times in a row; the next update tries \
        again."
 
-let reuse ?now_ ?digest (prev : Dict.t option) (p : Dict.t) version llm =
+let reuse ?now_ ?digest (prev : E.t option) (p : E.t) version llm =
   let commit =
     match prev with
     | Some pv ->
-        Dict.str_opt pv "sha" = Dict.str_opt p "sha"
-        && Dict.str_opt pv "tool_version" = Some version
+        get pv.sha = get p.sha
+        && pv.tool_version = Some version
         && not (ci_changed prev p)
     | None -> false
   in
-  let pv = match prev with Some pv -> pv | None -> Dict.create () in
+  let pv = match prev with Some pv -> pv | None -> E.create () in
   let same =
-    if Dict.str_opt p "ci_state" = Some "PENDING" then
+    if p.ci_state = Set "PENDING" then
       (* Analysed again as jobs finish; a failed analysis is retried
          max_attempts times at most, even as jobs finish. *)
       commit
-      && (digest <> None
-          && Option.map (fun d -> `String d) digest = Dict.get pv "ci_digest"
-         || ((not (has_result pv)) && Dict.truthy pv "error"))
+      && ((digest <> None && digest = get pv.ci_digest)
+         || ((not (has_result pv)) && truthy_str (get pv.error)))
     else commit
   in
   let same_commit = ref (same && has_result pv) in
@@ -397,13 +433,9 @@ let reuse ?now_ ?digest (prev : Dict.t option) (p : Dict.t) version llm =
      ([llm_calls]: API errors, the LLM off for the run) is a retry: the
      attempts add up, max_attempts a day at most. *)
   let llm_retry = ref false in
-  if
-    !same && llm
-    && (not (Dict.truthy pv "llm"))
-    && not (Dict.truthy pv "ci_unfinished")
+  if !same && llm && pv.llm <> Some true && not (nonzero (get pv.ci_unfinished))
   then
-    begin if
-      Dict.get pv "llm_unanswered" <> None && not (Dict.truthy pv "llm_calls")
+    begin if get pv.llm_unanswered <> None && not (nonzero (get pv.llm_calls))
     then begin
       llm_retry := attempts_used ?now_ prev < max_attempts;
       same := not !llm_retry
@@ -416,7 +448,7 @@ let reuse ?now_ ?digest (prev : Dict.t option) (p : Dict.t) version llm =
     ref
       (!llm_retry
       || !same
-         && (Dict.truthy pv "mcp_errors" || Dict.truthy pv "net_errors")
+         && (nonzero pv.mcp_errors || nonzero pv.net_errors)
          && attempts_used ?now_ prev < max_attempts)
   in
   if !retry then same := false;
@@ -424,9 +456,8 @@ let reuse ?now_ ?digest (prev : Dict.t option) (p : Dict.t) version llm =
      (Sources.git_down): an analysis that skipped one is done again once
      that has passed (then once a day while the host stays down). *)
   if
-    !same
-    && Dict.truthy pv "git_unreachable"
-    && Option.value ~default:0. (age ?now_ (Dict.str_opt pv "analysed_at"))
+    !same && nonzero pv.git_unreachable
+    && Option.value ~default:0. (age ?now_ pv.analysed_at)
        >= Net.git_down_max_age
   then same := false;
   (* A failed attempt to redo an analysis kept the previous result: tried
@@ -436,8 +467,8 @@ let reuse ?now_ ?digest (prev : Dict.t option) (p : Dict.t) version llm =
      kept still says it saw the previous run: ci_changed holds). *)
   if
     (not !same) && prev <> None
-    && Dict.str_opt pv "sha" = Dict.str_opt p "sha"
-    && Dict.truthy pv "last_error"
+    && get pv.sha = get p.sha
+    && truthy_str (get pv.last_error)
     && has_result pv
     && ((not (ci_changed prev p)) || tried_run prev p)
   then
@@ -550,64 +581,61 @@ let run_tool_hook = ref (fun args timeout -> run_tool args timeout)
 
 (** Failed-job counts by category, and the reverse dependencies that failed to
     build or test, from [summary --json] (which reads the cached CI page). *)
-let jobs_overview (summary : Json.t) : Json.t =
+let jobs_overview (jobs : summary_job list) : Page_data.Jobs.t =
   let failed = Odict.create () in
   let revdeps = Odict.create () in
-  let jobs = Json.list "jobs" summary in
   List.iter
     (fun j ->
-      if Json.str_opt "status" j = Some "failed" then begin
+      if j.s_status = "failed" then begin
         let cat =
-          match Json.str_opt "category" j with
-          | Some c when c <> "" -> c
+          match j.s_category with
+          | Set c when Ci.Category.to_string c <> "" -> Ci.Category.to_string c
           | _ -> "?"
         in
         Odict.set failed cat (1 + Option.value ~default:0 (Odict.get failed cat));
-        match Json.str_opt "revdep" j with
+        match j.s_revdep with
         | Some rd
           when rd <> ""
                && (not
-                     (List.mem (Json.str "category" j) noise
-                     && Json.str_opt "category" j <> None))
-               && not (Json.truthy (Json.member "experimental" j)) ->
-            let x =
-              `Assoc
-                [
-                  ("variant", Json.member "variant" j);
-                  ("url", Json.member "url" j);
-                  ("category", Json.member "category" j);
-                  ("target", Json.member "target" j);
-                ]
+                     (match j.s_category with
+                     | Set c -> List.mem c noise
+                     | Absent | Null -> false))
+               && not j.s_experimental ->
+            let x : Page_data.Revdep_job.t =
+              {
+                variant = j.s_variant;
+                url = j.s_url;
+                category = j.s_category;
+                target = j.s_target;
+                extra = [];
+              }
             in
+
             Odict.set revdeps rd
               (Option.value ~default:[] (Odict.get revdeps rd) @ [ x ])
         | _ -> ()
       end)
     jobs;
-  `Assoc
-    [
-      ("total", `Int (List.length jobs));
-      ( "failed",
-        `Assoc (List.map (fun (k, n) -> (k, `Int n)) (Odict.to_list failed)) );
-      ( "failing_revdeps",
-        `Assoc
-          (List.map
-             (fun (k, v) -> (k, `List v))
-             (List.sort
-                (fun (a, _) (b, _) -> compare a b)
-                (Odict.to_list revdeps))) );
-    ]
+  {
+    total = Some (List.length jobs);
+    failed =
+      Some
+        (List.map
+           (fun (k, n) -> (Ci.Category.of_string k, n))
+           (Odict.to_list failed));
+    failing_revdeps =
+      Some
+        (List.sort (fun (a, _) (b, _) -> compare a b) (Odict.to_list revdeps));
+    extra = [];
+  }
 
-let save_state path (prs : (string * Dict.t) list) =
+let save_state path (prs : (string * E.t) list) =
   Util.makedirs (Filename.dirname (Util.abspath path));
   let oc = open_out_bin (path ^ ".tmp") in
   output_string oc
     (Json.dumps
-       (`Assoc
-          [
-            ("updated", `String (now ()));
-            ("prs", `Assoc (List.map (fun (k, e) -> (k, Dict.to_json e)) prs));
-          ]));
+       (Page_data.State.to_json
+          { updated = Some (now ()); prs = Some prs; extra = [] }));
   close_out oc;
   Sys.rename (path ^ ".tmp") path
 
@@ -643,35 +671,34 @@ let independent prs (tested : int -> SS.t) =
   in
   picked
 
-let mark_shared_failures (prs : (string * Dict.t) list) =
+(* The PR's number, 0 when unknown. *)
+let number_or_0 (e : E.t) = match e.number with Set n -> n | _ -> 0
+
+let mark_shared_failures (prs : (string * E.t) list) =
   (* revdep -> PR -> [(platform, tested package name, category)] *)
   let where :
       ( string,
-        (int * (string option * string * string option) list) list )
+        (int * (string option * string * Ci.Category.t option) list) list )
       Hashtbl.t =
     Hashtbl.create 64
   in
-  let failing_revdeps e =
-    match Dict.get e "jobs" with
-    | Some j -> Json.assoc "failing_revdeps" j
-    | None -> []
+  let failing_revdeps (e : E.t) =
+    match e.jobs with
+    | Set j -> Option.value ~default:[] j.failing_revdeps
+    | Absent | Null -> []
   in
   List.iter
     (fun (_, e) ->
-      let n = Dict.int e "number" in
+      let n = number_or_0 e in
       List.iter
         (fun (rd, js) ->
           let l =
-            List.filter_map
-              (fun j ->
-                match j with
-                | `Assoc _ ->
-                    Some
-                      ( job_platform (Json.str_opt "variant" j),
-                        fst (Ci.split_pkg (Json.str "target" j)),
-                        Json.str_opt "category" j )
-                | _ -> None)
-              (Json.to_list js)
+            List.map
+              (fun (j : Page_data.Revdep_job.t) ->
+                ( job_platform (get j.variant),
+                  fst (Ci.split_pkg (E.str j.target)),
+                  get j.category ))
+              js
           in
           let cur = Option.value ~default:[] (Hashtbl.find_opt where rd) in
           Hashtbl.replace where rd
@@ -681,16 +708,15 @@ let mark_shared_failures (prs : (string * Dict.t) list) =
         (failing_revdeps e))
     prs;
   List.iter
-    (fun (_, e) ->
-      let n = Dict.int e "number" in
+    (fun (_, (e : E.t)) ->
+      let n = number_or_0 e in
       let mine = failing_revdeps e in
-      match Dict.dict e "result" with
-      | None -> ()
-      | Some result ->
+      match e.result with
+      | Absent | Null -> ()
+      | Set result ->
           let sugg =
             List.map
-              (fun s ->
-                let r = Suggestion.of_json s in
+              (fun (r : Suggestion.t) ->
                 (* computed again below (a value of another type included) *)
                 r.also_failing_in <- None;
                 r.extra <- List.remove_assoc "also_failing_in" r.extra;
@@ -715,15 +741,12 @@ let mark_shared_failures (prs : (string * Dict.t) list) =
                             let cats =
                               List.sort_uniq compare
                                 (List.filter_map
-                                   (fun j ->
-                                     match j with
-                                     | `Assoc _
-                                       when Json.str_opt "variant" j = Some v ->
-                                         Json.str_opt "category" j
-                                     | _ -> None)
-                                   (Json.to_list
-                                      (Option.value ~default:`Null
-                                         (List.assoc_opt rd mine))))
+                                   (fun (j : Page_data.Revdep_job.t) ->
+                                     if get j.variant = Some v then
+                                       get j.category
+                                     else None)
+                                   (Option.value ~default:[]
+                                      (List.assoc_opt rd mine)))
                             in
                             let same =
                               List.filter_map
@@ -775,11 +798,10 @@ let mark_shared_failures (prs : (string * Dict.t) list) =
                       then r.also_failing_in <- Some (IS.elements o)
                   | _ -> ()
                 end;
-                Suggestion.to_json r)
-              (Dict.list result "suggestions")
+                r)
+              (Page_data.Result.suggestions result)
           in
-          Dict.set result "suggestions" (`List sugg);
-          Dict.set e "result" (Dict.to_json result))
+          e.result <- Set { result with suggestions = Some sugg })
     prs
 
 (** What changed between the analysis of a PR's previous head and this one: the
@@ -787,13 +809,13 @@ let mark_shared_failures (prs : (string * Dict.t) list) =
     failing package) pairs, shown with their title (a new wording of a title is
     not a new problem); reruns and unrecognised failures are left out, since
     they come and go with CI. *)
-let since_last_push (prev : Json.t) (result : Json.t) : Json.t =
-  let keys res =
+let since_last_push (prev : E.t) (result : Page_data.Result.t) :
+    Page_data.Since_last_push.t =
+  let keys sugg =
     let tbl = Odict.create () in
     let ( |? ) a b = match a with Some s when s <> "" -> s | _ -> b in
     List.iter
-      (fun s ->
-        let s = Suggestion.of_json s in
+      (fun (s : Suggestion.t) ->
         let rule = Option.map Rule.to_string s.rule in
         if not (Titles.has_rule [ Rerun; Unrecognised; Lint ] s) then begin
           let k =
@@ -803,10 +825,11 @@ let since_last_push (prev : Json.t) (result : Json.t) : Json.t =
           let key = Json.dumps (`List [ `String (fst k); `String (snd k) ]) in
           Odict.set tbl key (k, s.title |? (rule |? ""))
         end)
-      (Json.list "suggestions" res);
+      sugg;
     Odict.values tbl
   in
-  let before = keys (Json.member "result" prev) and after = keys result in
+  let before = keys (E.suggestions prev)
+  and after = keys (Page_data.Result.suggestions result) in
   let mem k l = List.exists (fun (k', _) -> k' = k) l in
   let fmt ks =
     List.sort compare
@@ -814,18 +837,13 @@ let since_last_push (prev : Json.t) (result : Json.t) : Json.t =
          (fun ((_, f), name) -> if f <> "" then name ^ ": " ^ f else name)
          ks)
   in
-  `Assoc
-    [
-      ("previous_sha", Json.member "sha" prev);
-      ( "fixed",
-        Json.strings
-          (fmt (List.filter (fun (k, _) -> not (mem k after)) before)) );
-      ( "new",
-        Json.strings
-          (fmt (List.filter (fun (k, _) -> not (mem k before)) after)) );
-      ( "still",
-        `Int (List.length (List.filter (fun (k, _) -> mem k after) before)) );
-    ]
+  {
+    previous_sha = listed prev.sha;
+    fixed = Some (fmt (List.filter (fun (k, _) -> not (mem k after)) before));
+    new_ = Some (fmt (List.filter (fun (k, _) -> not (mem k before)) after));
+    still = Some (List.length (List.filter (fun (k, _) -> mem k after) before));
+    extra = [];
+  }
 
 let llm_available () = Util.getenv_nonempty "ANTHROPIC_API_KEY" <> None
 let llm_available_hook = ref llm_available
@@ -967,13 +985,13 @@ let counter = function
   | Analysed -> "analysed"
 
 type item = {
-  p : Dict.t;
+  p : E.t;
   key : string;
   sha : string;
-  prev : Dict.t option;
-  pv : Dict.t;
+  prev : E.t option;
+  pv : E.t;
   same_sha : bool;
-  entry : Dict.t;
+  entry : E.t;
 }
 (** An open PR in a run: [p] as listed, [prev] its entry in the previous state
     ([pv]: empty without one), [entry] its entry in the new state. *)
@@ -1016,11 +1034,11 @@ let main ?(argv = Sys.argv) () =
   let old =
     match Json.load args.state with
     | Some (`Assoc _ as s) ->
-        List.map (fun (k, v) -> (k, Dict.of_json v)) (Json.assoc "prs" s)
+        Option.value ~default:[] (Page_data.State.of_json s).prs
     | _ -> []
   in
   let prs, list_calls = !list_open_prs_hook token in
-  let state_of p = Dict.str_opt p "ci_state" in
+  let state_of (p : E.t) = get p.ci_state in
   (* Failed CI, and CI still running (shown if some jobs have already failed). *)
   let failing =
     List.filter
@@ -1042,7 +1060,7 @@ let main ?(argv = Sys.argv) () =
     if llm then Printf.sprintf "on (at most %d calls)" args.llm_budget
     else "off (no ANTHROPIC_API_KEY)");
   let version = !tool_version_hook () in
-  let new_state : Dict.t Odict.t = Odict.create () in
+  let new_state : E.t Odict.t = Odict.create () in
   let stats : int Odict.t = Odict.create () in
   let stat k = Option.value ~default:0 (Odict.get stats k) in
   let bump k = Odict.set stats k (stat k + 1) in
@@ -1060,46 +1078,43 @@ let main ?(argv = Sys.argv) () =
       old
     @ List.filter (fun (k, _) -> not (List.mem_assoc k old)) ns
   in
-  let raw p k = Option.value ~default:`Null (Dict.raw p k) in
-  let item_of p =
-    let key = string_of_int (Dict.int p "number") in
-    let sha = Dict.str p "sha" in
+  let item_of (p : E.t) =
+    let key = string_of_int (number_or_0 p) in
+    let sha = E.str p.sha in
     let prev = List.assoc_opt key old in
-    let pv = match prev with Some pv -> pv | None -> Dict.create () in
-    let same_sha = prev <> None && Dict.str_opt pv "sha" = Some sha in
-    let entry = Dict.copy pv in
-    Dict.update entry
-      (List.map
-         (fun k -> (k, raw p k))
-         [
-           "number";
-           "title";
-           "url";
-           "draft";
-           "updated";
-           "sha";
-           "author";
-           "labels";
-           "stale_labels";
-         ]);
-    Dict.set_str entry "ci_url"
-      (match Dict.str_opt p "ci_url" with
-      | Some u when u <> "" -> u
-      | _ -> Net.base ^ sha);
+    let pv = match prev with Some pv -> pv | None -> E.create () in
+    let same_sha = prev <> None && get pv.sha = Some sha in
+    let entry = E.copy pv in
+    (* As listed (null when the listing lacks it). *)
+    entry.number <- listed p.number;
+    entry.title <- listed p.title;
+    entry.url <- listed p.url;
+    entry.draft <- listed p.draft;
+    entry.updated <- listed p.updated;
+    entry.sha <- listed p.sha;
+    entry.author <- listed p.author;
+    entry.labels <- listed p.labels;
+    entry.stale_labels <- listed p.stale_labels;
+    entry.ci_url <-
+      Set
+        (match get p.ci_url with
+        | Some u when u <> "" -> u
+        | _ -> Net.base ^ sha);
     { p; key; sha; prev; pv; same_sha; entry }
   in
+
   (* The time budget is spent: the PR is left for the next run. *)
   let defer it =
     let entry = it.entry in
     if it.same_sha && has_result it.pv then
       (* To redo (tool or CI changed, LLM, MCP errors): the latest result for
          this commit is shown meanwhile. *)
-      Dict.remove entry "pending"
+      E.remove entry [ "pending" ]
     else begin
       if it.prev <> None && not it.same_sha then begin
         (* an older result would describe another commit *)
         let base = since_base it.prev it.sha in
-        List.iter (Dict.remove entry)
+        E.remove entry
           ([
              "result";
              "error";
@@ -1122,12 +1137,12 @@ let main ?(argv = Sys.argv) () =
              "refresh_pending";
            ]
           @ last_error);
-        (match base with Some b -> Dict.set entry "since_base" b | None -> ());
+        (match base with Some b -> entry.since_base <- Some b | None -> ());
         (* compared with when the new commit's analysis lands *)
-        Dict.set entry "ci_state" (raw it.p "ci_state")
+        entry.ci_state <- listed it.p.ci_state
         (* the new commit's (its CI may still run) *)
       end;
-      Dict.set_bool entry "pending" true
+      entry.pending <- Some true
     end;
     Deferred
   in
@@ -1147,28 +1162,29 @@ let main ?(argv = Sys.argv) () =
          failures are gone, so the result is kept until the next run; a
          failed analysis too, with its attempts. *)
       Printf.eprintf "#%d %s summary failed: %s; the previous %s is kept\n%!"
-        (Dict.int it.p "number")
+        (number_or_0 it.p)
         (Util.prefix_chars it.sha 12)
         (Option.value ~default:"None" serr)
         (if has_result it.pv then "result" else "analysis");
       Stop Summary_failed
     end
     else
+      let jobs = summary_jobs s in
       let failed =
         List.filter
           (fun j ->
-            Json.str_opt "status" j = Some "failed"
-            && not
-                 (match Json.str_opt "category" j with
-                 | Some c -> List.mem c noise
-                 | None -> false))
-          (match s with Some s -> Json.list "jobs" s | None -> [])
+            j.s_status = "failed"
+            &&
+            match j.s_category with
+            | Set c -> not (List.mem c noise)
+            | Absent | Null -> true)
+          jobs
       in
       if failed = [] then Stop No_failure_yet
       else
         (* The same job statuses as at the previous analysis (opam-ci's
            status stays pending when a job never starts): nothing to redo. *)
-        let d = ci_digest s in
+        let d = ci_digest jobs in
         let same, _, retry =
           reuse ~digest:d it.prev it.p version (!llm_left > 0)
         in
@@ -1210,6 +1226,7 @@ let main ?(argv = Sys.argv) () =
         @ extra @ b.refresh)
         args.timeout
     in
+    let result = Option.map Page_data.Result.of_json result in
     List.iter
       (fun (k, v) ->
         Odict.set net_total k
@@ -1251,19 +1268,16 @@ let main ?(argv = Sys.argv) () =
          again, max_attempts times at most (see reuse); the CI run tried is
          recorded, so that the attempts at a rebuild add up too, and are
          made from the cache once it was refreshed. *)
-      Dict.update entry
-        [
-          ("last_error", Json.opt_string err);
-          ("last_error_at", `String (now ()));
-          ("attempts", `Int attempts);
-          ("last_error_ci_state", raw p "ci_state");
-          ("last_error_ci_created", raw p "ci_created");
-          ("last_error_refreshed", `Bool refreshed);
-        ];
-      Dict.remove entry "pending";
+      entry.last_error <- Suggestion.field_of_option err;
+      entry.last_error_at <- Some (now ());
+      entry.attempts <- Some attempts;
+      entry.last_error_ci_state <- listed p.ci_state;
+      entry.last_error_ci_created <- listed p.ci_created;
+      entry.last_error_refreshed <- Some refreshed;
+      E.remove entry [ "pending" ];
       Printf.eprintf
         "#%d %s ERROR: %s; the previous result is kept (%ss; requests: %s)\n%!"
-        (Dict.int p "number")
+        (number_or_0 p)
         (Util.prefix_chars it.sha 12)
         err_s
         (Json.repr_float (seconds ()))
@@ -1285,72 +1299,63 @@ let main ?(argv = Sys.argv) () =
       let base = since_base it.prev it.sha in
       (match base with
       | Some b when result <> None ->
-          Dict.set entry "since_last_push"
-            (since_last_push b (Option.get result));
-          Dict.remove entry "since_base"
+          entry.since_last_push <- Some (since_last_push b (Option.get result));
+          E.remove entry [ "since_base" ]
       | _ ->
           if it.prev <> None && not it.same_sha then begin
-            Dict.remove entry "since_last_push";
+            E.remove entry [ "since_last_push" ];
             (* no comparable previous result yet *)
             match base with
             | Some b ->
-                Dict.set entry "since_base"
-                  b (* kept for when an analysis of this commit lands *)
+                entry.since_base <-
+                  Some b (* kept for when an analysis of this commit lands *)
             | None -> ()
           end);
-      Dict.update entry
-        [
-          ("ci_state", raw p "ci_state");
-          ("ci_created", raw p "ci_created");
-          ("ci_digest", Json.opt_string b.digest);
-          ( "ci_unfinished",
-            match result with
-            | Some r when Json.mem "ci_unfinished" r ->
-                Json.member "ci_unfinished" r
-            | _ -> `Int 0 );
-        ];
+      entry.ci_state <- listed p.ci_state;
+      entry.ci_created <- listed p.ci_created;
+      entry.ci_digest <- Suggestion.field_of_option b.digest;
+      entry.ci_unfinished <-
+        Set
+          (match result with Some { ci_unfinished = Some n; _ } -> n | _ -> 0);
       (* A failed analysis that was to refresh the cache and did not get that
          far: the next attempt must, whatever ci_created says (see
          needs_refresh). *)
       if result = None && asked_refresh && not refreshed then
-        Dict.set_bool entry "refresh_pending" true
-      else Dict.remove entry "refresh_pending";
+        entry.refresh_pending <- Some true
+      else E.remove entry [ "refresh_pending" ];
       (* [llm]: every unexplained failure got its LLM answer (else the PR is
          analysed again when a run has LLM budget left, see reuse).
          [llm_calls]: the answers this analysis got from the API (none: the
          next attempt is a retry, see reuse). *)
-      let unanswered : Json.t =
+      let unanswered =
         if use_llm then
           match result with
-          | Some r when Json.mem "llm_unanswered" r ->
-              Json.member "llm_unanswered" r
-          | _ -> `Int 0
-        else `Null
+          | Some { llm_unanswered = Some n; _ } -> Some n
+          | _ -> Some 0
+        else None
       in
       let secs = seconds () in
-      Dict.update entry
-        [
-          ("result", Option.value ~default:`Null result);
-          ("error", Json.opt_string err);
-          ("attempts", `Int attempts);
-          ("tool_version", `String version);
-          ("llm", `Bool (use_llm && not (Json.truthy unanswered)));
-          ("llm_unanswered", unanswered);
-          ("llm_calls", if use_llm then `Int (count net "llm") else `Null);
-          ("mcp_errors", `Int (count net "mcp-errors"));
-          ("net_errors", `Int (count net "net-errors" + count net "timeout"));
-          (* A git host that failed earlier today: not asked again; the
-             analysis is done again once the day has passed (see reuse). *)
-          ("git_unreachable", `Int (count net "git-unreachable"));
-          ("analysed_at", `String (now ()));
-          ("seconds", `Float secs);
-          ( "jobs",
-            match summary with
-            | Some s when Json.truthy s -> jobs_overview s
-            | _ -> `Null );
-        ];
-      List.iter (Dict.remove entry) ("pending" :: last_error);
-      Printf.eprintf "#%d %s %s (%ss; requests: %s)\n%!" (Dict.int p "number")
+      entry.result <- Suggestion.field_of_option result;
+      entry.error <- Suggestion.field_of_option err;
+      entry.attempts <- Some attempts;
+      entry.tool_version <- Some version;
+      entry.llm <- Some (use_llm && not (nonzero unanswered));
+      entry.llm_unanswered <- Suggestion.field_of_option unanswered;
+      entry.llm_calls <- (if use_llm then Set (count net "llm") else Null);
+      entry.mcp_errors <- Some (count net "mcp-errors");
+      entry.net_errors <- Some (count net "net-errors" + count net "timeout");
+      (* A git host that failed earlier today: not asked again; the
+         analysis is done again once the day has passed (see reuse). *)
+      entry.git_unreachable <- Some (count net "git-unreachable");
+      entry.analysed_at <- Some (now ());
+      entry.seconds <- Some secs;
+      entry.jobs <-
+        (match summary with
+        | Some s when Json.truthy s ->
+            Set (jobs_overview (summary_jobs (Some s)))
+        | _ -> Null);
+      E.remove entry ("pending" :: last_error);
+      Printf.eprintf "#%d %s %s (%ss; requests: %s)\n%!" (number_or_0 p)
         (Util.prefix_chars it.sha 12)
         (if result <> None then "ok" else "ERROR: " ^ err_s)
         (Json.repr_float secs) reqs;
@@ -1371,7 +1376,7 @@ let main ?(argv = Sys.argv) () =
     let refresh = if needs_refresh it.prev it.p then [ "--refresh" ] else [] in
     let asked_refresh = refresh <> [] in
     let refreshed =
-      tried_run it.prev it.p && Dict.truthy it.pv "last_error_refreshed"
+      tried_run it.prev it.p && it.pv.last_error_refreshed = Some true
     in
     if asked_refresh then bump "refreshed";
     let before =
@@ -1413,82 +1418,75 @@ let main ?(argv = Sys.argv) () =
           (* keep the progress if the run is killed *)
           save_state args.state (merged_state ()))
     failing;
-  let listed =
-    List.map (fun p -> (string_of_int (Dict.int p "number"), p)) failing
+  let listed_prs =
+    List.map (fun p -> (string_of_int (number_or_0 p), p)) failing
   in
   List.iter
-    (fun (key, entry) -> note_listed_ci entry (List.assoc key listed))
+    (fun (key, entry) -> note_listed_ci entry (List.assoc key listed_prs))
     (Odict.to_list new_state);
   mark_shared_failures (Odict.to_list new_state);
   Odict.set stats "dropped"
     (List.length (List.filter (fun (k, _) -> not (Odict.mem new_state k)) old));
   save_state args.state (Odict.to_list new_state);
   let entries = Odict.values new_state in
-  let data =
-    `Assoc
-      [
-        ("generated", `String (now ()));
-        ("repository", `String (owner ^ "/" ^ name));
-        ("open_prs", `Int (List.length prs));
-        ("failing_prs", `Int (nstate "FAILURE"));
-        (* opam-ci's status stays pending when a job never starts: running
-           only while the CI page has unfinished jobs. *)
-        ("running_prs", `Int (List.length (List.filter ci_running entries)));
-        ("limit", match args.limit with Some n -> `Int n | None -> `Null);
-        ("max_failures_per_pr", `Int args.max);
-        ( "llm",
-          `Assoc
-            [
-              ("enabled", `Bool llm);
-              ( "calls",
-                `Int (Option.value ~default:0 (Odict.get net_total "llm")) );
-              ("off", Json.opt_string !llm_off);
-            ] );
-        ( "run",
-          `Assoc
-            ([
-               ("github_api_calls", `Int list_calls);
-               ( "tool_requests",
-                 `Assoc
-                   (List.map
-                      (fun (k, v) -> (k, `Int v))
-                      (Odict.to_list net_total)) );
-             ]
-            @ List.map (fun (k, v) -> (k, `Int v)) (Odict.to_list stats)) );
-        ( "prs",
-          `List
-            (List.map Dict.to_json
-               (Util.sort_by ~reverse:true
-                  (fun e -> Dict.str e "updated")
-                  entries)) );
-        (* PRs whose CI passes: nothing to analyse, listed so that the page
-           can say which PRs seem ready. *)
-        ( "passing",
-          `List
-            (List.filter_map
-               (fun p ->
-                 if state_of p = Some "SUCCESS" then
-                   Some
-                     (`Assoc
-                        (List.map
-                           (fun k -> (k, raw p k))
-                           [
-                             "number";
-                             "title";
-                             "url";
-                             "draft";
-                             "updated";
-                             "author";
-                             "labels";
-                             "stale_labels";
-                           ]))
-                 else None)
-               prs) );
-      ]
+  let data : Page_data.t =
+    {
+      generated = Some (now ());
+      repository = Some (owner ^ "/" ^ name);
+      open_prs = Some (List.length prs);
+      failing_prs = Some (nstate "FAILURE");
+      (* opam-ci's status stays pending when a job never starts: running
+         only while the CI page has unfinished jobs. *)
+      running_prs = Some (List.length (List.filter ci_running entries));
+      limit = Suggestion.field_of_option args.limit;
+      max_failures_per_pr = Set args.max;
+      llm =
+        Some
+          {
+            enabled = Some llm;
+            calls = Some (Option.value ~default:0 (Odict.get net_total "llm"));
+            off = Suggestion.field_of_option !llm_off;
+            extra = [];
+          };
+      run =
+        Some
+          {
+            github_api_calls = Some list_calls;
+            tool_requests = Some (Odict.to_list net_total);
+            counts = Odict.to_list stats;
+            extra = [];
+          };
+      prs =
+        Some
+          (Util.sort_by ~reverse:true
+             (fun (e : E.t) -> E.str e.updated)
+             entries);
+      (* PRs whose CI passes: nothing to analyse, listed so that the page
+         can say which PRs seem ready. *)
+      passing =
+        Some
+          (List.filter_map
+             (fun (p : E.t) ->
+               if state_of p = Some "SUCCESS" then begin
+                 let e = E.create () in
+                 e.number <- listed p.number;
+                 e.title <- listed p.title;
+                 e.url <- listed p.url;
+                 e.draft <- listed p.draft;
+                 e.updated <- listed p.updated;
+                 e.author <- listed p.author;
+                 e.labels <- listed p.labels;
+                 e.stale_labels <- listed p.stale_labels;
+                 Some e
+               end
+               else None)
+             prs);
+      extra = [];
+    }
   in
   Util.makedirs (Filename.dirname (Util.abspath args.out));
   let oc = open_out_bin args.out in
-  output_string oc (Json.dumps ~indent:1 data);
+  output_string oc (Json.dumps ~indent:1 (Page_data.to_json data));
   close_out oc;
   Printf.eprintf
     "analysed %d, failed %d, unchanged %d, running without failure %d, \

@@ -1,7 +1,7 @@
 (** Mutable JSON objects that keep the order of their members: the records built
     member by member and printed as JSON that are not suggestions (those are
-    {!Suggestion.t}): the triage page's state of each PR, the LLM's cached
-    answers, the baseline of [compare].
+    {!Suggestion.t}, nor the triage page's data, which [scripts/page_data.ml]
+    reads into records): the LLM's cached answers, the baseline of [compare].
 
     In the getters, a missing member and a null both read as absent. *)
 

@@ -67,23 +67,21 @@ let ci_side_kinds : Where_kind.t list = [ Ci; Nothing ]
 let preexisting_rules : Rule.t list = [ Health_check_preexisting ]
 
 (* Job categories (from [summary]), in words. *)
-let job_categories =
-  [
-    ("build", "build failed");
-    ("build-or-test", "build or tests failed");
-    ("dependency", "a dependency failed");
-    ("solver", "no solution");
-    ("network", "network error");
-    ("cancelled", "cancelled");
-    ("sources", "sources not unpacked");
-    ("lint", "lint");
-    ("not-available", "skipped (not installable there)");
-    ("ignored", "ignored (accepted failure)");
-    ("analysis", "analysis failed");
-  ]
+let job_category : Ci.Category.t -> string = function
+  | Build -> "build failed"
+  | Build_or_test -> "build or tests failed"
+  | Dependency -> "a dependency failed"
+  | Solver -> "no solution"
+  | Network -> "network error"
+  | Cancelled -> "cancelled"
+  | Sources -> "sources not unpacked"
+  | Lint -> "lint"
+  | Not_available -> "skipped (not installable there)"
+  | Ignored -> "ignored (accepted failure)"
+  | Analysis -> "analysis failed"
+  | Status s -> Ci.Status.to_string s
 
-let job_category c = Option.value ~default:c (List.assoc_opt c job_categories)
-let noise = [ "passed"; "network"; "cancelled"; "not-available"; "ignored" ]
+let noise = Ci.Category.[ passed; Network; Cancelled; Not_available; Ignored ]
 
 let months =
   [|
@@ -102,37 +100,32 @@ let months =
   |]
 
 (* ------------------------------------------------------------------------ *)
-(* Lenient JSON access: a missing key, a null and a value of another type
-   read as absent *)
+(* The page data, read as Page_data's records: a member of another type than
+   its field's reads as absent. *)
 
-let ( |. ) v k = Json.member k v
-let truthy = Json.truthy
-let has k (v : Json.t) = Json.mem k v
-
-(** Python's str() of a value. *)
-let str = Json.py_str
-
-(** [e(s)]: HTML-escaped [str(s)], "" for None. *)
+(** HTML-escaped text. *)
 let e_s s = Html.escape s
 
-let e (v : Json.t) = match v with `Null -> "" | v -> Html.escape (str v)
 let ei n = string_of_int n
 
-(** The value as a string, "" when absent ([v or ""]). *)
-let sget v k =
-  match v |. k with
-  | `String s -> s
-  | `Null -> ""
-  | x -> if truthy x then str x else ""
+module E = Page_data.Entry
 
-let num (v : Json.t) =
-  match v with
-  | `Int n -> n
-  | `Float f -> int_of_float f
-  | `String s -> int_of_string (String.trim s)
-  | _ -> failwith "not a number"
+let pending (pr : E.t) = pr.pending = Some true
 
-let sugg_of (v : Json.t) = Suggestion.of_json v
+(* What changed since the previous push, when something did: the record,
+   the failures gone and the new ones. *)
+let since_changes (pr : E.t) =
+  match pr.since_last_push with
+  | Some s ->
+      let fixed = Option.value ~default:[] s.fixed
+      and new_ = Option.value ~default:[] s.new_ in
+      if fixed <> [] || new_ <> [] then Some (s, fixed, new_) else None
+  | None -> None
+
+let int_or_0 = Option.value ~default:0
+
+(* A member that may be null, as a string: "" when absent or null. *)
+let fstr = E.str
 
 (* A lower-case version for the search field (Unicode's full lower-case
    mapping, as Python's str.lower, but for a final sigma). *)
@@ -157,19 +150,19 @@ let lower s =
 let unsafe_char_re = Rx.v {|[\s"'<>`]|}
 
 (** An <a> only for https URLs; plain escaped text otherwise. *)
-let link ?cls (url : Json.t) text =
+let link ?cls (url : string option) text =
   let c =
     match cls with Some c -> Printf.sprintf " class=\"%s\"" c | None -> ""
   in
   match url with
-  | `String u
+  | Some u
     when String.starts_with ~prefix:"https://" u
          && not (Rx.test unsafe_char_re u) ->
       Printf.sprintf "<a href=\"%s\"%s rel=\"noopener noreferrer\">%s</a>"
         (e_s u) c (e_s text)
   | _ -> Printf.sprintf "<span%s>%s</span>" c (e_s text)
 
-let links url text = link (`String url) text
+let links url text = link (Some url) text
 let date_re = Rx.v {|(\d{4})-(\d\d)-(\d\d)|}
 
 (** '2026-11-20T…' -> '20 Nov', with the year when it is not [year]. *)
@@ -187,13 +180,6 @@ let day ?year iso =
       if Some (Rx.group m 1) = year then out else out ^ " " ^ Rx.group m 1
   | _ -> iso
 
-let day_v ?year (v : Json.t) =
-  day ?year
-    (match v with
-    | `String s -> Some s
-    | `Null -> None
-    | v -> if truthy v then Some (str v) else None)
-
 let shorten s n =
   let s = String.concat " " (Util.split s) in
   if Util.char_length s <= n then s
@@ -205,24 +191,25 @@ let plural n = if n = 1 then "" else "s"
     stored suggestions may predate [where_kind]). *)
 let other_package r = Where.where_kind r = Other_package
 
-let suggestions_of (res : Json.t) =
-  List.map sugg_of (Json.to_list (res |. "suggestions"))
+let suggestions_of = E.suggestions
 
 (** The suggestions of an analysed PR, by class (classes in their first-seen
     order). *)
-let groups (pr : Json.t) =
-  if truthy (pr |. "pending") then []
+let groups (pr : E.t) =
+  if pending pr then []
   else
     Util.group_by
       (fun r ->
         match r.class_ with Some c when c <> "" -> c | _ -> "explanation")
-      (suggestions_of (pr |. "result"))
+      (suggestions_of pr)
 
 let group g k = Option.value ~default:[] (List.assoc_opt k g)
 
-let ci_running pr =
-  if has "ci_state_now" pr then pr |. "ci_state_now" = `String "PENDING"
-  else pr |. "ci_state" = `String "PENDING" && pr |. "ci_unfinished" <> `Int 0
+let ci_running (pr : E.t) =
+  match pr.ci_state_now with
+  | Set s -> s = "PENDING"
+  | Null -> false
+  | Absent -> pr.ci_state = Set "PENDING" && pr.ci_unfinished <> Set 0
 
 (** Whether the fix of [r] goes on the CI's side ([kinds]). An LLM answer never
     counts: the model blames the CI too easily, and answers stored before
@@ -250,39 +237,39 @@ let not_this_pr r =
   || (ci_side r && not unchecked)
   || Titles.has_rule preexisting_rules r
 
-let str_list (v : Json.t) = List.map str (Json.to_list v)
-
 (** The labels of [not_ready_labels] that still apply. *)
-let blocking_labels pr =
-  let labels = str_list (pr |. "labels")
-  and stale = str_list (pr |. "stale_labels") in
+let blocking_labels (pr : E.t) =
+  let labels = E.list pr.labels and stale = E.list pr.stale_labels in
   List.filter
     (fun l -> List.mem l labels && not (List.mem l stale))
     not_ready_labels
 
-let seems_ready pr =
-  let res = pr |. "result" in
-  if
-    truthy (pr |. "pending")
-    || res = `Null || ci_running pr
-    || truthy (pr |. "draft")
-  then false
-  else if
-    blocking_labels pr <> []
-    || truthy (pr |. "ci_unfinished")
-    || truthy (res |. "ci_unfinished")
-  then false
-  else if truthy (res |. "unanalysed") then
-    false (* failures beyond --max: nothing says they are not the PR's *)
-  else
-    let sugg = suggestions_of res in
-    sugg <> [] && List.for_all not_this_pr sugg
+let nonzero = function Some n -> n <> 0 | None -> false
 
-let verdict pr =
-  if truthy (pr |. "pending") || pr |. "result" = `Null then "error"
+let seems_ready (pr : E.t) =
+  match E.result pr with
+  | None -> false
+  | Some _ when pending pr || ci_running pr || pr.draft = Set true -> false
+  | Some res ->
+      if
+        blocking_labels pr <> []
+        || nonzero (Page_data.get pr.ci_unfinished)
+        || nonzero res.ci_unfinished
+      then false
+      else if nonzero res.unanalysed then
+        false (* failures beyond --max: nothing says they are not the PR's *)
+      else
+        let sugg = Page_data.Result.suggestions res in
+        sugg <> [] && List.for_all not_this_pr sugg
+
+let unanalysed (pr : E.t) =
+  match E.result pr with Some res -> res.unanalysed | None -> None
+
+let verdict (pr : E.t) =
+  if pending pr || not (E.has_result pr) then "error"
   else if seems_ready pr then "ready"
   else
-    let sugg = suggestions_of (pr |. "result") in
+    let sugg = suggestions_of pr in
     if
       List.exists
         (fun r -> List.mem (Suggestion.str r.class_) change_classes)
@@ -291,7 +278,7 @@ let verdict pr =
       (* A failure that is not the PR's (it happens on master too, say) does not block it. *)
     else if List.exists (fun r -> other_package r && not (not_this_pr r)) sugg
     then "blocked"
-    else if sugg = [] || truthy (pr |. "result" |. "unanalysed") then "other"
+    else if sugg = [] || nonzero (unanalysed pr) then "other"
       (* Not ready only because of the PR's state (a draft, a label, CI running). *)
     else if List.for_all not_this_pr sugg then "ci"
     else
@@ -308,7 +295,7 @@ let verdict pr =
       then "rerun"
       else "other"
 
-let is_merge pr = List.mem merge_label (str_list (pr |. "labels"))
+let is_merge (pr : E.t) = List.mem merge_label (E.list pr.labels)
 
 let label_badges labels stale =
   let badge lb =
@@ -652,13 +639,17 @@ let title_of = Titles.title_of
 (* A suggested change written as an opam line: a quoted package, a field, a variable. *)
 let opam_line = Rx.v {|\s*("[\w+.@-]+"|[a-z][\w-]*:|extra-source\b|%\{)|}
 
+(* The failed-job counts by category, from [summary]. *)
+
 (** The failed jobs of a PR in words ("1 analysis failed"), network errors,
     cancelled and skipped jobs left out; None if there are none. *)
+let failed_jobs (pr : E.t) =
+  match pr.jobs with
+  | Set j -> Option.value ~default:[] j.failed
+  | Absent | Null -> []
+
 let failed_sorted pr =
-  let failed = Json.to_assoc (pr |. "jobs" |. "failed") in
-  List.stable_sort
-    (fun (_, a) (_, b) -> compare (Json.to_int b) (Json.to_int a))
-    failed
+  List.stable_sort (fun (_, a) (_, b) -> compare b a) (failed_jobs pr)
 
 let unexplained_jobs pr =
   match
@@ -666,19 +657,19 @@ let unexplained_jobs pr =
       (List.filter_map
          (fun (c, n) ->
            if List.mem c noise then None
-           else Some (Printf.sprintf "%s %s" (str n) (job_category c)))
+           else Some (Printf.sprintf "%d %s" n (job_category c)))
          (failed_sorted pr))
   with
   | "" -> None
   | s -> Some s
 
 let failed_count pr =
-  let failed = Json.to_assoc (pr |. "jobs" |. "failed") in
+  let failed = failed_jobs pr in
   ( List.fold_left ( + ) 0
       (List.filter_map
-         (fun (k, v) -> if List.mem k noise then None else Some (Json.to_int v))
+         (fun (k, v) -> if List.mem k noise then None else Some v)
          failed),
-    List.fold_left ( + ) 0 (List.map (fun (_, v) -> Json.to_int v) failed) )
+    List.fold_left ( + ) 0 (List.map snd failed) )
 
 let headline ?v ?(as_html = true) pr =
   let v = match v with Some v -> v | None -> verdict pr in
@@ -688,11 +679,10 @@ let headline ?v ?(as_html = true) pr =
   in
   if v = "error" then
     t
-      (if truthy (pr |. "pending") then
-         "not analysed yet; the next page update will cover it"
+      (if pending pr then "not analysed yet; the next page update will cover it"
        else "the analysis failed")
   else
-    let sugg = suggestions_of (pr |. "result") in
+    let sugg = suggestions_of pr in
     if sugg = [] then
       t
         (match unexplained_jobs pr with
@@ -792,8 +782,7 @@ let headline ?v ?(as_html = true) pr =
       String.concat " \xc2\xb7 " parts
     end
 
-let comment_markdown pr =
-  let res = match pr |. "result" with `Null -> `Assoc [] | r -> r in
+let comment_markdown (pr : E.t) =
   let results =
     List.filter
       (fun r ->
@@ -802,18 +791,17 @@ let comment_markdown pr =
              (r.rule = Some Llm
              && String.starts_with ~prefix:"low"
                   (Suggestion.str_field r.confidence)))
-      (suggestions_of res)
+      (suggestions_of pr)
   in
   let total =
-    match pr |. "jobs" |. "total" with v when truthy v -> num v | _ -> 0
+    match pr.jobs with Set j -> int_or_0 j.total | Absent | Null -> 0
   in
-  let to_int v = if truthy v then num v else 0 in
   let md =
     Render.render_comment_counts
-      ~unfinished:(to_int (pr |. "ci_unfinished"))
+      ~unfinished:(int_or_0 (Page_data.get pr.ci_unfinished))
       ~njobs:total
-      ~unanalysed:(to_int (res |. "unanalysed"))
-      (sget pr "sha") results
+      ~unanalysed:(int_or_0 (unanalysed pr))
+      (fstr pr.sha) results
   in
   if seems_ready pr then begin
     (* After the paragraph on where the results come from. *)
@@ -843,7 +831,8 @@ let comment_markdown pr =
 
 (** A button copying the Markdown comment, and the Markdown itself, folded. *)
 let copy_block pr =
-  let n = num (pr |. "number") in
+  let n = E.number pr in
+
   match comment_markdown pr with
   | exception ex ->
       (* a malformed entry must not break the page *)
@@ -904,8 +893,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
       !meta
       @ [
           "Job: "
-          ^ link
-              (Json.opt_string r.Suggestion.url)
+          ^ link r.Suggestion.url
               (match r.job with
               | Some j when j <> "" -> j
               | _ -> Ci.describe_job (Suggestion.str r.Suggestion.variant));
@@ -1254,28 +1242,32 @@ let render_item ?sha ?year r =
     (String.concat " \xc2\xb7 " head)
     (suggestion_body ?sha ~full:false ?year r)
 
-let ready_section ?(shown = 5) (data : Json.t) =
+(* The author of a PR, "?" when unknown. *)
+let author (p : E.t) = match p.author with Set a when a <> "" -> a | _ -> "?"
+
+let ready_section ?(shown = 5) (data : Page_data.t) =
   let rows =
     List.filter_map
-      (fun p ->
-        if (not (truthy (p |. "draft"))) && blocking_labels p = [] then
-          Some (p, true)
+      (fun (p : E.t) ->
+        if p.draft <> Set true && blocking_labels p = [] then Some (p, true)
         else None)
-      (Json.to_list (data |. "passing"))
+      (Option.value ~default:[] data.passing)
     @ List.filter_map
         (fun p -> if seems_ready p then Some (p, false) else None)
-        (Json.to_list (data |. "prs"))
+        (Page_data.prs data)
   in
   (* Those labelled "consider for merge" first, then the most recently updated. *)
-  let rows = Util.sort_by ~reverse:true (fun (p, _) -> sget p "updated") rows in
+  let rows =
+    Util.sort_by ~reverse:true (fun ((p : E.t), _) -> fstr p.updated) rows
+  in
   let rows = Util.sort_by (fun (p, _) -> not (is_merge p)) rows in
   if rows = [] then ""
   else begin
-    let year = Util.prefix_chars (sget data "generated") 4 in
+    let year = Util.prefix_chars (Option.value ~default:"" data.generated) 4 in
     let items =
       List.map
-        (fun (p, passes) ->
-          let n = num (p |. "number") in
+        (fun ((p : E.t), passes) ->
+          let n = E.number p in
           let ci =
             if passes then "CI passes"
             else
@@ -1286,18 +1278,13 @@ let ready_section ?(shown = 5) (data : Json.t) =
             "<li>%s<span class=\"t\">%s%s</span><span class=\"r\">%s \xc2\xb7 \
              %s \xc2\xb7 %s</span></li>"
             (link ~cls:"num"
-               (`String (Printf.sprintf "%s/pull/%d" repo_url n))
+               (Some (Printf.sprintf "%s/pull/%d" repo_url n))
                (Printf.sprintf "#%d" n))
-            (e (p |. "title"))
-            (label_badges
-               (str_list (p |. "labels"))
-               (str_list (p |. "stale_labels")))
-            (e
-               (match p |. "author" with
-               | v when truthy v -> v
-               | _ -> `String "?"))
+            (e_s (fstr p.title))
+            (label_badges (E.list p.labels) (E.list p.stale_labels))
+            (e_s (author p))
             ci
-            (e_s (day_v ~year (p |. "updated"))))
+            (e_s (day ~year (Page_data.get p.updated))))
         rows
     in
     let k = List.length items in
@@ -1329,22 +1316,20 @@ let ready_section ?(shown = 5) (data : Json.t) =
     HTTP, git; a git host that failed earlier the same day counts too): the
     analysis is incomplete. 0 without a result. *)
 let failed_lookups pr =
-  if truthy (pr |. "pending") || pr |. "result" = `Null then 0
+  if pending pr || not (E.has_result pr) then 0
   else
     List.fold_left ( + ) 0
-      (List.map
-         (fun k -> match pr |. k with v when truthy v -> num v | _ -> 0)
-         [ "mcp_errors"; "net_errors"; "git_unreachable" ])
+      (List.map int_or_0 [ pr.mcp_errors; pr.net_errors; pr.git_unreachable ])
 
 let time16 v = e_s (Util.replace (Util.prefix_chars v 16) "T" " ")
 
-let render_pr ?year ?max_failures (pr : Json.t) =
+let render_pr ?year ?max_failures (pr : E.t) =
   let v = verdict pr in
   let g = groups pr in
-  let n = num (pr |. "number") in
+  let n = E.number pr in
   let real, _ = failed_count pr in
   let failed = failed_sorted pr in
-  let title = sget pr "title" in
+  let title = fstr pr.title in
   let pkgs =
     String.concat " "
       (Util.dedup
@@ -1356,7 +1341,7 @@ let render_pr ?year ?max_failures (pr : Json.t) =
   let search =
     String.concat " "
       (Util.split
-         (lower (Printf.sprintf "%d %s %s %s" n title (sget pr "author") pkgs)))
+         (lower (Printf.sprintf "%d %s %s %s" n title (fstr pr.author) pkgs)))
   in
   let line2 =
     ref
@@ -1369,18 +1354,20 @@ let render_pr ?year ?max_failures (pr : Json.t) =
   in
   if ci_running pr then begin
     let left =
-      if not (has "ci_state_now" pr) then pr |. "ci_unfinished" else `Null
+      match pr.ci_state_now with
+      | Absent -> Page_data.get pr.ci_unfinished
+      | Null | Set _ -> None (* unknown: a rebuild runs *)
     in
-    (* unknown: a rebuild runs *)
     line2 :=
       !line2
       @ [
           Printf.sprintf
             "<span class=\"run\" title=\"These are the failures so far; the \
              page is updated when CI finishes\">CI running%s</span>"
-            (if truthy left then
-               Printf.sprintf ", %s job%s left" (e left) (plural (num left))
-             else "");
+            (match left with
+            | Some left when left <> 0 ->
+                Printf.sprintf ", %d job%s left" left (plural left)
+            | _ -> "");
         ]
   end;
   let jobs_title =
@@ -1388,13 +1375,11 @@ let render_pr ?year ?max_failures (pr : Json.t) =
       (List.filter_map
          (fun (c, k) ->
            if List.mem c noise then None
-           else Some (Printf.sprintf "%s %s" (str k) (job_category c)))
+           else Some (Printf.sprintf "%d %s" k (job_category c)))
          failed)
   in
   let skipped =
-    match List.assoc_opt "not-available" failed with
-    | Some k -> Json.to_int k
-    | None -> 0
+    Option.value ~default:0 (List.assoc_opt Ci.Category.Not_available failed)
   in
   if real = 0 && skipped <> 0 then
     line2 :=
@@ -1423,33 +1408,28 @@ let render_pr ?year ?max_failures (pr : Json.t) =
       "<summary>%s<span class=\"ttl\">%s%s%s</span><span class=\"who\">%s \
        \xc2\xb7 %s</span><span class=\"l2\">%s %s</span></summary>"
       (link ~cls:"num"
-         (`String (Printf.sprintf "%s/pull/%d" repo_url n))
+         (Some (Printf.sprintf "%s/pull/%d" repo_url n))
          (Printf.sprintf "#%d" n))
       (e_s title)
-      (if truthy (pr |. "draft") then " <i>(draft)</i>" else "")
-      (label_badges
-         (str_list (pr |. "labels"))
-         (str_list (pr |. "stale_labels")))
-      (e (match pr |. "author" with v when truthy v -> v | _ -> `String "?"))
-      (e_s (day_v ?year (pr |. "updated")))
+      (if pr.draft = Set true then " <i>(draft)</i>" else "")
+      (label_badges (E.list pr.labels) (E.list pr.stale_labels))
+      (e_s (author pr))
+      (e_s (day ?year (Page_data.get pr.updated)))
       (String.concat " \xc2\xb7 " !line2)
-      (link ~cls:"ci" (pr |. "ci_url") "CI \xe2\x86\x97")
+      (link ~cls:"ci" (Page_data.get pr.ci_url) "CI \xe2\x86\x97")
   in
-  let sha =
-    match pr |. "sha" with
-    | `String s -> Some s
-    | `Null -> None
-    | v -> Some (str v)
-  in
-  let bar = ref [ link (pr |. "ci_url") "CI results" ] in
-  if (not (truthy (pr |. "pending"))) && pr |. "result" <> `Null then
-    bar := !bar @ [ copy_block pr ];
+  let sha = Page_data.get pr.sha in
+  let bar = ref [ link (Page_data.get pr.ci_url) "CI results" ] in
+  if (not (pending pr)) && E.has_result pr then bar := !bar @ [ copy_block pr ];
   bar :=
     !bar
     @ [
         Printf.sprintf "<span>commit %s \xc2\xb7 analysed %s UTC</span>"
           (e_s (Util.prefix_chars (Option.value ~default:"" sha) 12))
-          (time16 (match sget pr "analysed_at" with "" -> "never" | s -> s));
+          (time16
+             (match pr.analysed_at with
+             | None | Some "" -> "never"
+             | Some s -> s));
       ];
   let lookups = failed_lookups pr in
   if lookups > 0 then
@@ -1465,17 +1445,19 @@ let render_pr ?year ?max_failures (pr : Json.t) =
              (%d failed lookup%s)</span>"
             lookups (plural lookups);
         ];
-  if truthy (pr |. "last_error") && pr |. "result" <> `Null then
-    (* A newer analysis of the same commit failed: this result is the previous one. *)
-    bar :=
-      !bar
-      @ [
-          Printf.sprintf
-            "<span title=\"%s\">a newer analysis failed %s UTC; this result \
-             may be out of date</span>"
-            (e (pr |. "last_error"))
-            (time16 (sget pr "last_error_at"));
-        ];
+  (match Page_data.get pr.last_error with
+  | Some last_error when last_error <> "" && E.has_result pr ->
+      (* A newer analysis of the same commit failed: this result is the previous one. *)
+      bar :=
+        !bar
+        @ [
+            Printf.sprintf
+              "<span title=\"%s\">a newer analysis failed %s UTC; this result \
+               may be out of date</span>"
+              (e_s last_error)
+              (time16 (Option.value ~default:"" pr.last_error_at));
+          ]
+  | _ -> ());
   let body =
     ref
       [
@@ -1484,77 +1466,73 @@ let render_pr ?year ?max_failures (pr : Json.t) =
       ]
   in
   let add s = body := !body @ [ s ] in
-  let since = pr |. "since_last_push" in
-  if truthy since && (truthy (since |. "fixed") || truthy (since |. "new")) then begin
-    let items xs =
-      String.concat ", " (List.map e (Util.take 8 xs))
-      ^
-      if List.length xs > 8 then
-        Printf.sprintf " and %d more" (List.length xs - 8)
-      else ""
-    in
-    let parts =
-      (if truthy (since |. "fixed") then
-         let f = Json.to_list (since |. "fixed") in
-         [
-           Printf.sprintf "<span class=\"yes\">%d gone</span> (%s)"
-             (List.length f) (items f);
-         ]
-       else [])
-      @ (if truthy (since |. "new") then
-           let f = Json.to_list (since |. "new") in
+  (match since_changes pr with
+  | Some (since, fixed, new_) ->
+      let items xs =
+        String.concat ", " (List.map e_s (Util.take 8 xs))
+        ^
+        if List.length xs > 8 then
+          Printf.sprintf " and %d more" (List.length xs - 8)
+        else ""
+      in
+      let parts =
+        (if fixed <> [] then
            [
-             Printf.sprintf "<span class=\"no\">%d new</span> (%s)"
-               (List.length f) (items f);
+             Printf.sprintf "<span class=\"yes\">%d gone</span> (%s)"
+               (List.length fixed) (items fixed);
            ]
          else [])
-      @ [
-          Printf.sprintf "%s unchanged"
-            (e (if has "still" since then since |. "still" else `Int 0));
-        ]
-    in
-    add
-      (Printf.sprintf "<p class=\"note since\">Since the previous push (%s): "
-         (e_s (Util.prefix_chars (sget since "previous_sha") 12))
-      ^ String.concat "; " parts ^ ".</p>")
-  end;
-  let stale = pr |. "result" |. "health_stale" in
-  if truthy stale then
-    add
-      (Printf.sprintf
-         "<p class=\"note\">opam-health-check's latest results are from %s, \
-          more than a week ago, so failures were not compared with master: \
-          some may be marked as this PR's although they also fail without \
-          it.</p>"
-         (e_s (day_v stale)));
-  if truthy (pr |. "pending") then
+        @ (if new_ <> [] then
+             [
+               Printf.sprintf "<span class=\"no\">%d new</span> (%s)"
+                 (List.length new_) (items new_);
+             ]
+           else [])
+        @ [ Printf.sprintf "%d unchanged" (int_or_0 since.still) ]
+      in
+      add
+        (Printf.sprintf "<p class=\"note since\">Since the previous push (%s): "
+           (e_s (Util.prefix_chars (fstr since.previous_sha) 12))
+        ^ String.concat "; " parts ^ ".</p>")
+  | None -> ());
+  (match E.result pr with
+  | Some { health_stale = Some stale; _ } when stale <> "" ->
+      add
+        (Printf.sprintf
+           "<p class=\"note\">opam-health-check's latest results are from %s, \
+            more than a week ago, so failures were not compared with master: \
+            some may be marked as this PR's although they also fail without \
+            it.</p>"
+           (e_s (day (Some stale))))
+  | _ -> ());
+  if pending pr then
     add
       "<p class=\"note\">Not analysed yet; the next page update will cover \
        it.</p>"
-  else if pr |. "result" = `Null then
+  else if not (E.has_result pr) then
     add
       (Printf.sprintf
          "<p class=\"note\">The analysis failed (%s attempts): \
           <code>%s</code></p>"
-         (e (pr |. "attempts"))
-         (e (pr |. "error")))
+         (match pr.attempts with Some a -> string_of_int a | None -> "")
+         (e_s (fstr pr.error)))
   else begin
-    let left = pr |. "result" |. "unanalysed" in
-    if truthy left then begin
-      let per =
-        match max_failures with
-        | Some m when truthy m -> " at most " ^ e m
-        | _ -> " a few"
-      in
-      add
-        (Printf.sprintf
-           "<p class=\"note\">%s more failure%s not analysed: each page update \
-            analyses%s per PR. See the CI results.</p>"
-           (e left)
-           (if left <> `Int 1 then "s were" else " was")
-           per)
-    end;
-    if not (truthy (pr |. "result" |. "suggestions")) then
+    (match unanalysed pr with
+    | Some left when left <> 0 ->
+        let per =
+          match max_failures with
+          | Some m when m <> 0 -> " at most " ^ string_of_int m
+          | _ -> " a few"
+        in
+        add
+          (Printf.sprintf
+             "<p class=\"note\">%d more failure%s not analysed: each page \
+              update analyses%s per PR. See the CI results.</p>"
+             left
+             (if left <> 1 then "s were" else " was")
+             per)
+    | _ -> ());
+    if suggestions_of pr = [] then
       add
         (match unexplained_jobs pr with
         | Some jobs ->
@@ -1631,8 +1609,11 @@ let table ?(shown = 25) head rows =
 
 let chronic ?(min_prs = 2) prs =
   (* name -> PR -> version -> jobs, in first-seen order *)
-  let revdeps : (string * (int * (string * Json.t) list ref) list ref) list ref
-      =
+  let revdeps :
+      (string
+      * (int * (string * Page_data.Revdep_job.t list) list ref) list ref)
+      list
+      ref =
     ref []
   in
   let blamed : (string * int list ref) list ref = ref [] in
@@ -1645,8 +1626,8 @@ let chronic ?(min_prs = 2) prs =
         v
   in
   List.iter
-    (fun pr ->
-      let n = num (pr |. "number") in
+    (fun (pr : E.t) ->
+      let n = E.number pr in
       List.iter
         (fun (rd, jobs) ->
           let name, _, version = Util.partition rd "." in
@@ -1658,7 +1639,9 @@ let chronic ?(min_prs = 2) prs =
                 (fun (k, x) -> if k = version then (k, jobs) else (k, x))
                 !vs
           else vs := !vs @ [ (version, jobs) ])
-        (Json.to_assoc (pr |. "jobs" |. "failing_revdeps"));
+        (match pr.jobs with
+        | Set j -> Option.value ~default:[] j.failing_revdeps
+        | Absent | Null -> []);
       List.iter
         (fun r ->
           match Where.where_pkg r with
@@ -1666,7 +1649,7 @@ let chronic ?(min_prs = 2) prs =
               let s = assoc_ref blamed p (fun () -> ref []) in
               if not (List.mem n !s) then s := n :: !s
           | _ -> ())
-        (suggestions_of (pr |. "result")))
+        (suggestions_of pr))
     prs;
   let rows =
     List.sort
@@ -1696,10 +1679,9 @@ let chronic ?(min_prs = 2) prs =
             List.sort_uniq compare
               (List.concat_map (fun (_, vs) -> List.map fst !vs) !d)
           in
-          let category j =
-            match j |. "category" with
-            | `String c when c <> "" -> job_category c
-            | v when truthy v -> str v
+          let category (j : Page_data.Revdep_job.t) =
+            match j.category with
+            | Set c when Ci.Category.to_string c <> "" -> job_category c
             | _ -> "job"
           in
           let cells =
@@ -1707,12 +1689,12 @@ let chronic ?(min_prs = 2) prs =
               (List.map
                  (fun (n, vs) ->
                    let jobs = snd (List.hd !vs) in
-                   let j0 = List.hd (Json.to_list jobs) in
+                   let (j0 : Page_data.Revdep_job.t) = List.hd jobs in
                    Printf.sprintf "<span class=\"nw\">%s (%s)</span>"
                      (links
                         (Printf.sprintf "%s/pull/%d" repo_url n)
                         (Printf.sprintf "#%d" n))
-                     (link (j0 |. "url") (category j0)))
+                     (link (Page_data.get j0.url) (category j0)))
                  (List.sort (fun (a, _) (b, _) -> compare a b) !d))
           in
           Printf.sprintf
@@ -1762,12 +1744,24 @@ let chronic ?(min_prs = 2) prs =
    ^ "packages that suggestions for several PRs point to.</p></section>");
   String.concat "\n" !out
 
-let help_section (data : Json.t) =
-  let run = data |. "run" and llm = data |. "llm" in
+(* An optional number, "" when absent. *)
+let num_text = function Some n -> string_of_int n | None -> ""
+
+(* The run's limit on the PRs listed, if any. *)
+let limit (data : Page_data.t) =
+  match data.limit with Set n when n <> 0 -> Some n | _ -> None
+
+let help_section (data : Page_data.t) =
+  let count k =
+    match data.run with
+    | Some run -> Option.value ~default:0 (Page_data.Run.count run k)
+    | None -> 0
+  in
+  let llm = Option.value ~default:Page_data.Llm_info.empty data.llm in
   let limit =
-    if truthy (data |. "limit") then
-      Printf.sprintf " The list was limited to %s PRs." (e (data |. "limit"))
-    else ""
+    match limit data with
+    | Some n -> Printf.sprintf " The list was limited to %d PRs." n
+    | None -> ""
   in
   let extra = function
     | "ready" ->
@@ -1802,7 +1796,6 @@ let help_section (data : Json.t) =
            ^ extra k ^ "</dd>")
          verdicts)
   in
-  let get_or v k d = if has k v then v |. k else d in
   Printf.sprintf
     {|<section id="help"><h2>How to read this page</h2>
 <p>Each failing PR gets one verdict, the first of these that applies. The row says what the problem is (the first
@@ -1848,17 +1841,18 @@ the last one (a PR is analysed again when its head commit or its CI status chang
 (from <a href="https://github.com/Sudha247/hackathon-opam-repo-triage" rel="noopener noreferrer">this
 repository</a>).</p></section>|}
     verdicts_html
-    (e (get_or run "analysed" (`Int 0)))
-    (e (get_or run "unchanged" (`Int 0)))
-    (e (data |. "max_failures_per_pr"))
+    (string_of_int (count "analysed"))
+    (string_of_int (count "unchanged"))
+    (num_text (Page_data.get data.max_failures_per_pr))
     limit
-    (if truthy (llm |. "enabled") then
+    (if llm.enabled = Some true then
        Printf.sprintf
-         "LLM diagnoses are enabled: %s new LLM calls in this update."
-         (e (get_or llm "calls" (`Int 0)))
+         "LLM diagnoses are enabled: %d new LLM calls in this update."
+         (Option.value ~default:0 llm.calls)
      else "LLM diagnoses are not enabled.")
-    (if truthy (llm |. "off") then " They were turned off during this update."
-     else "")
+    (match llm.off with
+    | Set off when off <> "" -> " They were turned off during this update."
+    | _ -> "")
 
 (* Why the LLM was turned off during an update (see triage_open_prs), shown under the lead. *)
 let llm_off =
@@ -1872,39 +1866,37 @@ let llm_off =
       ^ "have no LLM diagnosis in this update; the next one tries again." );
   ]
 
-let llm_off_note (data : Json.t) =
-  match data |. "llm" |. "off" with
-  | `String off when List.mem_assoc off llm_off ->
+let llm_off_note (data : Page_data.t) =
+  match data.llm with
+  | Some { off = Set off; _ } when List.mem_assoc off llm_off ->
       Printf.sprintf "<p class=\"note llm-off\">%s</p>"
         (e_s (List.assoc off llm_off))
   | _ -> ""
 
-let render (data : Json.t) =
-  let prs = Json.to_list (data |. "prs") in
+let render (data : Page_data.t) =
+  let prs = Page_data.prs data in
   let verdict_of = Hashtbl.create 64 in
-  List.iter
-    (fun p -> Hashtbl.replace verdict_of (num (p |. "number")) (verdict p))
-    prs;
+  List.iter (fun p -> Hashtbl.replace verdict_of (E.number p) (verdict p)) prs;
   let count k =
     Hashtbl.fold (fun _ v acc -> if v = k then acc + 1 else acc) verdict_of 0
   in
-  let gen = sget data "generated" in
+  let gen = Option.value ~default:"" data.generated in
   let year = Util.prefix_chars gen 4 in
   let merge = List.length (List.filter is_merge prs) in
-  let failing = data |. "failing_prs" and running = data |. "running_prs" in
   let scope =
-    if failing = `Null then ""
+    if data.failing_prs = None then ""
     else
       Printf.sprintf "%s of the %s open %s PRs have failing opam-repo-ci jobs"
         (ei (List.length prs))
-        (e (data |. "open_prs"))
+        (num_text data.open_prs)
         (links repo_url "ocaml/opam-repository")
-      ^ (if truthy running then
-           Printf.sprintf " (for %s of them, CI is still running)" (e running)
-         else "")
-      ^ (if truthy (data |. "limit") then
-           Printf.sprintf " (limited to %s)" (e (data |. "limit"))
-         else "")
+      ^ (match data.running_prs with
+        | Some running when running <> 0 ->
+            Printf.sprintf " (for %d of them, CI is still running)" running
+        | _ -> "")
+      ^ (match limit data with
+        | Some n -> Printf.sprintf " (limited to %d)" n
+        | None -> "")
       ^ ". The failures are read from the CI logs and matched against known \
          causes. Nothing is rebuilt, "
       ^ "so check a suggestion before applying it."
@@ -1967,23 +1959,22 @@ let render (data : Json.t) =
       "<div id=\"prs\">";
     ]
     @ List.map
-        (render_pr ~year ~max_failures:(data |. "max_failures_per_pr"))
+        (render_pr ~year ?max_failures:(Page_data.get data.max_failures_per_pr))
         prs
     @ (if prs = [] then
          [ "<p class=\"note\">No open PR has failing opam-repo-ci jobs.</p>" ]
        else [])
     @ [
         "</div></section>";
-        chronic (List.filter (fun p -> not (truthy (p |. "pending"))) prs);
+        chronic (List.filter (fun p -> not (pending p)) prs);
         help_section data;
         "<script>" ^ js ^ "</script></main></body></html>";
       ]
   in
   String.concat "\n" parts ^ "\n"
 
-let render_feed (data : Json.t) =
-  let x (v : Json.t) = e v in
-  let gen = sget data "generated" in
+let render_feed (data : Page_data.t) =
+  let gen = Option.value ~default:"" data.generated in
   let out =
     ref
       [
@@ -1991,16 +1982,16 @@ let render_feed (data : Json.t) =
         "<feed xmlns=\"http://www.w3.org/2005/Atom\">";
         "<title>opam-repository CI triage</title>";
         Printf.sprintf "<id>urn:opam-repo-ci-triage:%s</id>"
-          (x (data |. "repository"));
+          (e_s (Option.value ~default:"" data.repository));
         Printf.sprintf "<updated>%s</updated>" (e_s gen);
         "<link rel=\"alternate\" href=\"index.html\"/>";
         "<author><name>opam-repo-ci triage</name></author>";
       ]
   in
   List.iter
-    (fun pr ->
-      if not (truthy (pr |. "pending") || pr |. "result" = `Null) then begin
-        let n = num (pr |. "number") in
+    (fun (pr : E.t) ->
+      if not (pending pr || not (E.has_result pr)) then begin
+        let n = E.number pr in
         let v = verdict pr in
         let g = groups pr in
         let lines =
@@ -2012,27 +2003,30 @@ let render_feed (data : Json.t) =
         in
         if ci_running pr then begin
           let left =
-            if not (has "ci_state_now" pr) then pr |. "ci_unfinished" else `Null
+            match pr.ci_state_now with
+            | Absent -> Page_data.get pr.ci_unfinished
+            | Null | Set _ -> None
           in
           lines :=
             !lines
             @ [
                 Printf.sprintf "CI still running (%s jobs left)."
-                  (if truthy left then str left else "?");
+                  (match left with
+                  | Some n when n <> 0 -> string_of_int n
+                  | _ -> "?");
               ]
         end;
-        let since = pr |. "since_last_push" in
-        if truthy since && (truthy (since |. "fixed") || truthy (since |. "new"))
-        then
-          lines :=
-            !lines
-            @ [
-                Printf.sprintf
-                  "Since the previous push: %d gone, %d new, %s unchanged."
-                  (List.length (Json.to_list (since |. "fixed")))
-                  (List.length (Json.to_list (since |. "new")))
-                  (str (if has "still" since then since |. "still" else `Int 0));
-              ];
+        (match since_changes pr with
+        | Some (since, fixed, new_) ->
+            lines :=
+              !lines
+              @ [
+                  Printf.sprintf
+                    "Since the previous push: %d gone, %d new, %d unchanged."
+                    (List.length fixed) (List.length new_)
+                    (int_or_0 since.still);
+                ]
+        | None -> ());
         List.iter
           (fun k ->
             List.iter
@@ -2058,15 +2052,15 @@ let render_feed (data : Json.t) =
               (Util.take 5 (merge_similar (group g k))))
           [ "fix"; "workaround"; "elsewhere"; "explanation" ];
         let updated =
-          match pr |. "analysed_at" with v when truthy v -> str v | _ -> gen
+          match pr.analysed_at with Some v when v <> "" -> v | _ -> gen
         in
         out :=
           !out
           @ [
               "<entry>";
-              Printf.sprintf "<title>#%d %s</title>" n (x (pr |. "title"));
+              Printf.sprintf "<title>#%d %s</title>" n (e_s (fstr pr.title));
               Printf.sprintf "<id>%s/pull/%d#%s</id>" (e_s repo_url) n
-                (x (pr |. "sha"));
+                (e_s (fstr pr.sha));
               Printf.sprintf "<link rel=\"alternate\" href=\"%s/pull/%d\"/>"
                 (e_s repo_url) n;
               Printf.sprintf "<link rel=\"related\" href=\"index.html#pr-%d\"/>"
@@ -2077,13 +2071,14 @@ let render_feed (data : Json.t) =
               "</entry>";
             ]
       end)
-    (Json.to_list (data |. "prs"));
+    (Page_data.prs data);
   out := !out @ [ "</feed>" ];
   String.concat "\n" !out ^ "\n"
 
 let run ~data_path ~out_path () =
   let data =
-    Json.parse (In_channel.with_open_bin data_path In_channel.input_all)
+    Page_data.of_json
+      (Json.parse (In_channel.with_open_bin data_path In_channel.input_all))
   in
   let page = render data in
   let dir = Filename.dirname (Util.abspath out_path) in
@@ -2096,7 +2091,7 @@ let run ~data_path ~out_path () =
   write out_path page;
   write (Filename.concat dir "feed.xml") (render_feed data);
   Printf.printf "wrote %s (%d bytes, %d PRs)\n" out_path (String.length page)
-    (List.length (Json.to_list (data |. "prs")))
+    (List.length (Page_data.prs data))
 
 let main () =
   let open Cmdliner in

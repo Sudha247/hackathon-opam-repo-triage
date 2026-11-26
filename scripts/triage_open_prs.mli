@@ -26,7 +26,7 @@ val graphql : string -> Triage.Json.t -> string -> Triage.Json.t
     (partial errors are fine when every top-level field is there). Tried three
     times; then the last error is raised. *)
 
-val list_open_prs : string -> Triage.Dict.t list * int
+val list_open_prs : string -> Page_data.Entry.t list * int
 (** [list_open_prs token]: all open PRs with the opam-ci state of their head
     commit; (PRs, number of requests). *)
 
@@ -41,16 +41,16 @@ val stale_labels : Triage.Json.t -> string list
 val max_attempts : int
 (** Analyses of the same commit that failed before it is given up. *)
 
-val attempts_used : ?now_:float -> Triage.Dict.t option -> int
+val attempts_used : ?now_:float -> Page_data.Entry.t option -> int
 (** The analyses of the previous entry's commit made so far that count toward
     {!max_attempts}: none once some time has passed since the last one (for a
     failed attempt that kept an earlier result: since [last_error_at]). *)
 
-val keep_failed : ?now_:float -> Triage.Dict.t option -> bool
+val keep_failed : ?now_:float -> Page_data.Entry.t option -> bool
 (** Whether a failed analysis (no result) of the same commit is kept rather than
     tried again. *)
 
-val ci_changed : Triage.Dict.t option -> Triage.Dict.t -> bool
+val ci_changed : Page_data.Entry.t option -> Page_data.Entry.t -> bool
 (** [ci_changed prev p]: whether the opam-ci status of the same commit changed
     since the previous analysis: another state, or a status posted again (a
     maintainer's "Rebuild failed", even one that finished within the hour). The
@@ -59,7 +59,7 @@ val ci_changed : Triage.Dict.t option -> Triage.Dict.t -> bool
     status's date (saved before dates were recorded, or never analysed) does not
     say which build it saw: changed, when the status has a date. *)
 
-val needs_refresh : Triage.Dict.t option -> Triage.Dict.t -> bool
+val needs_refresh : Page_data.Entry.t option -> Page_data.Entry.t -> bool
 (** [needs_refresh prev p]: whether the analysis must fetch the CI page and the
     job logs again ([--refresh]) rather than read them from the cache: the
     status changed ({!ci_changed}), or nothing says which build the cache holds:
@@ -72,15 +72,15 @@ val needs_refresh : Triage.Dict.t option -> Triage.Dict.t -> bool
     from this run, and dropping them again would cost the next attempt the same
     work. *)
 
-val ci_running : Triage.Dict.t -> bool
+val ci_running : Page_data.Entry.t -> bool
 (** Whether the CI of a state entry is running (see {!Render_page.ci_running}).
 *)
 
 val reuse :
   ?now_:float ->
   ?digest:string ->
-  Triage.Dict.t option ->
-  Triage.Dict.t ->
+  Page_data.Entry.t option ->
+  Page_data.Entry.t ->
   string ->
   bool ->
   bool * bool * bool
@@ -122,7 +122,7 @@ val job_platform : string option -> string option
 (** The platform of a reverse-dependency job: its name before the tested package
     ("compilers,4.14," for "compilers,4.14,foo.1,revdeps,bar.2"), or None. *)
 
-val mark_shared_failures : (string * Triage.Dict.t) list -> unit
+val mark_shared_failures : (string * Page_data.Entry.t) list -> unit
 (** Mark the suggestions about reverse dependencies that also fail in at least
     [shared_min] other open PRs: such a failure is not caused by this PR. Uses
     the failing reverse dependencies of every PR (from [summary]). Every job of
@@ -151,7 +151,7 @@ val sleep_hook : (float -> unit) ref
 (** How retries wait. *)
 
 val graphql_hook : (string -> Triage.Json.t -> string -> Triage.Json.t) ref
-val list_open_prs_hook : (string -> Triage.Dict.t list * int) ref
+val list_open_prs_hook : (string -> Page_data.Entry.t list * int) ref
 
 val run_tool_hook :
   (string list -> int -> Triage.Json.t option * string option * counts) ref

@@ -679,7 +679,18 @@ let test_depext_entries () =
 (* ------------------------------------------------------------------------ *)
 (* RulesTest: rules on synthetic job lists (no fixture). *)
 
-module R = Scripts.Render_page
+(* The page's functions on PRs and page data written as JSON: the tests'
+   literals go through Page_data's readers. *)
+module R = struct
+  include Scripts.Render_page
+  module P = Scripts.Page_data
+
+  let entry = P.Entry.of_json
+  let verdict j = verdict (entry j)
+  let seems_ready j = seems_ready (entry j)
+  let ci_running j = ci_running (entry j)
+  let render_pr ?year ?max_failures j = render_pr ?year ?max_failures (entry j)
+end
 
 let test_jobs_not_run_page () =
   (* The render_page side of test_jobs_not_run (its rule side is in test_context). *)
@@ -3387,9 +3398,13 @@ let run_main ?(args = []) ?(summary_ok = true) ?suggest_out tmp prs =
   let gh_out = Filename.concat tmp "gh-out" in
   close_out (open_out gh_out);
   (T.github_token_hook := fun () -> Some "tok");
-  (T.list_open_prs_hook := fun _ -> (prs, 1));
+  (T.list_open_prs_hook :=
+     fun _ ->
+       ( List.map (fun p -> Scripts.Page_data.Entry.of_json (Dict.to_json p)) prs,
+         1 ));
   T.run_tool_hook := run_tool;
   (T.llm_available_hook := fun () -> false);
+
   (T.tool_version_hook := fun () -> "v");
   Unix.putenv "GITHUB_OUTPUT" gh_out;
   Unix.putenv "GITHUB_STEP_SUMMARY" (Filename.concat tmp "summary.md");

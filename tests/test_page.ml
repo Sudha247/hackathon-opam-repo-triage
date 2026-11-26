@@ -9,7 +9,24 @@ open Suggestion.T
 (* A suggestion from its JSON members. *)
 let sugg kv = Suggestion.of_json (`Assoc kv)
 
-module R = Scripts.Render_page
+(* The page's functions on PRs and page data written as JSON: the tests'
+   literals go through Page_data's readers. *)
+module R = struct
+  include Scripts.Render_page
+  module P = Scripts.Page_data
+
+  let entry = P.Entry.of_json
+  let render j = render (P.of_json j)
+  let render_feed j = render_feed (P.of_json j)
+  let verdict j = verdict (entry j)
+  let seems_ready j = seems_ready (entry j)
+  let headline ?v ?as_html j = headline ?v ?as_html (entry j)
+  let render_pr ?year ?max_failures j = render_pr ?year ?max_failures (entry j)
+  let ready_section ?shown j = ready_section ?shown (P.of_json j)
+  let chronic ?min_prs l = chronic ?min_prs (List.map entry l)
+  let help_section j = help_section (P.of_json j)
+  let comment_markdown j = comment_markdown (entry j)
+end
 
 let base_url = "https://opam.ci.ocaml.org/github/ocaml/opam-repository/commit/"
 let contains s sub = Util.contains s sub
