@@ -49,3 +49,24 @@ jobs:
         with:
           path: tools-bin
           key: tools-${{ github.sha }}
+
+  # The oldest compiler the package supports (dune-project: ocaml >= 5.1):
+  # build and test only, the cached executables come from the job above.
+  oldest-compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.1"
+
+      - name: Install libcurl
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-gnutls-dev
+
+      - name: Build and test
+        run: |
+          opam install . --deps-only --with-test --yes
+          opam exec -- dune build --profile release @install
+          opam exec -- dune test --profile release
