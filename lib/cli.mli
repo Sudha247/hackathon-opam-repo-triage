@@ -2,8 +2,17 @@
     ocaml/opam-repository PR ([bin/opam_repo_ci_triage.ml] parses the command
     line). *)
 
+(** The commands. *)
+type command =
+  | Summary  (** one record per CI job *)
+  | Logs  (** excerpts of the failed jobs' logs *)
+  | Compare  (** reverse-dependency failures against a baseline run *)
+  | Suggest  (** fixes, with their evidence *)
+  | Comment  (** a draft PR comment *)
+  | Review  (** a GitHub pull-request review *)
+
 type args = {
-  command : string;  (** summary, logs, compare, suggest, comment or review *)
+  command : command;
   target : string option;  (** a commit sha or an opam.ci.ocaml.org URL *)
   pr : int option;  (** [--pr]: the PR, whose head commit is looked up *)
   json : bool;
@@ -21,7 +30,13 @@ type args = {
   refresh : bool;
       (** fetch the CI page again, drop the cached logs of its jobs *)
 }
-(** The command line. *)
+(** The command line. Each command reads only some of the options
+    ([bin/opam_repo_ci_triage.ml] accepts only those); the others keep their
+    {!default}. *)
+
+val default : command -> args
+(** The options' defaults: [--max 30], [--llm-max 5], the default model,
+    [--cache-dir .opam-ci-cache], no flag. *)
 
 val main : args -> unit
 (** Run a command: load the CI run of the target, then print its summary, logs,

@@ -926,7 +926,7 @@ let run_case ?max ?(llm = false) ?unfinished ?(before = fun () -> ()) case =
         (match unfinished with Some n -> data.unfinished <- n | None -> ());
         Cli.suggest_command
           {
-            Cli.command = "suggest";
+            Cli.command = Suggest;
             target = Some sha;
             pr = None;
             json = true;

@@ -56,7 +56,9 @@ classes, ranking), `Sources` (opam files, versions, ocaml.org docs, upstream
 sources), `Rules` (one job's log), `Matrix` (pass/fail patterns), `Context`
 (PR-level checks: pre-existing failures, opam-health-check, lint, reruns),
 `Llm`, `Checks` and `Suggest` (runs and merges everything), `Render` (text,
-comment, review) and `Cli`. `bin/opam_repo_ci_triage.ml` is the entry point.
+comment, review) and `Cli`. `bin/opam_repo_ci_triage.ml` is the entry point:
+one cmdliner subcommand per command, with the options it uses.
+
 The scripts of the triage page and of the evaluations are the `scripts/`
 library (their executables are in `scripts/bin/`); they read and write the
 page's state and data (`state/prs.json`, `site/data.json`) as the records of
@@ -80,21 +82,29 @@ opam-ci-triage compare --pr 31275
 opam-ci-triage suggest 55ad97d637d37d80b5d186bd7b3850ad263d05f1
 ```
 
-Common options:
+Options (each command takes only those it uses: `opam-ci-triage COMMAND
+--help` lists them; the command comes first):
 
-- `--json`: machine-readable output.
-- `--match REGEX`: only jobs whose variant matches, e.g. `'revdeps,passage'`,
+- `--json` (`summary`, `logs`, `compare`, `suggest`): machine-readable output.
+- `--match REGEX` (`logs`, `suggest`, `comment`, `review`): only jobs whose variant matches, e.g. `'revdeps,passage'`,
   `'lower-bounds'`, `'^compilers,'` (main builder only), `',5\.5,'` (OCaml 5.5).
   A variant is the last part of a job URL, e.g.
   `compilers,4.14,lwt.5.10.2,revdeps,osc.0.1.4` or
   `day10,debian-13,x86_64,5.5,lwt.5.10.2,tests`.
-- `--max N`: analyse at most N distinct failures (default 30): those of the
+- `--max N` (`suggest`, `comment`, `review`; for `logs`, the logs to fetch): analyse at most N distinct failures (default 30): those of the
   PR's own packages first, then those of their reverse dependencies, and
   experimental platforms last. `suggest --json` gives the number of the others
   that no suggestion explains in `unanalysed`; the PR comment and the triage
   page say how many, and such a PR is not listed as seeming ready.
-- `--cache-dir DIR`: cache location (default `.opam-ci-cache/`).
-- `--refresh`: fetch the commit's CI page again and drop the cached logs of
+- `--all` (`summary`, `compare`): also the jobs that passed, were ignored or
+  could not run (`summary`), the pre-existing failures in full (`compare`).
+- `--category CAT` (`logs`, repeatable), `--baseline SHA` (`compare`),
+  `--post` (`comment`, `review`), and the LLM options (`suggest`, `comment`,
+  `review`, see below).
+- `--pr N`, `--cache-dir DIR` (every command): the PR whose head commit to
+  analyse; the cache location (default `.opam-ci-cache/`).
+- `--refresh` (every command): fetch the commit's CI page again and drop the cached logs of
+
   its jobs (after a rebuild: a finished page and the logs are otherwise cached
   for good).
 

@@ -1,7 +1,9 @@
 open Ci
 
+type command = Summary | Logs | Compare | Suggest | Comment | Review
+
 type args = {
-  command : string;
+  command : command;
   target : string option;
   pr : int option;
   json : bool;
@@ -18,6 +20,26 @@ type args = {
   cache_dir : string;
   refresh : bool;
 }
+
+let default command =
+  {
+    command;
+    target = None;
+    pr = None;
+    json = false;
+    all = false;
+    match_ = None;
+    category = [];
+    max = 30;
+    llm = false;
+    llm_max = 5;
+    llm_model = Llm_model.default;
+    llm_dry_run = false;
+    post = false;
+    baseline = None;
+    cache_dir = ".opam-ci-cache";
+    refresh = false;
+  }
 
 let print_json v =
   print_string (Json.dumps ~indent:2 v);
@@ -249,7 +271,7 @@ let suggest_command args sha (data : data) =
     | None -> Util.die "cannot post: the CI page does not name a PR"
   in
   match args.command with
-  | "review" ->
+  | Review ->
       let review =
         Render.build_review ~raw:(Sources.raw src) sha data results
       in
@@ -277,7 +299,7 @@ let suggest_command args sha (data : data) =
            (List.length (Json.list "comments" review))
            "line comment")
         (counts_line ())
-  | "comment" ->
+  | Comment ->
       let body = Render.render_comment sha data results in
       if args.post then begin
         let out =
@@ -300,7 +322,7 @@ let suggest_command args sha (data : data) =
       end
       else print_endline body;
       Printf.eprintf "network requests: %s\n%!" (counts_line ())
-  | _ ->
+  | Summary | Logs | Compare | Suggest ->
       if args.json then begin
         (* incomplete: ocaml.org or another server failed during the analysis (see the counts).
          git-unreachable: a git host that failed earlier today, not asked again. *)
@@ -350,10 +372,10 @@ let main args =
        %!"
       data.unfinished (List.length data.jobs);
   match args.command with
-  | "summary" ->
+  | Summary ->
       if args.json then
         print_json (`Assoc (("sha", `String sha) :: data_fields data))
       else Render.render_summary sha data args.all
-  | "logs" -> logs args sha data
-  | "compare" -> compare args sha data
-  | _ -> suggest_command args sha data
+  | Logs -> logs args sha data
+  | Compare -> compare args sha data
+  | Suggest | Comment | Review -> suggest_command args sha data
