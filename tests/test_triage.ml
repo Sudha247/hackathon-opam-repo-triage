@@ -3314,6 +3314,59 @@ let test_kept_result_during_a_rebuild_page () =
   check_str "ready again" "ready" (R.verdict e)
 
 (* ------------------------------------------------------------------------ *)
+(* ProcTest: [Proc.real_run] on real processes (the other tests replace it). *)
+
+let real ?cwd ?env ?input ?timeout args =
+  Proc.real_run ?cwd ?env ?input ?timeout args
+
+let test_proc_outputs () =
+  let r = real [ "sh"; "-c"; "echo out; echo err >&2; exit 3" ] in
+  check_int "code" 3 r.Proc.code;
+  check_str "stdout" "out\n" r.stdout;
+  check_str "stderr" "err\n" r.stderr
+
+let test_proc_input () =
+  (* More than a pipe holds, both ways: stdin must be written while stdout is read. *)
+  let big = String.init (1 lsl 20) (fun i -> Char.chr (97 + (i mod 26))) in
+  let r = real ~input:big [ "cat" ] in
+  check_int "code" 0 r.Proc.code;
+  check_true "echoed" (r.stdout = big);
+  (* A command that exits without reading its input: no SIGPIPE, no error. *)
+  let r = real ~input:big [ "true" ] in
+  check_int "code of true" 0 r.code
+
+let test_proc_cwd_env () =
+  let tmp = Unix.realpath (Filename.temp_dir "proc" "") in
+  let r =
+    real ~cwd:tmp
+      ~env:[ ("PROC_TEST", "v") ]
+      [ "sh"; "-c"; "pwd; echo $PROC_TEST" ]
+  in
+  check_str "cwd and env" (tmp ^ "\nv\n") r.Proc.stdout;
+  check_true "missing program"
+    (match real [ "no-such-program-opam-ci" ] with
+    | _ -> false
+    | exception Unix.Unix_error _ -> true)
+
+let test_proc_timeout () =
+  let t0 = Unix.gettimeofday () in
+  check_true "timeout raised"
+    (match real ~timeout:0.3 [ "sleep"; "5" ] with
+    | _ -> false
+    | exception Proc.Timeout t -> t = 0.3);
+  check_true "killed, not waited for" (Unix.gettimeofday () -. t0 < 2.);
+  (* Output before the deadline does not stop it; input too. *)
+  check_true "timeout with output"
+    (match
+       real ~timeout:0.3 ~input:"x" [ "sh"; "-c"; "echo started; sleep 5" ]
+     with
+    | _ -> false
+    | exception Proc.Timeout _ -> true);
+  (* A command that finishes in time is not affected by the timeout. *)
+  let r = real ~timeout:5. [ "sh"; "-c"; "echo fast" ] in
+  check_str "in time" "fast\n" r.Proc.stdout
+
+(* ------------------------------------------------------------------------ *)
 
 let () =
   let p name f = Alcotest.test_case name `Quick (pure f) in
@@ -3327,6 +3380,13 @@ let () =
           p "applied" test_applied;
         ] );
       ("SuggestionTest", [ p "round_trip" test_round_trip ]);
+      ( "ProcTest",
+        [
+          p "outputs" test_proc_outputs;
+          p "input" test_proc_input;
+          p "cwd_env" test_proc_cwd_env;
+          p "timeout" test_proc_timeout;
+        ] );
       ( "WhereTest",
         [
           p "legacy" test_legacy;
