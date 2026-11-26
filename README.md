@@ -44,7 +44,10 @@ state, cache and page files keep their format), `Dict` (JSON objects built
 member by member, on `Odict`: the page's state of each PR, the LLM's cached
 answers),
 `Proc`, `Http` (through libcurl), `Html`, `Words`, `Md`. Then `Net` (HTTP,
-GitHub API, git, caches), `Ci` (CI pages and logs, job names), `Suggestion`
+GitHub API, git, caches), `Ci` (CI pages and logs, job names; the statuses,
+categories and kinds of jobs as variants), `Rule` (the names of the rules),
+`Where_kind` (where a fix goes, as a variant), `Suggestion`
+
 (one analysed failure: a record the rules fill in, with the reader and
 printer of its JSON), `Where` (where a fix goes), `Filter` (opam filters on
 the CI platforms),

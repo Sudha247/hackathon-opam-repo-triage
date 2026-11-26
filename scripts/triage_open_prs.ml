@@ -325,7 +325,7 @@ let since_base (prev : Dict.t option) sha : Json.t option =
               (List.filter_map
                  (fun (k, v) -> Option.map (fun v -> (k, `String v)) v)
                  [
-                   ("rule", s.rule);
+                   ("rule", Option.map Rule.to_string s.rule);
                    ("title", s.title);
                    ("failing", Suggestion.get s.Suggestion.failing);
                    ("job", s.Suggestion.job);
@@ -694,7 +694,7 @@ let mark_shared_failures (prs : (string * Dict.t) list) =
                 (* computed again below (a value of another type included) *)
                 r.also_failing_in <- None;
                 r.extra <- List.remove_assoc "also_failing_in" r.extra;
-                if not (Where.tied_to_pr r || Where.where_kind r = "rerun") then begin
+                if not (Where.tied_to_pr r || Where.where_kind r = Rerun) then begin
                   let tested = Hashtbl.create 8 in
                   let variants =
                     match r.Suggestion.jobs with
@@ -794,10 +794,8 @@ let since_last_push (prev : Json.t) (result : Json.t) : Json.t =
     List.iter
       (fun s ->
         let s = Suggestion.of_json s in
-        let rule = s.rule in
-        if
-          not (List.mem rule [ Some "rerun"; Some "unrecognised"; Some "lint" ])
-        then begin
+        let rule = Option.map Rule.to_string s.rule in
+        if not (Titles.has_rule [ Rerun; Unrecognised; Lint ] s) then begin
           let k =
             ( rule |? (s.title |? ""),
               Suggestion.get s.Suggestion.failing |? (s.Suggestion.job |? "") )

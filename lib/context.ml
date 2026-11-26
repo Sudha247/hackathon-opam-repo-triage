@@ -95,7 +95,7 @@ let accepted_but_failing (results : Suggestion.t list) src sha pr_packages =
       let name, ver = split_pkg owner in
       if
         ds = [] || ver = "" || String.contains owner ' '
-        || List.mem (Suggestion.str r.rule) [ "rerun"; "lint"; "transient" ]
+        || Titles.has_rule [ Rerun; Lint; Transient ] r
       then ()
       else begin
         let text =
@@ -112,9 +112,9 @@ let accepted_but_failing (results : Suggestion.t list) src sha pr_packages =
           r.alternative <- None;
           r.candidates <- None;
           Suggestion.update r
-            (Where.fix_where "ci" "the CI environment (day10 builder)"
+            (Where.fix_where Ci "the CI environment (day10 builder)"
             @ [
-                `Rule "accept-failures-ignored";
+                `Rule Rule.Accept_failures_ignored;
                 `Confidence "high";
                 `Note
                   (Printf.sprintf
@@ -398,9 +398,9 @@ let health_summary ?src (notes : notes) =
              `Variant
                (rd ^ ", reverse dependency"
                ^ match target with Some t -> " of " ^ t | None -> "");
-             `Rule "health-check-new";
+             `Rule Rule.Health_check_new;
            ]
-          @ Where.fix_where "pr" "this PR"
+          @ Where.fix_where Pr "this PR"
           @ [
               `Confidence "medium";
               `Failing (Some rd);
@@ -481,9 +481,9 @@ let health_summary ?src (notes : notes) =
       Suggestion.make
         ([
            `Variant (Words.counted (List.length bad) "reverse dependency");
-           `Rule "health-check-preexisting";
+           `Rule Rule.Health_check_preexisting;
          ]
-        @ Where.fix_where "other-package"
+        @ Where.fix_where Other_package
             "the reverse dependencies (other packages)"
         @ [
             `Confidence "high";
@@ -516,7 +516,7 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
     (failure_key * string) list =
   let failing =
     List.filter
-      (fun j -> j.status = "failed" && List.mem j.category failing_cats)
+      (fun j -> j.status = Failed && List.mem j.category failing_cats)
       data.jobs
   in
   let per_job : (string, string) Hashtbl.t = Hashtbl.create 16 in
@@ -676,8 +676,8 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
           | Some rd
             when rd <> ""
                  && (not (Hashtbl.mem per_job j.variant))
-                 && j.category <> "build-or-test"
-                 && j.kind <> "tests"
+                 && j.category <> Build_or_test
+                 && j.kind <> Tests
                  && d.distro = Some classic_distro
                  && d.arch = "x86_64" && d.ocaml <> None && d.ocaml <> Some ""
             ->
@@ -724,8 +724,7 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
                       failed through it). *)
                         let who =
                           match
-                            if j.category = "dependency" then
-                              failing_dep j.reason
+                            if j.category = Dependency then failing_dep j.reason
                             else None
                           with
                           | Some w when w <> "" -> w
@@ -790,7 +789,7 @@ let sources_rules ?match_ (data : data) cache_dir =
   List.iter
     (fun j ->
       if
-        j.status <> "failed" || j.category <> "sources"
+        j.status <> Failed || j.category <> Sources
         || not (picked match_ j.variant)
       then ()
       else begin
@@ -824,11 +823,11 @@ let sources_rules ?match_ (data : data) cache_dir =
               ([
                  `Variant j.variant;
                  `Url j.url;
-                 `Rule "sources";
+                 `Rule Rule.Sources;
                  `Failing pkg;
                  `Jobs [ j.variant ];
                ]
-              @ Where.fix_where "upstream" (s_none pkg ^ " (upstream archive)")
+              @ Where.fix_where Upstream (s_none pkg ^ " (upstream archive)")
               @ [
                   `Experimental j.experimental;
                   `Error
@@ -870,7 +869,7 @@ let sources_rules ?match_ (data : data) cache_dir =
 let routine_abort_re = Rx.v {|(?:^|[,-])(?:riscv64|s390x)(?:[,-]|$)|}
 
 let routine_abort j =
-  j.status = "aborted" && j.kind <> "analysis"
+  j.status = Aborted && j.kind <> Analysis
   && Rx.test routine_abort_re
        (String.concat "," (Util.take 2 (String.split_on_char ',' j.variant)))
 (* the platform, not a package *)
@@ -881,29 +880,27 @@ let http_error_code_re =
 let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
   let unfinished = List.map (fun j -> j.variant) (unfinished_jobs data.jobs) in
   let analysis_failed =
-    List.exists (fun j -> j.kind = "analysis" && j.status = "failed") data.jobs
+    List.exists (fun j -> j.kind = Analysis && j.status = Failed) data.jobs
   in
   let jobs =
     List.filter
       (fun j ->
         picked match_ j.variant
-        && (j.status = "failed"
-            && List.mem j.category [ "network"; "cancelled" ]
-            && not (List.mem j.kind [ "lint"; "analysis" ])
-           || j.status = "aborted"
-           || j.status = "not-started"
+        && (j.status = Failed
+            && List.mem j.category [ Network; Cancelled ]
+            && not (List.mem j.kind [ Lint; Analysis ])
+           || j.status = Aborted
+           || j.status = Not_started
               && (not (List.mem j.variant unfinished))
               && not analysis_failed))
       data.jobs
   in
-  let transient =
-    List.filter (fun r -> Suggestion.str r.rule = "transient") results
-  in
+  let transient = List.filter (fun r -> r.rule = Some Transient) results in
   if jobs = [] && transient = [] then results
   else begin
     (* The kind of failure of a job: its status or category, and a detail. *)
     let kind j =
-      if j.status <> "failed" then (Some j.status, None)
+      if j.status <> Failed then (Some (Status.to_string j.status), None)
       else
         let m =
           Rx.search http_error_code_re (Option.value ~default:"" j.reason)
@@ -917,7 +914,7 @@ let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
               | _ -> Some (Rx.group0 m))
           | None -> None
         in
-        (Some j.category, detail)
+        (Some (Category.to_string j.category), detail)
     in
     (* The number of jobs of each kind, the most frequent first (the first
        seen first among equals). *)
@@ -952,7 +949,7 @@ let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
           Words.counted n noun
           ^ match detail with Some d when d <> "" -> " (" ^ d ^ ")" | _ -> "")
     in
-    let idle = List.filter (fun j -> j.status <> "failed") jobs in
+    let idle = List.filter (fun j -> j.status <> Failed) jobs in
     let variants =
       merge_jobs
         (List.map (fun j -> j.variant) jobs)
@@ -995,9 +992,10 @@ let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
     let entry =
       Suggestion.make
         ([
-           `Variant (Words.counted (List.length variants) "job"); `Rule "rerun";
+           `Variant (Words.counted (List.length variants) "job");
+           `Rule Rule.Rerun;
          ]
-        @ Where.fix_where "rerun" "CI (rerun)"
+        @ Where.fix_where Rerun "CI (rerun)"
         @ [
             `Error
               (String.concat ", "
@@ -1014,8 +1012,7 @@ let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
             `Note note;
           ])
     in
-    List.filter (fun r -> Suggestion.str r.rule <> "transient") results
-    @ [ entry ]
+    List.filter (fun r -> r.rule <> Some Transient) results @ [ entry ]
   end
 
 (** [name.version -> (old available, new available)] for the opam files the
@@ -1204,9 +1201,9 @@ let relaxed_available_rules (data : data) sha base cache_dir
                   `Variant (pkg ^ " [available changed by this PR]");
                   `Failing (Some pkg);
                 ]
-               @ Where.fix_where "pr" "this PR"
+               @ Where.fix_where Pr "this PR"
                @ [
-                   `Rule "pr-relaxed-available";
+                   `Rule Rule.Pr_relaxed_available;
                    `Error
                      (Printf.sprintf
                         "This PR changes `available` of %s from `%s` to `%s`; \
@@ -1243,7 +1240,7 @@ let analysis_rules ?match_ (data : data) cache_dir =
   List.filter_map
     (fun j ->
       if
-        j.kind <> "analysis" || j.status <> "failed"
+        j.kind <> Analysis || j.status <> Failed
         || not (picked match_ j.variant)
       then None
       else begin
@@ -1270,7 +1267,7 @@ let analysis_rules ?match_ (data : data) cache_dir =
             [
               `Variant j.variant;
               `Url j.url;
-              `Rule "analysis";
+              `Rule Rule.Analysis;
               `Jobs [ j.variant ];
               `Experimental j.experimental;
               `Confidence "medium";
@@ -1279,7 +1276,7 @@ let analysis_rules ?match_ (data : data) cache_dir =
         in
         if Rx.test ci_failure why then
           Suggestion.update r
-            (Where.fix_where "rerun" "CI (rerun)"
+            (Where.fix_where Rerun "CI (rerun)"
             @ [
                 `Note
                   "The analysis job failed because of the CI, so no build job \
@@ -1287,7 +1284,7 @@ let analysis_rules ?match_ (data : data) cache_dir =
               ])
         else
           Suggestion.update r
-            (Where.fix_where "pr" "this PR"
+            (Where.fix_where Pr "this PR"
             @ [
                 `Note
                   "opam-repo-ci could not analyse this PR, so no build job \
@@ -1355,8 +1352,8 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
   (* [src] is None in some tests: the lookups that need it then find nothing. *)
   let s = match src with Some s -> s | None -> Sources.create cache_dir in
   let baseline =
-    if List.exists (fun j -> j.kind = "lint" && j.status = "failed") data.jobs
-    then lint_baseline data cache_dir
+    if List.exists (fun j -> j.kind = Lint && j.status = Failed) data.jobs then
+      lint_baseline data cache_dir
     else None
   in
   let pr_opam name ver =
@@ -1364,7 +1361,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
   in
   List.iter
     (fun j ->
-      if j.kind <> "lint" || j.status <> "failed" then ()
+      if j.kind <> Lint || j.status <> Failed then ()
       else if
         not (List.exists (fun m -> Rx.test_match lint_message m) j.messages)
       then begin
@@ -1380,9 +1377,9 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
           @ [
               Suggestion.make
                 ([ `Variant "(lint)" ]
-                @ Where.fix_where "rerun" "CI (rerun)"
+                @ Where.fix_where Rerun "CI (rerun)"
                 @ [
-                    `Rule "lint-ci-error";
+                    `Rule Rule.Lint_ci_error;
                     `Error (Util.prefix_chars msg 220);
                     `Url j.url;
                     `Note
@@ -1407,9 +1404,9 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                 let r =
                   Suggestion.make
                     ([ `Variant "(lint)"; `Failing (Some (name ^ "." ^ ver)) ]
-                    @ Where.fix_where "pr" "this PR"
+                    @ Where.fix_where Pr "this PR"
                     @ [
-                        `Rule "lint";
+                        `Rule Rule.Lint;
                         `Error (Util.prefix_chars text 220);
                         `Lint_level (String.lowercase_ascii level);
                       ])
@@ -1810,11 +1807,11 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
   List.filter_map
     (fun t ->
       let own =
-        List.filter (fun j -> j.target = Some t && j.kind = "build") data.jobs
+        List.filter (fun j -> j.target = Some t && j.kind = Build) data.jobs
       in
       if
         List.length own < 3
-        || List.exists (fun j -> j.category <> "not-available") own
+        || List.exists (fun j -> j.category <> Not_available) own
       then None
       else begin
         let pick =
@@ -1899,9 +1896,9 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
           let r =
             Suggestion.make
               ([ `Variant (t ^ " [all build jobs skipped]"); `Failing (Some t) ]
-              @ Where.fix_where "pr" "this PR"
+              @ Where.fix_where Pr "this PR"
               @ [
-                  `Rule "uninstallable";
+                  `Rule Rule.Uninstallable;
                   `Error
                     ("Not installable on any tested platform. Solver: "
                     ^ String.concat "; "
@@ -2012,9 +2009,9 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
                  (String.concat ", " unchecked))
           else if bounded then
             Suggestion.update r
-              (Where.fix_where "none" "nothing (this PR's bound)"
+              (Where.fix_where Nothing "nothing (this PR's bound)"
               @ [
-                  `Rule "bounded-out";
+                  `Rule Rule.Bounded_out;
                   `Confidence "high";
                   `Note
                     (Printf.sprintf

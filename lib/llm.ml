@@ -149,12 +149,13 @@ let llm_prompt src (r : Suggestion.t) (job : Ci.job) text (data : Ci.data)
       data.jobs
   in
   let state (j : Ci.job) =
-    if j.category = "passed" then "passed"
+    if j.category = Ci.Category.passed then "passed"
     else
       let why =
         Util.prefix_chars (String.trim (Option.value ~default:"" j.reason)) 100
       in
-      Printf.sprintf "FAILED (%s%s)" j.category
+      Printf.sprintf "FAILED (%s%s)"
+        (Ci.Category.to_string j.category)
         (if why <> "" then ": " ^ why else "")
   in
   let matrix =
@@ -240,7 +241,7 @@ Earlier analysis: %s|}
     (match revdep with
     | Some d -> "Reverse dependency tested: " ^ d
     | None -> "")
-    job.kind
+    (Ci.Kind.to_string job.kind)
     (match revdep with Some d -> " of " ^ d | None -> "")
     (if matrix = "" then "(none)" else matrix)
     (Json.dumps
@@ -740,7 +741,7 @@ let llm_todo (results : Suggestion.t list) (data : Ci.data) =
      have gained a prefix since: pre-existing, new on master). *)
   let unexplained r =
     r.Suggestion.unexplained
-    && (not (Suggestion.nonempty r.rule))
+    && (not (Suggestion.nonempty (Option.map Rule.to_string r.rule)))
     && (not (Suggestion.nonempty_field r.Suggestion.new_))
     && Suggestion.list r.candidates = []
   in
@@ -936,7 +937,7 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
           let has_error = Suggestion.nonempty r.error in
           Suggestion.update r
             [
-              `Rule "llm";
+              `Rule Rule.Llm;
               `Failing pkg;
               `Fix_in fix_in;
               `Diagnosis diagnosis;

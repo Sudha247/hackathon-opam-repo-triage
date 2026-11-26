@@ -203,11 +203,11 @@ let test_unfinished_jobs () =
       Ci.variant = Printf.sprintf "v%d" i;
       url = "";
       label = "";
-      status;
+      status = Ci.Status.of_string status;
       reason = None;
-      category = status;
+      category = Ci.Category.of_string status;
       target = None;
-      kind;
+      kind = Ci.Kind.of_string kind;
       revdep = None;
       platform = [];
       experimental = false;
@@ -243,7 +243,7 @@ let test_unfinished_jobs () =
   Alcotest.(check (list string))
     "statuses"
     [ "failed"; "not-started" ]
-    (List.map (fun j -> j.Ci.status) data.jobs);
+    (List.map (fun j -> Ci.Status.to_string j.Ci.status) data.jobs);
   c "none" 0 (List.length (Ci.unfinished_jobs data.jobs))
 
 (* tests/fixtures, from the repository (dune exec) or from _build/default/tests (dune test). *)
@@ -269,7 +269,8 @@ let test_refresh_drops_logs () =
        { Http.status = 200; resp_headers = []; data = page });
   let dir = tmpdir () in
   let data = Ci.parse_commit_page page in
-  let job = List.find (fun j -> j.Ci.status = "failed") data.jobs in
+  let job = List.find (fun j -> j.Ci.status = Failed) data.jobs in
+
   let log = Net.cache_path job.url dir in
   close_out (open_out log);
   Fun.protect

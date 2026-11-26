@@ -14,11 +14,11 @@ let job ?(variant = "v") () : Ci.job =
     variant;
     url = "";
     label = "";
-    status = "failed";
+    status = Failed;
     reason = None;
-    category = "build";
+    category = Build;
     target = Some "x.1";
-    kind = "build";
+    kind = Build;
     revdep = None;
     platform = [];
     experimental = false;
@@ -486,7 +486,9 @@ let test_new_on_master_reaches_the_llm () =
          ~note:(hint ^ " Unrecognised error.")
          [ ("new_on_master", `String hint) ])
   in
-  Alcotest.(check string) "rule" "llm" (Suggestion.str r.rule);
+  Alcotest.(check string)
+    "rule" "llm"
+    (Option.fold ~none:"" ~some:Rule.to_string r.rule);
   Alcotest.(check bool)
     "note" true
     (String.starts_with
@@ -497,7 +499,9 @@ let test_new_on_master_reaches_the_llm () =
       (result ~note:"Pre-existing: z. Unrecognised error."
          [ ("preexisting", `String "z") ])
   in
-  Alcotest.(check string) "rule" "llm" (Suggestion.str r.rule);
+  Alcotest.(check string)
+    "rule" "llm"
+    (Option.fold ~none:"" ~some:Rule.to_string r.rule);
   (* Without the rules' flag (a rule explained it), the LLM is not asked. *)
   let r = apply ~res:(answer []) (result ~unexplained:false []) in
   Alcotest.(check bool) "no rule" false (r.rule <> None)

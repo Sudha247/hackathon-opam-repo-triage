@@ -30,13 +30,13 @@ module T = struct
   type t = {
     mutable variant : string option;
     mutable url : string option;
-    mutable kind : string option;
+    mutable kind : Ci.Kind.t option;
     mutable experimental : bool option;
     mutable failing : string field;
     mutable fix_in : string option;
-    mutable where_kind : string option;
+    mutable where_kind : Where_kind.t option;
     mutable where_pkg : string field;
-    mutable rule : string option;
+    mutable rule : Rule.t option;
     mutable error : string option;
     mutable lint_level : string option;
     mutable dep : string option;
@@ -185,13 +185,13 @@ let copy r = { r with variant = r.variant }
 type set =
   [ `Variant of string
   | `Url of string
-  | `Kind of string
+  | `Kind of Ci.Kind.t
   | `Experimental of bool
   | `Failing of string option
   | `Fix_in of string
-  | `Where_kind of string
+  | `Where_kind of Where_kind.t
   | `Where_pkg of string option
-  | `Rule of string
+  | `Rule of Rule.t
   | `Error of string
   | `Lint_level of string
   | `Dep of string
@@ -511,15 +511,27 @@ let descs =
   [
     dstr "variant" (fun r -> r.variant) (fun r v -> r.variant <- v);
     dstr "url" (fun r -> r.url) (fun r v -> r.url <- v);
-    dstr "kind" (fun r -> r.kind) (fun r v -> r.kind <- v);
+    dopt "kind"
+      (fun v -> Option.map Ci.Kind.of_string (read_str v))
+      (fun k -> `String (Ci.Kind.to_string k))
+      (fun r -> r.kind)
+      (fun r v -> r.kind <- v);
     dbool "experimental"
       (fun r -> r.experimental)
       (fun r v -> r.experimental <- v);
     dnstr "failing" (fun r -> r.failing) (fun r v -> r.failing <- v);
     dstr "fix_in" (fun r -> r.fix_in) (fun r v -> r.fix_in <- v);
-    dstr "where_kind" (fun r -> r.where_kind) (fun r v -> r.where_kind <- v);
+    dopt "where_kind"
+      (fun v -> Option.bind (read_str v) Where_kind.of_string)
+      (fun k -> `String (Where_kind.to_string k))
+      (fun r -> r.where_kind)
+      (fun r v -> r.where_kind <- v);
     dnstr "where_pkg" (fun r -> r.where_pkg) (fun r v -> r.where_pkg <- v);
-    dstr "rule" (fun r -> r.rule) (fun r v -> r.rule <- v);
+    dopt "rule"
+      (fun v -> Option.map Rule.of_string (read_str v))
+      (fun r -> `String (Rule.to_string r))
+      (fun r -> r.rule)
+      (fun r v -> r.rule <- v);
     dstr "error" (fun r -> r.error) (fun r v -> r.error <- v);
     dstr "lint_level" (fun r -> r.lint_level) (fun r v -> r.lint_level <- v);
     dstr "dep" (fun r -> r.dep) (fun r v -> r.dep <- v);

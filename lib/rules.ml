@@ -324,7 +324,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
           let have = system_package_version full "sqlite3" in
           Some
             [
-              `Rule "system-library-version";
+              `Rule Rule.System_library_version;
               `Keep;
               `Confidence "high";
               `Plat platform;
@@ -347,7 +347,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             let pkg = Rx.group m 1 in
             Some
               [
-                `Rule "broken-install";
+                `Rule Rule.Broken_install;
                 `Confidence "medium";
                 `Keep;
                 `Error (Rx.group0 m);
@@ -383,7 +383,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             in
             Some
               [
-                `Rule "link-error";
+                `Rule Rule.Link_error;
                 `Error (Printf.sprintf "undefined reference to `%s`" sym);
                 `Confidence "medium";
                 `Keep;
@@ -395,7 +395,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         | Some m ->
             Some
               [
-                `Rule "platform-unsupported";
+                `Rule Rule.Platform_unsupported;
                 `Confidence "high";
                 `Keep;
                 `Error
@@ -416,7 +416,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             let p = Rx.group m 1 in
             Some
               [
-                `Rule "platform-unsupported";
+                `Rule Rule.Platform_unsupported;
                 `Confidence "medium";
                 `Keep;
                 `Error (p ^ " cannot be run on FreeBSD");
@@ -436,7 +436,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         then
           Some
             [
-              `Rule "test-platform";
+              `Rule Rule.Test_platform;
               `Confidence "medium";
               `Keep;
               `Error "Stack overflow with flambda";
@@ -452,7 +452,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         | Some m ->
             let r =
               [
-                `Rule "missing-tool";
+                `Rule Rule.Missing_tool;
                 `Error (Util.prefix_chars (String.trim (Rx.group0 m)) 200);
                 `Confidence "high";
               ]
@@ -486,7 +486,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         then
           Some
             [
-              `Rule "needs-git-checkout";
+              `Rule Rule.Needs_git_checkout;
               `Confidence "high";
               `Error
                 "The build runs git, but the release archive is not a git \
@@ -504,7 +504,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         | Some m ->
             Some
               [
-                `Rule "install-outside-prefix";
+                `Rule Rule.Install_outside_prefix;
                 `Confidence "high";
                 `Error
                   (Printf.sprintf
@@ -525,7 +525,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
           in
           Some
             [
-              `Rule "unsupported-arch";
+              `Rule Rule.Unsupported_arch;
               `Confidence "high";
               `Error
                 (Printf.sprintf "%s has no cycle counter for %s" fname arch);
@@ -548,7 +548,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         then
           Some
             [
-              `Rule "library-api";
+              `Rule Rule.Library_api;
               `Confidence "medium";
               `Keep;
               `Error
@@ -575,7 +575,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             in
             Some
               [
-                `Rule "library-api";
+                `Rule Rule.Library_api;
                 `Dep "cmdliner";
                 `Old old;
                 `New (Some new_);
@@ -593,7 +593,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         if Rx.test checking_ar_re text && dims.os = "win32" then
           Some
             [
-              `Rule "platform-unsupported";
+              `Rule Rule.Platform_unsupported;
               `Confidence "medium";
               `Error
                 (Printf.sprintf "The configure script of %s finds no `ar` on %s"
@@ -617,7 +617,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             in
             Some
               [
-                `Rule "system-library-version";
+                `Rule Rule.System_library_version;
                 `Keep;
                 `Confidence "high";
                 `Plat platform;
@@ -642,7 +642,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
           let old, new_ = S.constraint_edit opam_text "ocaml" "<" "5.4" in
           Some
             [
-              `Rule "stdlib";
+              `Rule Rule.Stdlib_change;
               `Dep "ocaml";
               `Old old;
               `New (Some new_);
@@ -674,7 +674,7 @@ let c_compiler_rule text platform =
           in
           Some
             [
-              `Rule "newer-c-compiler";
+              `Rule Rule.Newer_c_compiler;
               `Error (Util.prefix_chars (String.trim line) 200);
               `Confidence "high";
               `Keep;
@@ -747,7 +747,7 @@ let conf_without_depext fname opam_text (info : info) (ctx : ctx) job platform =
            not replaced by a workaround from the pattern of passes and failures. *)
           let r =
             [
-              `Rule "conf-no-depext";
+              `Rule Rule.Conf_no_depext;
               `Confidence "medium";
               `Error
                 (Printf.sprintf "%s failed at `%s` on %s" fname (Rx.group m 1)
@@ -945,7 +945,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             let f = Rx.group m 1 in
             Some
               [
-                `Rule "ocaml-runtime-api";
+                `Rule Rule.Ocaml_runtime_api;
                 `Confidence "medium";
                 `Keep;
                 `Error
@@ -981,7 +981,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             let major = List.hd (String.split_on_char '.' have) in
             Some
               [
-                `Rule "system-library-version";
+                `Rule Rule.System_library_version;
                 `Keep;
                 `Confidence "high";
                 `Plat platform;
@@ -1003,7 +1003,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
         | Some m ->
             Some
               [
-                `Rule "system-library-version";
+                `Rule Rule.System_library_version;
                 `Keep;
                 `Confidence "medium";
                 `Error (Rx.group0 m);
@@ -1052,7 +1052,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             in
             Some
               [
-                `Rule "system-library-version";
+                `Rule Rule.System_library_version;
                 `Keep;
                 `Confidence "high";
                 `Plat platform;
@@ -1080,7 +1080,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             in
             Some
               [
-                `Rule "dune-lang";
+                `Rule Rule.Dune_lang;
                 `Error (Rx.group0 m);
                 `Dep "dune";
                 `Old old;
@@ -1108,7 +1108,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
         | Some m ->
             let tool = Rx.group m 1 in
             let conf = "conf-" ^ tool in
-            let r = [ `Rule "missing-tool"; `Error (Rx.group0 m) ] in
+            let r = [ `Rule Rule.Missing_tool; `Error (Rx.group0 m) ] in
             let distro = Option.value ~default:"" dims.distro in
             let family = List.hd (Rx.split distro_version_re distro) in
             let field_text name =
@@ -1138,7 +1138,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             Some
               (if is_conf && distro <> "" && List.mem distro accepted then
                  r
-                 @ Where.fix_where "ci" "the CI environment"
+                 @ Where.fix_where Ci "the CI environment"
                  @ [
                      `Note
                        (Printf.sprintf
@@ -1150,7 +1150,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
                    ]
                else if is_conf && declared <> [] then
                  r
-                 @ Where.fix_where "ci" "the CI environment"
+                 @ Where.fix_where Ci "the CI environment"
                  @ [
                      `Note
                        (Printf.sprintf
@@ -1229,7 +1229,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
         | Some m ->
             let name = Rx.group m 1 in
             let conf = "conf-" ^ name in
-            let r = [ `Rule "missing-pkg-config"; `Error (Rx.group0 m) ] in
+            let r = [ `Rule Rule.Missing_pkg_config; `Error (Rx.group0 m) ] in
             Some
               (if List.mem conf deps then
                  r
@@ -1289,7 +1289,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
               Option.value ~default:pkg0 (List.assoc_opt pkg0 findlib_packages)
             in
             let in_tests = Rx.test tests_re text in
-            let r = [ `Rule "missing-library"; `Error (Rx.group0 m) ] in
+            let r = [ `Rule Rule.Missing_library; `Error (Rx.group0 m) ] in
             let siblings =
               List.fold_left
                 (fun acc p ->
@@ -1408,7 +1408,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
         | Some m ->
             Some
               [
-                `Rule "missing-header";
+                `Rule Rule.Missing_header;
                 `Error (Rx.group0 m);
                 `Confidence "low";
                 `Note
@@ -1472,11 +1472,11 @@ let ci_failure job text (info : info) pr_packages =
               String.starts_with ~prefix:"conf-" (fst (split_pkg owner))
             in
             Some
-              ([ `Rule "missing-system-package"; `Failing (Some owner) ]
+              ([ `Rule Rule.Missing_system_package; `Failing (Some owner) ]
               @ (if is_conf then
                    Where.pr_or_other owner (List.mem owner pr_packages)
                  else
-                   Where.fix_where "other-package"
+                   Where.fix_where Other_package
                      "the dependency declaring these depexts")
               @ [
                   `Error
@@ -1499,7 +1499,7 @@ let ci_failure job text (info : info) pr_packages =
         | Some m ->
             Some
               [
-                `Rule "transient";
+                `Rule Rule.Transient;
                 `Error
                   (Printf.sprintf "%s of the CI tool %s" (Rx.group m 1)
                      (Rx.group m 2));
@@ -1510,7 +1510,7 @@ let ci_failure job text (info : info) pr_packages =
         if Rx.test runc_run_failed_re text then
           Some
             [
-              `Rule "transient";
+              `Rule Rule.Transient;
               `Error "The CI could not start the build container";
               `Note
                 "A CI infrastructure failure (the container did not start). \
@@ -1522,7 +1522,7 @@ let ci_failure job text (info : info) pr_packages =
         | Some m when info.failing = None ->
             Some
               [
-                `Rule "transient";
+                `Rule Rule.Transient;
                 `Error (Rx.group0 m);
                 `Note "Network error. Rerun the job.";
               ]
@@ -1584,8 +1584,8 @@ let same_version_reinstall (b : build) =
   in
   if removed && Rx.test remove_re (Option.value ~default:"" opam_text) then
     Some
-      ([ `Rule "opam-same-version-reinstall"; `Confidence "high" ]
-      @ Where.fix_where "ci" "opam (the CI's opam version)"
+      ([ `Rule Rule.Opam_same_version_reinstall; `Confidence "high" ]
+      @ Where.fix_where Ci "opam (the CI's opam version)"
       @ [
           `Error
             (Printf.sprintf
@@ -1676,7 +1676,7 @@ let safe_string err_text opam_text =
     let old, new_ = S.constraint_edit opam_text "ocaml" "<" "4.06" in
     Some
       [
-        `Rule "safe-string";
+        `Rule Rule.Safe_string;
         `Error
           "String used where bytes is expected (safe-string, default since \
            OCaml 4.06)";
@@ -1731,7 +1731,7 @@ let test_output (info : info) err opam_text =
             else Printf.sprintf {|"ocaml" {%s}|} term
       in
       [
-        `Rule "test-output-ocaml";
+        `Rule Rule.Test_output_ocaml;
         `Dep "ocaml";
         `Confidence "medium";
         `Error
@@ -1763,7 +1763,7 @@ let test_output (info : info) err opam_text =
       ]
   | _ ->
       (* completed by the caller with a passing job's versions *)
-      [ `Rule "test-output"; `Error "Test output differs (cram/mdx)" ]
+      [ `Rule Rule.Test_output; `Error "Test output differs (cram/mdx)" ]
 
 (* Whether [top], the top module of an unbound identifier, is a module of
    the standard library; if so, [out] gets the bound on OCaml that adds or
@@ -1885,7 +1885,7 @@ let stdlib_bound (b : build) out kind mods ident top =
           let old, new_ = S.constraint_edit opam_text "ocaml" op v in
           Suggestion.update out
             [
-              `Rule "stdlib";
+              `Rule Rule.Stdlib_change;
               `Dep "ocaml";
               `Old old;
               `New (Some new_);
@@ -2046,7 +2046,7 @@ let library_bound (b : build) out err_text kind mods ident top =
           in
           Suggestion.update out
             [
-              `Rule "library-api";
+              `Rule Rule.Library_api;
               `Dep pkg;
               `Old old;
               `New (Some new_);
@@ -2245,7 +2245,7 @@ let library_bound (b : build) out err_text kind mods ident top =
                       let old, new_ = S.constraint_edit opam_text pkg op v in
                       Suggestion.update out
                         [
-                          `Rule "library-api";
+                          `Rule Rule.Library_api;
                           `Dep pkg;
                           `Old old;
                           `New (Some new_);
@@ -2328,7 +2328,7 @@ let build_failure src job text (info : info) pr_packages pr_sha out (fname, fver
       | Some (Not_built install) ->
           Suggestion.update out
             [
-              `Rule "install-missing-files";
+              `Rule Rule.Install_missing_files;
               `Error install;
               `Confidence "low";
               `Note
@@ -2569,7 +2569,7 @@ let complete_test_output ?(fetch = fun url cache_dir -> Net.fetch url cache_dir)
     List.filter
       (fun k ->
         k.target = job.target && k.revdep = job.revdep && k.kind = job.kind
-        && k.category = "passed")
+        && k.category = Ci.Category.passed)
       data.jobs
   in
   let where = "this run" in
@@ -2673,7 +2673,7 @@ let name_re = Rx.v {|\b([A-Za-z][\w-]+)|}
 
 let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
     Suggestion.t option =
-  if job.kind <> "lower-bounds" then None
+  if job.kind <> Lower_bounds then None
   else
     let info = log_info text in
     match info.failing with
@@ -2772,7 +2772,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
                       `Url job.url;
                       `Kind job.kind;
                       `Experimental job.experimental;
-                      `Rule "lower-bound";
+                      `Rule Rule.Lower_bound;
                       `Failing (Some target);
                     ]
                    @ Where.pr_or_other target (List.mem target pr_packages)
@@ -2795,7 +2795,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
                      ]))
         end
         else if
-          Suggestion.nonempty r.rule
+          Suggestion.nonempty (Option.map Rule.to_string r.rule)
           || Suggestion.nonempty_field r.Suggestion.new_
           || Suggestion.list r.candidates <> []
         then None
@@ -2834,7 +2834,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
             in
             Suggestion.update r
               ([
-                 `Rule "lower-bound";
+                 `Rule Rule.Lower_bound;
                  `Candidates (List.map snd out);
                  `Compared_with "the other jobs";
                  `Confidence "low";
@@ -3025,10 +3025,10 @@ let previous_release_bound src job (info : info) pr_packages pr_sha
                                     `Url job.url;
                                     `Kind job.kind;
                                     `Experimental job.experimental;
-                                    `Rule "previous-release-bound";
+                                    `Rule Rule.Previous_release_bound;
                                     `Failing (Some pkg);
                                   ]
-                                 @ Where.fix_where "pr" "this PR"
+                                 @ Where.fix_where Pr "this PR"
                                  @ [
                                      `Dep dep;
                                      `Old old;

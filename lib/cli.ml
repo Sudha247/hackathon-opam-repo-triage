@@ -57,14 +57,14 @@ let parallel_map n f l =
 let logs args sha (data : data) =
   let cats =
     if args.category = [] then
-      [ "build"; "build-or-test"; "dependency"; "solver"; "lint" ]
-    else args.category
+      Category.[ Build; Build_or_test; Dependency; Solver; Lint ]
+    else List.map Category.of_string args.category
   in
   let sel =
     List.filter
       (fun j ->
-        j.status = "failed"
-        && (List.mem j.category cats || j.kind = "lint")
+        j.status = Failed
+        && (List.mem j.category cats || j.kind = Lint)
         &&
         match args.match_ with
         | None | Some "" -> true
@@ -119,7 +119,8 @@ let logs args sha (data : data) =
           | Some b -> b
           | None -> "None"
         in
-        Printf.printf "%s  [%s] builder=%s base=%s\n" j.variant j.category
+        Printf.printf "%s  [%s] builder=%s base=%s\n" j.variant
+          (Category.to_string j.category)
           builder
           (Util.prefix_chars (Option.value ~default:"?" (g "base")) 12);
         print_endline j.url;
@@ -148,7 +149,7 @@ let compare args sha (data : data) =
     List.sort_uniq compare
       (List.filter_map
          (fun (j : job) ->
-           if j.kind = "revdeps" && List.mem j.category failing then j.target
+           if j.kind = Revdeps && List.mem j.category failing then j.target
            else None)
          data.jobs)
   in

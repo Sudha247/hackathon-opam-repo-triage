@@ -211,11 +211,11 @@ let mk ?(platform = []) ?target ?(kind = "build") ?revdep ?(status = "failed")
     variant;
     url;
     label = "";
-    status;
+    status = Ci.Status.of_string status;
     reason;
-    category;
+    category = Ci.Category.of_string category;
     target;
-    kind;
+    kind = Ci.Kind.of_string kind;
     revdep;
     platform;
     experimental;
@@ -325,7 +325,8 @@ let test_round_trip () =
     (Json.dumps ~sort_keys:true stored)
     (Json.dumps ~sort_keys:true (Suggestion.to_json r));
   check_none "absent where_kind" r.where_kind;
-  check_str "derived" "other-package" (Where.where_kind r);
+  check_str "derived" "other-package"
+    (Where_kind.to_string (Where.where_kind r));
   check_true "null failing" (r.Suggestion.failing = Null);
   check_none "a number as note" r.note;
   check_none "a mixed list as jobs" r.Suggestion.jobs;
@@ -353,7 +354,9 @@ let test_round_trip () =
    words of [fix_in] for results stored before it existed. *)
 
 let test_legacy () =
-  let kind f = Where.where_kind (d [ ("fix_in", s f) ]) in
+  let kind f =
+    Where_kind.to_string (Where.where_kind (d [ ("fix_in", s f) ]))
+  in
   let pkg f = Where.where_pkg (d [ ("fix_in", s f) ]) in
   check_str "pr" "pr" (kind "this PR");
   check_str "other" "other-package" (kind "lwt.5.9.0 (other package)");
@@ -375,7 +378,8 @@ let test_legacy () =
         ("failing_dep", s "dep.1");
       ]
   in
-  check_str "shared" "other-package" (Where.where_kind shared);
+  check_str "shared" "other-package"
+    (Where_kind.to_string (Where.where_kind shared));
   Alcotest.(check (option string))
     "shared pkg" (Some "dep.1") (Where.where_pkg shared);
   check_str "new words" "unknown" (kind "somewhere new")
@@ -383,13 +387,102 @@ let test_legacy () =
 (* An LLM answer has no [where_kind] (suggest removes the rule's), only
    [fix_in]: [Titles.readable] derives both the kind and the package from it,
    the package before setting the kind. *)
+(* The names of statuses, categories, kinds, rules and where_kind: printed as
+   read, unknown ones included, and only [of_string] makes an [Other]. *)
+let test_variant_names () =
+  let names to_s of_s l =
+    List.iter (fun x -> check_str x x (to_s (of_s x))) l
+  in
+  names Status.to_string Status.of_string
+    [ "passed"; "failed"; "active"; "aborted"; "not-started"; "queued"; "" ];
+  names Category.to_string Category.of_string
+    [
+      "build";
+      "build-or-test";
+      "dependency";
+      "solver";
+      "network";
+      "cancelled";
+      "ignored";
+      "not-available";
+      "sources";
+      "lint";
+      "analysis";
+      "passed";
+      "failed";
+      "active";
+      "aborted";
+      "not-started";
+      "skipped";
+    ];
+  names Kind.to_string Kind.of_string
+    [
+      "build";
+      "tests";
+      "lower-bounds";
+      "revdeps";
+      "revdeps-list";
+      "lint";
+      "analysis";
+      "doc";
+    ];
+  names Rule.to_string Rule.of_string
+    [ "library-api"; "stdlib"; "platform-matrix-systemic"; "transient"; "x" ];
+  check_true "failed" (Status.of_string "failed" = Failed);
+  check_true "passed" (Category.of_string "passed" = Category.passed);
+  check_true "lint" (Kind.of_string "lint" = Lint);
+  check_true "stdlib" (Rule.of_string "stdlib" = Stdlib_change);
+  check_true "systemic"
+    (Rule.systemic Platform_matrix = Rule.of_string "platform-matrix-systemic");
+  check_true "is_systemic" (Rule.is_systemic (Rule.of_string "x-systemic"));
+  List.iter
+    (fun k ->
+      check_true (Where_kind.to_string k)
+        (Where_kind.of_string (Where_kind.to_string k) = Some k))
+    Where_kind.all;
+  check_true "where_kind" (Where_kind.of_string "elsewhere" = None);
+  (* A page with a status the parser does not know. *)
+  let page =
+    {|<details><summary><b>Main results</b></summary><ul class="statuses"><li class="queued"><a href="/github/ocaml/opam-repository/commit/a/variant/compilers,5.3,x.1">x.1 (queued)</a></li><li class="weird"><a href="/github/ocaml/opam-repository/commit/a/variant/(doc)">(doc) (weird: y)</a></li></ul></details>|}
+  in
+  let d = Ci.parse_commit_page page in
+  check_strs "statuses" [ "queued"; "weird" ]
+    (List.map (fun j -> Status.to_string j.status) d.jobs);
+  check_strs "categories" [ "queued"; "weird" ]
+    (List.map (fun j -> Category.to_string j.category) d.jobs);
+  check_strs "kinds" [ "build"; "doc" ]
+    (List.map (fun j -> Kind.to_string j.kind) d.jobs)
+
+(* Stored suggestions with a rule, kind or where_kind of another version:
+   read and printed back as they were. *)
+let test_unknown_names_round_trip () =
+  let v : Json.t =
+    `Assoc
+      [
+        ("variant", s "v");
+        ("kind", s "doc");
+        ("where_kind", s "elsewhere");
+        ("rule", s "a-future-rule");
+        ("fix_in", s "this PR");
+      ]
+  in
+  let r = Suggestion.of_json v in
+  check_true "rule" (r.rule = Some (Rule.of_string "a-future-rule"));
+  check_true "where_kind" (r.where_kind = None);
+  check_str "derived" "pr" (Where_kind.to_string (Where.where_kind r));
+  let sorted (j : Json.t) =
+    match j with `Assoc kv -> `Assoc (List.sort compare kv) | j -> j
+  in
+  check_json "round trip" (sorted v) (sorted (Suggestion.to_json r))
+
 let test_readable_from_fix_in () =
   let r =
     d [ ("rule", s "llm"); ("fix_in", s "ojs_filetree.0.8.0 (other package)") ]
   in
   ignore (Titles.readable [ r ]);
   Alcotest.(check (option string))
-    "where_kind" (Some "other-package") r.Suggestion.where_kind;
+    "where_kind" (Some "other-package")
+    (Option.map Where_kind.to_string r.Suggestion.where_kind);
   Alcotest.(check (option string))
     "where_pkg" (Some "ojs_filetree.0.8.0")
     (Suggestion.get r.Suggestion.where_pkg);
@@ -400,7 +493,7 @@ let test_readable_from_fix_in () =
 let test_structured_wins () =
   (* The words of fix_in are only read when where_kind is missing. *)
   let r = d [ ("fix_in", s "this PR"); ("where_kind", s "ci") ] in
-  check_str "kind" "ci" (Where.where_kind r);
+  check_str "kind" "ci" (Where_kind.to_string (Where.where_kind r));
   Alcotest.(check (option string)) "text" (Some "the CI") (Titles.where_text r);
   let r' = Suggestion.copy r in
   r'.Suggestion.new_ <- Set "x";
@@ -498,7 +591,8 @@ let conf_rule ?(opam = conf_opam) ?(fname = "conf-glib-2") ?(log = conf_log)
 
 let test_conf_rule () =
   let r = Option.get (conf_rule "day10,msys2,x86_64,5.4,ocgio.1") in
-  check_str "rule" "conf-no-depext" (Suggestion.str r.rule);
+  check_str "rule" "conf-no-depext"
+    (Option.fold ~none:"" ~some:Rule.to_string r.rule);
   check_str "error" "conf-glib-2 failed at `pkg-config glib-2.0` on here"
     (Suggestion.str r.error);
   (* A change described in words (on the page, a fix rather than an
@@ -592,8 +686,8 @@ let test_jobs_not_run_page () =
   let aborted =
     {
       (job "compilers,5.3,foo.1") with
-      status = "aborted";
-      category = "aborted";
+      status = Aborted;
+      category = Status Aborted;
       reason = None;
     }
   in
@@ -627,7 +721,12 @@ let test_jobs_not_run_page () =
   List.iter
     (fun v ->
       let routine =
-        { (job v) with status = "aborted"; category = "aborted"; reason = None }
+        {
+          (job v) with
+          status = Aborted;
+          category = Status Aborted;
+          reason = None;
+        }
       in
       let r = one (Context.rerun_rules (data [ routine ]) []) in
       check_true v (r.Suggestion.experimental = Some true);
@@ -671,7 +770,7 @@ let test_unanalysed_order () =
 
 let matrix_rules ?(earlier = []) jobs =
   List.map
-    (fun r -> Suggestion.str r.rule)
+    (fun r -> Option.fold ~none:"" ~some:Rule.to_string r.rule)
     (Matrix.matrix_rules jobs earlier None [ "x.1" ])
 
 let test_builder_specific_same_arch () =
@@ -722,7 +821,7 @@ let test_pattern_after_a_change_from_the_log () =
           (job ~reason:"failed: Library \"bytes\" not found."
              ("compilers," ^ v ^ ",x.1,tests"))
           with
-          kind = "tests";
+          kind = Tests;
         })
       [ "5.2"; "5.5" ]
   in
@@ -731,7 +830,7 @@ let test_pattern_after_a_change_from_the_log () =
     @ [
         {
           (job ~category:"passed" "compilers,4.14,x.1,tests") with
-          kind = "tests";
+          kind = Tests;
         };
       ]
   in
@@ -752,7 +851,9 @@ let test_pattern_after_a_change_from_the_log () =
   (* A change in words (conf-no-depext): the same. *)
   let words = from_log () in
   Suggestion.update words
-    [ `Rule "conf-no-depext"; `New None; `Advice "Add depexts for msys2 to x" ];
+    [
+      `Rule Rule.Conf_no_depext; `New None; `Advice "Add depexts for msys2 to x";
+    ];
   check_strs "words" [] (matrix_rules ~earlier:[ words ] jobs);
   (* A note without a change: the pattern still gives its suggestion. *)
   let note = from_log () in
@@ -896,7 +997,7 @@ let test_unreadable_log () =
   check_true "unrecognised"
     (List.exists
        (fun r ->
-         Suggestion.str r.rule = "unrecognised"
+         Option.fold ~none:"" ~some:Rule.to_string r.rule = "unrecognised"
          && Util.contains (Json.dumps (get r "jobs")) "kinetic-client")
        (suggestions v));
   check_true "incomplete" (Json.bool "incomplete" v);
@@ -917,7 +1018,11 @@ let test_one_job_fails () =
         Net.net_set "mcp-errors" 2)
   in
   let sugg = suggestions v in
-  let err = List.filter (fun r -> Suggestion.str r.rule = "rule-error") sugg in
+  let err =
+    List.filter
+      (fun r -> Option.fold ~none:"" ~some:Rule.to_string r.rule = "rule-error")
+      sugg
+  in
   check_int "one" 1 (List.length err);
   let e = List.hd err in
   check_true (Suggestion.str e.error)
@@ -943,7 +1048,10 @@ let test_unbound_stdlib_value_without_tags () =
   let sugg = suggestions v in
   (* Was an IndexError (no OCaml release): now the identifier is looked up in the libraries. *)
   check_false "rule-error"
-    (List.exists (fun r -> Suggestion.str r.rule = "rule-error") sugg);
+    (List.exists
+       (fun r ->
+         Option.fold ~none:"" ~some:Rule.to_string r.rule = "rule-error")
+       sugg);
   check_true "colibri2"
     (List.exists
        (fun r -> Suggestion.str_field r.Suggestion.failing = "colibri2.0.7")
@@ -1685,7 +1793,10 @@ let test_stdlib_history_answers () =
   in
   check_strs "rule"
     [ "stdlib"; {|"ocaml" {>= "5.1"}|} ]
-    [ Suggestion.str r.rule; Suggestion.str_field r.Suggestion.new_ ];
+    [
+      Option.fold ~none:"" ~some:Rule.to_string r.rule;
+      Suggestion.str_field r.Suggestion.new_;
+    ];
   check_str "note"
     "`List.is_empty` is new in OCaml 5.1: to keep supporting older releases, \
      do without it instead."
@@ -1806,7 +1917,10 @@ let test_lib_history_answers () =
   in
   check_strs "rule"
     [ "library-api"; {|"foo" {>= "1.1"}|} ]
-    [ Suggestion.str r.rule; Suggestion.str_field r.Suggestion.new_ ];
+    [
+      Option.fold ~none:"" ~some:Rule.to_string r.rule;
+      Suggestion.str_field r.Suggestion.new_;
+    ];
   check_json "evidence"
     (`Assoc
        [
@@ -2305,7 +2419,10 @@ let test_module_through_a_wrapper () =
   in
   check_strs "new"
     [ "library-api"; {|"why" {>= "1.1"}|} ]
-    [ Suggestion.str r.rule; Suggestion.str_field r.Suggestion.new_ ];
+    [
+      Option.fold ~none:"" ~some:Rule.to_string r.rule;
+      Suggestion.str_field r.Suggestion.new_;
+    ];
   check_json "evidence"
     (`Assoc
        [
@@ -2341,7 +2458,7 @@ let test_top_level_module_appeared_later () =
   check_strs "new"
     [ "library-api"; {|"ez_api" {>= "1.1"}|}; "Unbound module EzLwtSys" ]
     [
-      Suggestion.str r.rule;
+      Option.fold ~none:"" ~some:Rule.to_string r.rule;
       Suggestion.str_field r.Suggestion.new_;
       Suggestion.str r.error;
     ];
@@ -2487,7 +2604,10 @@ let test_module_removed_by_a_recent_release () =
   let r = go [ "foo" ] none in
   check_strs "new"
     [ "library-api"; {|"matrix" {< "1.2"}   (new line in depends)|} ]
-    [ Suggestion.str r.rule; Suggestion.str_field r.Suggestion.new_ ];
+    [
+      Option.fold ~none:"" ~some:Rule.to_string r.rule;
+      Suggestion.str_field r.Suggestion.new_;
+    ];
   check_json "evidence"
     (`Assoc
        [
@@ -2546,7 +2666,7 @@ let test_findlib_library_of_another_package () =
       "The library `bytes` is installed by the base-bytes package.";
     ]
     [
-      Suggestion.str r.rule;
+      Option.fold ~none:"" ~some:Rule.to_string r.rule;
       Suggestion.str_field r.Suggestion.new_;
       Suggestion.str r.note;
     ]
@@ -3403,6 +3523,8 @@ let () =
           p "legacy" test_legacy;
           p "structured_wins" test_structured_wins;
           p "readable_from_fix_in" test_readable_from_fix_in;
+          p "variant_names" test_variant_names;
+          p "unknown_names_round_trip" test_unknown_names_round_trip;
         ] );
       ("HealthExplainedElsewhereTest", [ p "drop" test_drop ]);
       ( "ConfWithoutDepextTest",

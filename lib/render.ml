@@ -13,16 +13,19 @@ let render_summary sha (data : data) show_all =
   if data.unfinished > 0 then
     Printf.printf "CI still running: %d of %d jobs not finished\n"
       data.unfinished (List.length jobs);
-  let counts = Util.counter (List.map (fun j -> j.category) jobs) in
+  let counts =
+    Util.counter (List.map (fun j -> Category.to_string j.category) jobs)
+  in
   let counts = List.sort compare counts in
   Printf.printf "jobs: %d %s\n" (List.length jobs)
     (String.concat " "
        (List.map (fun (k, v) -> Printf.sprintf "%s=%d" k v) counts));
-  let noise = [ "passed"; "ignored"; "not-available" ] in
+  let noise = Category.[ passed; Ignored; Not_available ] in
   List.iter
     (fun j ->
-      if j.kind = "lint" || j.kind = "analysis" then begin
-        Printf.printf "\n[%s] %s%s\n" j.kind j.status
+      if j.kind = Lint || j.kind = Analysis then begin
+        Printf.printf "\n[%s] %s%s\n" (Kind.to_string j.kind)
+          (Status.to_string j.status)
           (match j.reason with Some r when r <> "" -> ": " ^ r | _ -> "");
         List.iter (fun m -> Printf.printf "    %s\n" m) j.messages
       end)
@@ -40,13 +43,13 @@ let render_summary sha (data : data) show_all =
       let own =
         List.filter
           (fun j ->
-            j.kind <> "revdeps" && (show_all || not (List.mem j.category noise)))
+            j.kind <> Revdeps && (show_all || not (List.mem j.category noise)))
           tj
       in
       let rev =
         List.filter
           (fun j ->
-            j.kind = "revdeps" && (show_all || not (List.mem j.category noise)))
+            j.kind = Revdeps && (show_all || not (List.mem j.category noise)))
           tj
       in
       Printf.printf "\n== %s ==\n" t;
@@ -54,8 +57,9 @@ let render_summary sha (data : data) show_all =
         print_endline "  own jobs:";
         List.iter
           (fun j ->
-            Printf.printf "    %s %s %s %s\n" (pad 13 j.kind)
-              (pad 14 j.category)
+            Printf.printf "    %s %s %s %s\n"
+              (pad 13 (Kind.to_string j.kind))
+              (pad 14 (Category.to_string j.category))
               (pad 45 (platform_str j))
               (Option.value ~default:"" j.reason))
           own
@@ -71,7 +75,8 @@ let render_summary sha (data : data) show_all =
             let pkg = Option.value ~default:"None" pkg in
             List.iter
               (fun ((cat, reason), js) ->
-                Printf.printf "    %s %s %s\n" (pad 32 pkg) (pad 14 cat)
+                Printf.printf "    %s %s %s\n" (pad 32 pkg)
+                  (pad 14 (Category.to_string cat))
                   (Option.value ~default:"" reason);
                 Printf.printf "    %s %s on: %s\n" (pad 32 "") (pad 14 "")
                   (String.concat ", " (List.map platform_str js)))
@@ -90,7 +95,7 @@ let jobs_json js : Json.t =
          `Assoc
            [
              ("platform", `String (String.concat "/" j.platform));
-             ("category", `String j.category);
+             ("category", `String (Category.to_string j.category));
              ("reason", Json.opt_string j.reason);
              ("url", `String j.url);
            ])
@@ -102,7 +107,7 @@ let compare jobs base_jobs : Json.t list =
     List.iter
       (fun j ->
         match ocaml_version j with
-        | Some v when j.kind = "revdeps" ->
+        | Some v when j.kind = Revdeps ->
             let k = (Option.value ~default:"" j.revdep, v) in
             Hashtbl.replace idx k
               (j :: Option.value ~default:[] (Hashtbl.find_opt idx k))
@@ -121,12 +126,16 @@ let compare jobs base_jobs : Json.t list =
       let failing_js = List.filter (fun j -> List.mem j.category failing) js in
       if failing_js = [] then None
       else begin
-        let passing_here = List.filter (fun j -> j.category = "passed") js in
+        let passing_here =
+          List.filter (fun j -> j.category = Category.passed) js
+        in
         let base = Option.value ~default:[] (Hashtbl.find_opt base_idx k) in
         let base_fail =
           List.filter (fun j -> List.mem j.category failing) base
         in
-        let base_pass = List.filter (fun j -> j.category = "passed") base in
+        let base_pass =
+          List.filter (fun j -> j.category = Category.passed) base
+        in
         let verdict =
           if base_fail <> [] then
             let same =
@@ -142,7 +151,8 @@ let compare jobs base_jobs : Json.t list =
           else if base <> [] then
             "unknown (baseline: "
             ^ String.concat ","
-                (List.sort_uniq compare (List.map (fun j -> j.category) base))
+                (List.sort_uniq compare
+                   (List.map (fun j -> Category.to_string j.category) base))
             ^ ")"
           else "no-baseline"
         in
@@ -644,8 +654,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
         ]
     in
     let w =
-      if where && Suggestion.str r.rule <> "rerun" then Titles.where_text r
-      else None
+      if where && r.rule <> Some Rerun then Titles.where_text r else None
       (* "Jobs to rerun" says it *)
     in
     let parts =
@@ -676,8 +685,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
   in
   let job_links ?(n = 10) r =
     (* For the entries whose content is the list of jobs (reruns, unexplained failures). *)
-    if not (List.mem (Suggestion.str r.rule) [ "rerun"; "unrecognised" ]) then
-      ""
+    if not (Titles.has_rule [ Rerun; Unrecognised ] r) then ""
     else
       let js = Suggestion.list r.Suggestion.jobs in
       let links =
@@ -780,8 +788,7 @@ let line_edits r text =
     in
     go 0
   in
-  if Suggestion.str r.rule = "lint" && String.starts_with ~prefix:"%{_:" new_
-  then begin
+  if r.rule = Some Lint && String.starts_with ~prefix:"%{_:" new_ then begin
     (* warning 41: every %{pkg:...}% *)
     let name = fst (split_pkg (Suggestion.str_field r.Suggestion.failing)) in
     let pat = "%{" ^ name ^ ":" in
@@ -886,7 +893,7 @@ let build_review ~(raw : string -> string option) sha (data : data)
         && head_sha = sha
         (* An LLM answer is never a one-click suggestion (it stays in the
             summary, as a diff to check), and a change is one opam line. *)
-        && Suggestion.str r.rule <> "llm"
+        && r.rule <> Some Llm
         && not
              (List.exists
                 (fun v ->
@@ -966,8 +973,7 @@ let render_suggestions (results : Suggestion.t list) =
         (Titles.title_of r
         ^
         if
-          Suggestion.str r.Suggestion.variant = "(lint)"
-          || String.ends_with ~suffix:"-systemic" (Suggestion.str r.rule)
+          Suggestion.str r.Suggestion.variant = "(lint)" || Titles.is_systemic r
         then ""
         else
           ": "
@@ -976,7 +982,7 @@ let render_suggestions (results : Suggestion.t list) =
           | Some j when j <> "" -> j
           | _ -> describe_job (Suggestion.str r.Suggestion.variant));
       let jobs = Suggestion.list r.Suggestion.jobs in
-      if List.mem (Suggestion.str r.rule) [ "rerun"; "unrecognised" ] then
+      if Titles.has_rule [ Rerun; Unrecognised ] r then
         List.iter
           (fun v -> Printf.printf "  job             : %s\n" (describe_job v))
           jobs

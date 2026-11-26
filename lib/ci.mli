@@ -8,22 +8,85 @@
     [compilers,4.11,foo.1.0,lower-bounds],
     [distributions,centos-10-ocaml-4.14,foo.1.0], [(lint)]. *)
 
+(** The status of a job, as the page shows it. *)
+module Status : sig
+  type t =
+    | Passed
+    | Failed
+    | Active
+    | Aborted
+    | Not_started  (** "not-started" *)
+    | Other of string
+        (** another status (the page's class of the job, possibly [""]); only
+            {!of_string} makes one, so that [Other "failed"] never exists *)
+
+  val to_string : t -> string
+  (** The page's word: "passed", "failed", "active", "aborted", "not-started",
+      or the other one. *)
+
+  val of_string : string -> t
+  (** The inverse of {!to_string}: [to_string (of_string s) = s]. *)
+end
+
+(** The kind of a job, from its variant. *)
+module Kind : sig
+  type t =
+    | Build
+    | Tests
+    | Lower_bounds
+    | Revdeps
+    | Revdeps_list  (** the job listing the reverse dependencies *)
+    | Lint
+    | Analysis
+    | Other of string  (** another job in parentheses, as [(lint)] is *)
+
+  val to_string : t -> string
+  (** "build", "tests", "lower-bounds", "revdeps", "revdeps-list", "lint",
+      "analysis", or the other one. *)
+
+  val of_string : string -> t
+  (** The inverse of {!to_string}. *)
+end
+
+(** The category of a job: why a failed job failed, or the status of the others.
+*)
+module Category : sig
+  type t =
+    | Build
+    | Build_or_test
+    | Dependency
+    | Solver
+    | Network
+    | Cancelled
+    | Ignored  (** x-ci-accept-failures *)
+    | Not_available  (** not installable there *)
+    | Sources  (** the sources could not be extracted *)
+    | Lint
+    | Analysis
+    | Status of Status.t  (** a job that did not fail: its status *)
+
+  val to_string : t -> string
+  (** "build", "build-or-test", "dependency", "solver", "network", "cancelled",
+      "ignored", "not-available", "sources", "lint", "analysis", or the status.
+  *)
+
+  val of_string : string -> t
+  (** The inverse of {!to_string}. *)
+
+  val passed : t
+  (** [Status Passed]. *)
+end
+
 type job = {
   variant : string;
   url : string;  (** its log's page *)
   label : string;  (** the page's label of the job *)
-  status : string;  (** "passed", "failed", "active", "not-started", ... *)
+  status : Status.t;
   reason : string option;  (** after the status: [failed: reason] *)
-  category : string;
-      (** the status ("passed", "active", ...) or, for a failed job: "build",
-          "build-or-test", "dependency", "solver", "network", "cancelled",
-          "ignored" (x-ci-accept-failures), "not-available" (not installable
-          there), "sources" (could not be extracted), "lint", "analysis" *)
+  category : Category.t;
   target : string option;
       (** the PR's package the job builds, e.g. "lwt.5.10.2" *)
-  kind : string;
-      (** "build", "tests", "lower-bounds", "revdeps", "revdeps-list" (the job
-          listing the reverse dependencies), "lint", "analysis" *)
+  kind : Kind.t;
   revdep : string option;  (** the reverse dependency a revdeps job builds *)
   platform : string list;
       (** the variant's parts before the target: ["compilers"; "4.14"],
@@ -96,16 +159,16 @@ val excerpt : ?max_output_lines:int -> string -> (string * string) list
 
 (** {1 Jobs} *)
 
-val failing : string list
-(** The categories of the failures that the analysis looks into: "build",
-    "build-or-test", "dependency", "solver". *)
+val failing : Category.t list
+(** The categories of the failures that the analysis looks into: build,
+    build-or-test, dependency, solver. *)
 
-val failing_cats : string list
+val failing_cats : Category.t list
 (** The same. *)
 
-val neutral : string list
-(** The categories of failures that say nothing about the PR: "not-available",
-    "ignored", "network", "cancelled", "sources". *)
+val neutral : Category.t list
+(** The categories of failures that say nothing about the PR: not-available,
+    ignored, network, cancelled, sources. *)
 
 val failing_pkg : job -> string option
 (** The package a job fails on: the reverse dependency it builds, if any, else
@@ -114,7 +177,7 @@ val failing_pkg : job -> string option
 val failing_dep : string option -> string option
 (** For a dependency failure, the failing package named in the reason. *)
 
-type failure_key = string option * string option * string * string
+type failure_key = string option * string option * Kind.t * string
 (** What makes two failures the same: target, reverse dependency, kind, and the
     reason (without quotes and [-j N]). *)
 

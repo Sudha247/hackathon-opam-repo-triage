@@ -10,7 +10,7 @@ type group_key = Dep of string option * string option | Key of failure_key
     platforms is one problem. A dependency failure is the dependency's: one log
     per (cause, platform). *)
 let group_key j =
-  if j.category = "dependency" then Dep (j.reason, (job_dims j).distro)
+  if j.category = Dependency then Dep (j.reason, (job_dims j).distro)
   else Key (failure_key j)
 
 let matches match_ variant =
@@ -19,11 +19,11 @@ let matches match_ variant =
   | Some m -> Rx.test (Rx.v m) variant
 
 let distinct_failures jobs match_ =
-  let cats = [ "build"; "build-or-test"; "solver"; "dependency" ] in
+  let cats = Category.[ Build; Build_or_test; Solver; Dependency ] in
   let sel =
     List.filter
       (fun j ->
-        j.status = "failed" && List.mem j.category cats
+        j.status = Failed && List.mem j.category cats
         && matches match_ j.variant)
       jobs
   in
@@ -43,7 +43,7 @@ let drop_health_explained_elsewhere (notes : Context.notes) results pr_packages
   let hits =
     List.filter
       (fun r ->
-        Suggestion.str r.rule = "library-api"
+        r.rule = Some Library_api
         && Suggestion.nonempty_field r.Suggestion.new_
         && Suggestion.nonempty r.dep
         && not (List.mem (Suggestion.str r.dep) names))
@@ -126,7 +126,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
           (* the master commit the PR was merged with *)
           match
             let r = !suggest_for_job_hook src j text pr_packages sha in
-            if Suggestion.str r.rule = "test-output" then
+            if r.rule = Some Test_output then
               Rules.complete_test_output src r j text data cache_dir;
             let lb = Rules.lower_bounds_rule src j text r pr_packages sha in
             let info = Loginfo.log_info text in
@@ -177,12 +177,12 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
      about the package: leave them out of the pass/fail patterns. *)
   let transient =
     List.concat_map
-      (fun r -> if Suggestion.str r.rule = "transient" then keys_of r else [])
+      (fun r -> if r.rule = Some Transient then keys_of r else [])
       results
   in
   let jobs =
     List.filter
-      (fun j -> not (j.status = "failed" && List.mem (failure_key j) transient))
+      (fun j -> not (j.status = Failed && List.mem (failure_key j) transient))
       data.jobs
   in
   let matrix =
@@ -303,7 +303,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
              l.dry_run);
       List.iter
         (fun r ->
-          if Suggestion.str r.rule = "llm" then begin
+          if r.rule = Some Llm then begin
             (* The answer's place comes as [fix_in] (see where.ml): the rule's where_kind no longer holds. *)
             r.where_kind <- None;
             r.where_pkg <- Absent
@@ -316,14 +316,15 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
   List.iter
     (fun r ->
       if
-        List.mem (Suggestion.str r.rule)
+        Titles.has_rule
           [
-            "platform-matrix";
-            "compiler-matrix";
-            "missing-system-package";
-            "missing-header";
-            "newer-c-compiler";
+            Platform_matrix;
+            Compiler_matrix;
+            Missing_system_package;
+            Missing_header;
+            Newer_c_compiler;
           ]
+          r
       then begin
         let name, ver = split_pkg (Suggestion.str_field r.Suggestion.failing) in
         let vs =
@@ -375,7 +376,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
                 (`List
                    [ `String "advice"; failing; `String (Option.get r.advice) ]),
               None )
-          else if List.mem (Suggestion.str r.rule) per_package_rules then
+          else if Titles.has_rule per_package_rules r then
             let t =
               Util.replace (Suggestion.str r.note)
                 (match plat with Some p when p <> "" -> p | _ -> "\000")
@@ -383,7 +384,12 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
             in
             ( Some
                 (`List
-                   [ `String "rule"; failing; s (Suggestion.str r.rule); s t ]),
+                   [
+                     `String "rule";
+                     failing;
+                     s (Option.fold ~none:"" ~some:Rule.to_string r.rule);
+                     s t;
+                   ]),
               Some t )
           else (None, None)
         in
@@ -455,7 +461,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
     List.iter
       (fun r ->
         if
-          String.starts_with ~prefix:"platform-matrix" (Suggestion.str r.rule)
+          Titles.has_rule [ Platform_matrix; Platform_matrix_systemic ] r
           && Rx.test windows_freebsd_macos_re (Suggestion.str r.error)
         then
           r.note <-

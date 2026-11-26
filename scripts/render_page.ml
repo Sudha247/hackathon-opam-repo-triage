@@ -61,10 +61,10 @@ let not_ready_labels = [ no_merge_label; "needs reporter action" ]
    come from the PR: the CI's setup (or its opam), nothing to fix (a bound
    the PR adds on purpose). Not "rerun": CI did not test those jobs. Never
    for an LLM answer (see [ci_side]). *)
-let ci_side_kinds = [ "ci"; "none" ]
+let ci_side_kinds : Where_kind.t list = [ Ci; Nothing ]
 
 (* Rules whose failures also happen on master (opam-health-check). *)
-let preexisting_rules = [ "health-check-preexisting" ]
+let preexisting_rules : Rule.t list = [ Health_check_preexisting ]
 
 (* Job categories (from [summary]), in words. *)
 let job_categories =
@@ -203,7 +203,7 @@ let plural n = if n = 1 then "" else "s"
 
 (** Whether the fix of suggestion [r] goes in another package (see where.ml:
     stored suggestions may predate [where_kind]). *)
-let other_package r = Where.where_kind r = "other-package"
+let other_package r = Where.where_kind r = Other_package
 
 let suggestions_of (res : Json.t) =
   List.map sugg_of (Json.to_list (res |. "suggestions"))
@@ -228,23 +228,27 @@ let ci_running pr =
     counts: the model blames the CI too easily, and answers stored before
     apply_llm stopped saying "the CI environment" still say it. *)
 let ci_side ?(kinds = ci_side_kinds) r =
-  List.mem (Where.where_kind r) kinds && r.rule <> Some "llm"
+  List.mem (Where.where_kind r) kinds && r.rule <> Some Llm
 
 let not_this_pr r =
   let shared =
     Suggestion.list r.also_failing_in <> []
-    && (not (List.mem (Where.where_kind r) [ "pr"; "rerun" ]))
+    && (not (List.mem (Where.where_kind r) [ Pr; Rerun ]))
     && not (Where.tied_to_pr r)
   in
   (* A bound the PR adds on purpose: only as checked since where_kind exists (a lowered upper bound of
      [depends] that some version satisfies), not from a result stored before. *)
-  let unchecked = r.rule = Some "bounded-out" && r.where_kind = None in
+  let unchecked =
+    r.rule = Some Bounded_out && r.where_kind = None
+    (* a where_kind of another name is kept in [extra]: stored since *)
+    && not (List.mem_assoc "where_kind" r.extra)
+  in
   Suggestion.nonempty r.preexisting
   && not (r.preexisting_unverified = Some true)
   || shared
   || r.Suggestion.experimental = Some true
   || (ci_side r && not unchecked)
-  || List.mem (Suggestion.str r.rule) preexisting_rules
+  || Titles.has_rule preexisting_rules r
 
 let str_list (v : Json.t) = List.map str (Json.to_list v)
 
@@ -293,13 +297,13 @@ let verdict pr =
     else
       let reruns =
         List.filter
-          (fun r -> Where.where_kind r = "rerun" && not (not_this_pr r))
+          (fun r -> Where.where_kind r = Rerun && not (not_this_pr r))
           sugg
       in
       if
         reruns <> []
         && List.for_all
-             (fun r -> ci_side ~kinds:[ "ci"; "rerun" ] r || not_this_pr r)
+             (fun r -> ci_side ~kinds:[ Ci; Rerun ] r || not_this_pr r)
              sugg
       then "rerun"
       else "other"
@@ -336,7 +340,7 @@ let conf_word = Render.conf_word
 (** Suggestions with the same key say the same thing about different packages or
     jobs. LLM answers and ranked candidates are never merged. *)
 let merge_key r =
-  if r.rule = Some "llm" || Suggestion.list r.candidates <> [] then None
+  if r.rule = Some Llm || Suggestion.list r.candidates <> [] then None
   else
     (* Not the title: it follows from the rule (a merged pattern's title also counts its packages). *)
     Some (r.class_, r.rule, r.fix_in, Suggestion.get r.Suggestion.new_)
@@ -761,7 +765,7 @@ let headline ?v ?(as_html = true) pr =
         else if v = "rerun" then
           let r =
             List.find
-              (fun r -> Where.where_kind r = "rerun" && not (not_this_pr r))
+              (fun r -> Where.where_kind r = Rerun && not (not_this_pr r))
               sugg
           in
           [
@@ -775,11 +779,11 @@ let headline ?v ?(as_html = true) pr =
         else
           let pool =
             if v = "other" then
-              List.filter (fun r -> Where.where_kind r = "pr") sugg
+              List.filter (fun r -> Where.where_kind r = Pr) sugg
             else sugg
           in
           let pool =
-            match List.filter (fun r -> r.rule <> Some "llm") pool with
+            match List.filter (fun r -> r.rule <> Some Llm) pool with
             | [] -> ( match pool with [] -> sugg | p -> p)
             | l -> l
           in
@@ -795,7 +799,7 @@ let comment_markdown pr =
       (fun r ->
         Suggestion.nonempty r.class_
         && not
-             (r.rule = Some "llm"
+             (r.rule = Some Llm
              && String.starts_with ~prefix:"low"
                   (Suggestion.str_field r.confidence)))
       (suggestions_of res)
@@ -886,11 +890,10 @@ let release_date = Rx.v {|release date of (\S+) \((\d{4}-\d\d-\d\d)\)$|}
 (** The details of a suggestion: job, error, change, candidates, notes and jobs.
 *)
 let suggestion_body ?sha ?(full = true) ?year r =
-  let rule = Suggestion.str r.rule in
   let out = ref [] in
   let add s = out := s :: !out in
   let jobs = Suggestion.list r.Suggestion.jobs in
-  let lists_jobs = rule = "rerun" || rule = "unrecognised" in
+  let lists_jobs = Titles.has_rule [ Rerun; Unrecognised ] r in
   let meta = ref [] in
   if
     Suggestion.nonempty r.Suggestion.variant
@@ -1134,7 +1137,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
   end;
   String.concat "\n" (List.rev !out)
 
-let low_llm r = r.rule = Some "llm" && conf_word r = "low"
+let low_llm r = r.rule = Some Llm && conf_word r = "low"
 
 let render_suggestion ?sha ?year r =
   let head =
@@ -1219,7 +1222,7 @@ let render_item ?sha ?year r =
      else if jobs > 1 then [ Printf.sprintf "%d jobs" jobs ]
      else [])
     @ (match where_of r with
-      | Some w when r.rule <> Some "rerun" -> [ Titles.fix_label w ]
+      | Some w when r.rule <> Some Rerun -> [ Titles.fix_label w ]
       | _ -> []) (* "Jobs to rerun" says it *)
     @ (if
          Suggestion.nonempty r.preexisting

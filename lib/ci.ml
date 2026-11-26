@@ -1,14 +1,112 @@
 open Net
 
+module Status = struct
+  type t = Passed | Failed | Active | Aborted | Not_started | Other of string
+
+  let to_string = function
+    | Passed -> "passed"
+    | Failed -> "failed"
+    | Active -> "active"
+    | Aborted -> "aborted"
+    | Not_started -> "not-started"
+    | Other s -> s
+
+  let of_string = function
+    | "passed" -> Passed
+    | "failed" -> Failed
+    | "active" -> Active
+    | "aborted" -> Aborted
+    | "not-started" -> Not_started
+    | s -> Other s
+end
+
+module Kind = struct
+  type t =
+    | Build
+    | Tests
+    | Lower_bounds
+    | Revdeps
+    | Revdeps_list
+    | Lint
+    | Analysis
+    | Other of string
+
+  let to_string = function
+    | Build -> "build"
+    | Tests -> "tests"
+    | Lower_bounds -> "lower-bounds"
+    | Revdeps -> "revdeps"
+    | Revdeps_list -> "revdeps-list"
+    | Lint -> "lint"
+    | Analysis -> "analysis"
+    | Other s -> s
+
+  let of_string = function
+    | "build" -> Build
+    | "tests" -> Tests
+    | "lower-bounds" -> Lower_bounds
+    | "revdeps" -> Revdeps
+    | "revdeps-list" -> Revdeps_list
+    | "lint" -> Lint
+    | "analysis" -> Analysis
+    | s -> Other s
+end
+
+module Category = struct
+  type t =
+    | Build
+    | Build_or_test
+    | Dependency
+    | Solver
+    | Network
+    | Cancelled
+    | Ignored
+    | Not_available
+    | Sources
+    | Lint
+    | Analysis
+    | Status of Status.t
+
+  let to_string = function
+    | Build -> "build"
+    | Build_or_test -> "build-or-test"
+    | Dependency -> "dependency"
+    | Solver -> "solver"
+    | Network -> "network"
+    | Cancelled -> "cancelled"
+    | Ignored -> "ignored"
+    | Not_available -> "not-available"
+    | Sources -> "sources"
+    | Lint -> "lint"
+    | Analysis -> "analysis"
+    | Status s -> Status.to_string s
+
+  let of_string = function
+    | "build" -> Build
+    | "build-or-test" -> Build_or_test
+    | "dependency" -> Dependency
+    | "solver" -> Solver
+    | "network" -> Network
+    | "cancelled" -> Cancelled
+    | "ignored" -> Ignored
+    | "not-available" -> Not_available
+    | "sources" -> Sources
+    | "lint" -> Lint
+    | "analysis" -> Analysis
+    | s -> Status (Status.of_string s)
+
+  let passed = Status Passed
+end
+
 type job = {
   variant : string;
   url : string;
   label : string;
-  status : string;
+  status : Status.t;
   reason : string option;
-  category : string;
+  category : Category.t;
   target : string option;
-  kind : string;
+  kind : Kind.t;
   revdep : string option;
   platform : string list;
   experimental : bool;
@@ -32,11 +130,11 @@ let job_to_json j : Json.t =
       ("variant", `String j.variant);
       ("url", `String j.url);
       ("label", `String j.label);
-      ("status", `String j.status);
+      ("status", `String (Status.to_string j.status));
       ("reason", Json.opt_string j.reason);
-      ("category", `String j.category);
+      ("category", `String (Category.to_string j.category));
       ("target", Json.opt_string j.target);
-      ("kind", `String j.kind);
+      ("kind", `String (Kind.to_string j.kind));
       ("revdep", Json.opt_string j.revdep);
       ("platform", Json.strings j.platform);
       ("experimental", `Bool j.experimental);
@@ -55,24 +153,25 @@ let failing_pkg j =
   match j.revdep with Some r when r <> "" -> Some r | _ -> j.target
 
 (* Job statuses that will not change without a rebuild. *)
-let finished = [ "passed"; "failed"; "aborted" ]
+let finished : Status.t -> bool = function
+  | Passed | Failed | Aborted -> true
+  | Active | Not_started | Other _ -> false
+
+let stopped : Status.t -> bool = function
+  | Failed | Aborted -> true
+  | _ -> false
 
 let unfinished_jobs jobs =
-  let left = List.filter (fun j -> not (List.mem j.status finished)) jobs in
-  let stuck = List.filter (fun j -> j.status = "not-started") left in
+  let left = List.filter (fun j -> not (finished j.status)) jobs in
+  let stuck = List.filter (fun j -> j.status = Not_started) left in
   let analysis_failed =
-    List.exists
-      (fun j ->
-        j.kind = "analysis" && (j.status = "failed" || j.status = "aborted"))
-      jobs
+    List.exists (fun j -> j.kind = Analysis && stopped j.status) jobs
   in
-  let some_failed =
-    List.exists (fun j -> j.status = "failed" || j.status = "aborted") jobs
-  in
+  let some_failed = List.exists (fun j -> stopped j.status) jobs in
   if
     stuck <> []
     && (analysis_failed || (List.length stuck = List.length left && some_failed))
-  then List.filter (fun j -> j.status <> "not-started") left
+  then List.filter (fun j -> j.status <> Not_started) left
   else left
 
 (* ------------------------------------------------------------------------ *)
@@ -224,9 +323,10 @@ let label_re = Rx.v ~flags:[ Rx.S ] {|^(.*?) \((\w+)(?::\s*(.*))?\)$|}
     - compilers,4.11,foo.1.0,lower-bounds
     - distributions,centos-10-ocaml-4.14,foo.1.0
     - (lint) *)
-let split_variant variant =
+let split_variant variant : string list * string option * Kind.t * string option
+    =
   if String.starts_with ~prefix:"(" variant then
-    ([], None, Util.strip ~chars:"()" variant, None)
+    ([], None, Kind.of_string (Util.strip ~chars:"()" variant), None)
   else
     let parts = String.split_on_char ',' variant in
     let n = List.length parts in
@@ -235,18 +335,21 @@ let split_variant variant =
         if i = n - 1 then (* the job computing the list of revdeps *)
           ( Util.take (i - 1) parts,
             List.nth_opt parts (i - 1),
-            "revdeps-list",
+            Revdeps_list,
             None )
         else
           ( Util.take (i - 1) parts,
             List.nth_opt parts (i - 1),
-            "revdeps",
+            Revdeps,
             Some (String.concat "," (Util.drop (i + 1) parts)) )
     | None ->
         let last = List.nth parts (n - 1) in
         if (last = "lower-bounds" || last = "tests") && n >= 2 then
-          (Util.take (n - 2) parts, Some (List.nth parts (n - 2)), last, None)
-        else (Util.take (n - 1) parts, Some last, "build", None)
+          ( Util.take (n - 2) parts,
+            Some (List.nth parts (n - 2)),
+            Kind.of_string last,
+            None )
+        else (Util.take (n - 1) parts, Some last, Build, None)
 
 let curl_failed_http_re =
   Rx.v
@@ -258,23 +361,23 @@ let failed_build_dependency_re =
 let solution_conflict_re = Rx.v ~flags:[ Rx.I ] {|No solution|conflict|}
 let failed_runtest_test_re = Rx.v {|failed at ".*(@runtest|test)|}
 
-let categorize status reason =
+let categorize (status : Status.t) reason : Category.t =
   let r = Option.value ~default:"" reason in
-  if status = "passed" then "passed"
-  else if status <> "failed" then status (* active, queued, ... *)
-  else if String.starts_with ~prefix:"[SKIP] Failure ignored" r then "ignored"
-    (* x-ci-accept-failures *)
-  else if String.starts_with ~prefix:"[SKIP]" r then "not-available"
-    (* package not installable on that variant *)
+  if status <> Failed then Status status (* passed, active, ... *)
+  else if String.starts_with ~prefix:"[SKIP] Failure ignored" r then
+    Ignored (* x-ci-accept-failures *)
+  else if String.starts_with ~prefix:"[SKIP]" r then
+    Not_available (* package not installable on that variant *)
   else if r = "Cancelled" || Util.contains (Util.prefix_chars r 20) "Cancelled"
-  then "cancelled"
-  else if Rx.test curl_failed_http_re r then "network"
-  else if Util.contains r "Failed to get sources" then "sources"
+  then Cancelled
+  else if Rx.test curl_failed_http_re r then Network
+  else if Util.contains r "Failed to get sources" then
+    Sources
     (* fetched but could not be extracted/verified (e.g. symlinks on msys2) *)
-  else if Rx.test failed_build_dependency_re r then "dependency"
-  else if Rx.test solution_conflict_re r then "solver"
-  else if Rx.test failed_runtest_test_re r then "build-or-test"
-  else "build"
+  else if Rx.test failed_build_dependency_re r then Dependency
+  else if Rx.test solution_conflict_re r then Solver
+  else if Rx.test failed_runtest_test_re r then Build_or_test
+  else Build
 
 let parse_page_uncached page =
   let pr, raw = parse_page page in
@@ -297,6 +400,7 @@ let parse_page_uncached page =
             | Some m -> (Rx.group m 1, Rx.group m 2, Rx.group_opt m 3)
             | None -> (r.text, r.cls, None)
           in
+          let status = Status.of_string status in
           let reason =
             match reason with
             | Some s when s <> "" -> Some (String.trim s)
@@ -311,9 +415,10 @@ let parse_page_uncached page =
               status;
               reason;
               category =
-                (if (kind = "lint" || kind = "analysis") && status = "failed"
-                 then kind
-                 else categorize status reason);
+                (match (kind, status) with
+                | Lint, Failed -> Lint
+                | Analysis, Failed -> Analysis
+                | _ -> categorize status reason);
               target;
               kind;
               revdep;
@@ -644,9 +749,9 @@ let ocaml_version job =
   | _ -> None
 (* other platforms (distributions, extras, macos, ...) are not compared *)
 
-let failing = [ "build"; "build-or-test"; "dependency"; "solver" ]
+let failing : Category.t list = [ Build; Build_or_test; Dependency; Solver ]
 
-type failure_key = string option * string option * string * string
+type failure_key = string option * string option * Kind.t * string
 
 let command_noise_re = Rx.v {|[`"']|-j \d+|}
 
@@ -783,8 +888,10 @@ let describe_job variant =
 (* Rules on the job matrix (no fetch), on log text, on lint messages, and on
    packages that install nowhere. *)
 
-let neutral = [ "not-available"; "ignored"; "network"; "cancelled"; "sources" ]
-let failing_cats = [ "build"; "build-or-test"; "dependency"; "solver" ]
+let neutral : Category.t list =
+  [ Not_available; Ignored; Network; Cancelled; Sources ]
+
+let failing_cats = failing
 let classic_distro = "debian-13"
 
 type dims = {

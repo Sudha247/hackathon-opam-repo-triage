@@ -711,7 +711,7 @@ let check_where sugg =
         (Printf.sprintf "where_kind of %s" (Json.dumps s))
         true
         (match kind with
-        | Some k -> List.mem k Where.where_kinds
+        | Some k -> Where_kind.of_string k <> None
         | None -> false);
       let old = Suggestion.copy d in
       old.where_kind <- None;
@@ -720,7 +720,7 @@ let check_where sugg =
         (Printf.sprintf "where of %s [%s]" (Json.str "rule" s)
            (Json.str "fix_in" s))
         (Option.get kind, Json.str_opt "where_pkg" s)
-        (Where.where_kind old, Where.where_pkg old))
+        (Where_kind.to_string (Where.where_kind old), Where.where_pkg old))
     sugg
 
 let test_case case () =

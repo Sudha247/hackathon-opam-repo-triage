@@ -36,9 +36,9 @@ let unrecognised pr =
   List.length
     (List.filter
        (fun (r : Suggestion.t) ->
-         r.rule = Some "unrecognised"
+         r.rule = Some Unrecognised
          || not
-              (Suggestion.nonempty r.rule
+              (Suggestion.nonempty (Option.map Rule.to_string r.rule)
               || Suggestion.nonempty_field r.new_
               || Suggestion.list r.candidates <> []))
        (suggestions (Json.member "result" pr)))
@@ -175,9 +175,7 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
             total := (a + calls, b + tin, c + tout);
             let answered =
               List.length
-                (List.filter
-                   (fun (r : Suggestion.t) -> r.rule = Some "llm")
-                   sugg)
+                (List.filter (fun (r : Suggestion.t) -> r.rule = Some Llm) sugg)
             in
             Printf.printf
               "#%d: %d failures answered, %d new answers, %d input and %d \

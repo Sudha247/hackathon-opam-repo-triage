@@ -6,14 +6,15 @@ let starts_day10 j = match j.platform with "day10" :: _ -> true | _ -> false
 (* Python's str() of a (target, revdep, kind) tuple: the groups are sorted by it. *)
 let key_str (target, revdep, kind) =
   let s = function Some x -> Util.repr x | None -> "None" in
-  Printf.sprintf "(%s, %s, %s)" (s target) (s revdep) (Util.repr kind)
+  Printf.sprintf "(%s, %s, %s)" (s target) (s revdep)
+    (Util.repr (Kind.to_string kind))
 
 let matrix_groups jobs match_ =
   Util.group_by
     (fun j -> (j.target, j.revdep, j.kind))
     (List.filter
        (fun j ->
-         List.mem j.kind [ "build"; "tests"; "revdeps" ]
+         List.mem j.kind [ Kind.Build; Tests; Revdeps ]
          && (match j.target with Some t -> t <> "" | None -> false)
          &&
          match match_ with
@@ -33,7 +34,7 @@ let compiler_matrix js =
         let v = (job_dims j).ocaml in
         let s =
           if List.mem j.category failing_cats then Some "fail"
-          else if j.category = "passed" then Some "pass"
+          else if j.category = Category.passed then Some "pass"
           else None
         in
         match (v, s) with
@@ -78,7 +79,9 @@ let platform_matrix js =
       js
   in
   let passes =
-    List.filter (fun j -> (not j.experimental) && j.category = "passed") js
+    List.filter
+      (fun j -> (not j.experimental) && j.category = Category.passed)
+      js
   in
   if fails = [] || passes = [] then None
   else begin
@@ -186,7 +189,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
             (List.map
                (fun j ->
                  let d =
-                   if j.category = "dependency" then failing_dep j.reason
+                   if j.category = Dependency then failing_dep j.reason
                    else None
                  in
                  let d =
@@ -202,12 +205,12 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
         let culprit = match named with [ Some d ] -> Some d | _ -> None in
         let owner = Option.value ~default:pkg culprit in
         let tests_only =
-          kind = "tests"
-          || List.for_all (fun j -> j.category = "build-or-test") fails
+          kind = Kind.Tests
+          || List.for_all (fun j -> j.category = Category.Build_or_test) fails
         in
         let where = Where.pr_or_other owner (List.mem owner pr_packages) in
         let label =
-          Printf.sprintf "%s [%s%s]" pkg kind
+          Printf.sprintf "%s [%s%s]" pkg (Kind.to_string kind)
             (match revdep with
             | Some r when r <> "" -> ", revdep of " ^ target
             | _ -> "")
@@ -220,7 +223,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
            on the architecture. *)
         let passes =
           List.filter
-            (fun j -> (not j.experimental) && j.category = "passed")
+            (fun j -> (not j.experimental) && j.category = Category.passed)
             js
         in
         let classic_twin j =
@@ -266,7 +269,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                 (fun r ->
                   if
                     Suggestion.get r.Suggestion.failing = culprit
-                    && r.rule = Some "missing-tool"
+                    && r.rule = Some Missing_tool
                   then Some r.note
                   else None)
                 earlier
@@ -292,9 +295,9 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                    `Variant label;
                    `Failing (Some (Option.value ~default:pkg culprit));
                  ]
-                @ Where.fix_where "ci" "the CI environment (day10 builder)"
+                @ Where.fix_where Ci "the CI environment (day10 builder)"
                 @ [
-                    `Rule "builder-specific";
+                    `Rule Rule.Builder_specific;
                     `Error
                       (Printf.sprintf
                          "Fails only on the day10 builder on %s; the main \
@@ -350,7 +353,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                   ([ `Variant label; `Failing (Some owner) ]
                   @ where
                   @ [
-                      `Rule "compiler-matrix";
+                      `Rule Rule.Compiler_matrix;
                       `Error error;
                       `Dep "ocaml";
                       `Old None;
@@ -392,7 +395,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                           (fun r ->
                             if
                               Suggestion.get r.Suggestion.failing = Some culprit
-                              && r.rule = Some "missing-tool"
+                              && r.rule = Some Missing_tool
                             then
                               tool :=
                                 Rx.search program_re (Suggestion.str r.error))
@@ -506,7 +509,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                       ([ `Variant label; `Failing (Some owner) ]
                       @ where
                       @ [
-                          `Rule "platform-matrix";
+                          `Rule Rule.Platform_matrix;
                           `Distros distros;
                           `Error error;
                           `Old None;
@@ -531,15 +534,15 @@ let in_re = Rx.v {|\(in (\S+)\)|}
 
 let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
   let sig_ r =
-    let rule = Suggestion.str r.rule in
+    let rule = r.rule in
     let pattern =
-      if rule = "platform-matrix" then
+      if rule = Some Rule.Platform_matrix then
         List.hd (Util.split_on ~maxsplit:1 ": " (Suggestion.str r.error))
       else Suggestion.str r.error
     in
     ( rule,
       Rx.sub dependency_re "a dependency" pattern,
-      if rule = "compiler-matrix" then
+      if rule = Some Rule.Compiler_matrix then
         List.hd (Util.split_on "   " (Suggestion.str_field r.Suggestion.new_))
       else "" )
   in
@@ -566,7 +569,7 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
         in
         let r0 = List.hd rs in
         let error, note =
-          if rule = "builder-specific" then
+          if rule = Some Rule.Builder_specific then
             ( List.hd (Util.split_on ~maxsplit:1 ";" pattern) ^ ".",
               r0.Suggestion.note )
           else begin
@@ -608,19 +611,22 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
           Suggestion.make
             ([
                `Variant
-                 (Printf.sprintf "%d packages [%s]" (List.length rs) rule);
+                 (Printf.sprintf "%d packages [%s]" (List.length rs)
+                    (Option.fold ~none:"" ~some:Rule.to_string rule));
                `Failing
                  (Some
                     (String.concat ", " (Util.take 6 names)
                     ^ if List.length names > 6 then " ..." else ""));
              ]
-            @ (if rule = "builder-specific" then
-                 Where.fix_where "ci" (Suggestion.str r0.fix_in)
+            @ (if rule = Some Rule.Builder_specific then
+                 Where.fix_where Ci (Suggestion.str r0.fix_in)
                else
-                 Where.fix_where "unknown"
+                 Where.fix_where Unknown
                    "the PR, a shared dependency, or the CI")
             @ [
-                `Rule (rule ^ "-systemic");
+                `Rule
+                  (Rule.systemic
+                     (Option.value ~default:(Rule.of_string "") rule));
                 `Error error;
                 `Confidence "medium";
                 `Keys (List.concat_map (fun r -> r.Suggestion.keys) rs);
@@ -633,10 +639,11 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
         in
         entry.note <- note;
         (match culprits with
-        | [ (d, n) ] when rule <> "builder-specific" && n = List.length rs ->
+        | [ (d, n) ]
+          when rule <> Some Rule.Builder_specific && n = List.length rs ->
             (* Every package fails through the same dependency: the fix goes there (shown as such). *)
             entry.failing_dep <- Some d;
-            entry.where_kind <- Some "other-package";
+            entry.where_kind <- Some Other_package;
             entry.where_pkg <- Set d
         | _ -> ());
         [ entry ]

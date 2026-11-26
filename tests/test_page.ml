@@ -480,7 +480,8 @@ let test_llm_never_ci_side () =
       ("fix_in", s "the CI environment");
     ]
   in
-  check_str "kind" "ci" (Where.where_kind (d llm_ci));
+  check_str "kind" "ci" (Where_kind.to_string (Where.where_kind (d llm_ci)));
+
   check_false "not_this_pr" (R.not_this_pr (d llm_ci));
   check_false "ready" (R.seems_ready (pr [ day10; llm_ci ]));
   check_str "other" "other" (R.verdict (pr [ day10; llm_ci ]));

@@ -9,9 +9,9 @@ let rule_error (job : job) e jobs =
        `Kind job.kind;
        `Experimental job.experimental;
        `Failing (failing_pkg job);
-       `Rule "rule-error";
+       `Rule Rule.Rule_error;
      ]
-    @ Where.fix_where "unknown" "unknown"
+    @ Where.fix_where Unknown "unknown"
     @ [
         `Confidence "low";
         `Error
@@ -98,12 +98,9 @@ let check_changes results src sha pr_packages =
                 when have <> "" && terms <> []
                      && (not (Util.contains (Rx.group m 2) "with-test"))
                      && Constraints.allows have terms
-                     && List.mem (Suggestion.str r.rule)
-                          [
-                            "library-api";
-                            "previous-release-bound";
-                            "lower-bound";
-                          ] ->
+                     && Titles.has_rule
+                          [ Library_api; Previous_release_bound; Lower_bound ]
+                          r ->
                   Some
                     (Printf.sprintf
                        "it still allows %s.%s, which the failing job installed"
@@ -168,21 +165,21 @@ let check_changes results src sha pr_packages =
     results
 
 (* Rules whose entries for several versions of one package are merged. *)
-let merge_versions_rules =
+let merge_versions_rules : Rule.t list =
   [
-    "install-missing-files";
-    "uninstallable";
-    "newer-c-compiler";
-    "system-library-version";
-    "needs-git-checkout";
-    "install-outside-prefix";
-    "test-output-ocaml";
-    "missing-header";
-    "missing-tool";
-    "missing-library";
-    "missing-pkg-config";
-    "sources";
-    "conf-no-depext";
+    Install_missing_files;
+    Uninstallable;
+    Newer_c_compiler;
+    System_library_version;
+    Needs_git_checkout;
+    Install_outside_prefix;
+    Test_output_ocaml;
+    Missing_header;
+    Missing_tool;
+    Missing_library;
+    Missing_pkg_config;
+    Sources;
+    Conf_no_depext;
   ]
 
 let jobs_or_variant r =
@@ -202,13 +199,13 @@ let merge_versions results =
         let failing = Suggestion.str_field r.Suggestion.failing in
         let name = fst (split_pkg failing) in
         if
-          (not (List.mem (Suggestion.str r.rule) merge_versions_rules))
+          (not (Titles.has_rule merge_versions_rules r))
           || Suggestion.nonempty_field r.Suggestion.new_
           || name = ""
           || String.contains failing ' '
         then true
         else begin
-          let k = (name, Suggestion.str r.rule, Where.where_kind r) in
+          let k = (name, r.rule, Where.where_kind r) in
           match Hashtbl.find_opt first k with
           | None ->
               Hashtbl.replace first k r;
@@ -225,7 +222,7 @@ let merge_versions results =
                     (Suggestion.str_field f.Suggestion.failing ^ ", " ^ failing);
               f.Suggestion.jobs <-
                 Some (merge_jobs (jobs_or_variant f) (jobs_or_variant r));
-              if Where.where_kind r = "other-package" then
+              if Where.where_kind r = Other_package then
                 Suggestion.update f (Where.pr_or_other name false);
               (let note0 =
                  match List.assq_opt f !extra with
@@ -274,7 +271,7 @@ let merge_unrecognised results =
     List.filter
       (fun r ->
         not
-          (Suggestion.nonempty r.rule
+          (Suggestion.nonempty (Option.map Rule.to_string r.rule)
           || Suggestion.nonempty_field r.Suggestion.new_
           || Suggestion.list r.candidates <> []
           || Suggestion.nonempty r.error
@@ -297,8 +294,8 @@ let merge_unrecognised results =
     List.filter (fun r -> not (List.memq r unk)) results
     @ [
         Suggestion.make
-          ([ `Variant (Words.counted n "job"); `Rule "unrecognised" ]
-          @ Where.fix_where "unknown" "unknown"
+          ([ `Variant (Words.counted n "job"); `Rule Rule.Unrecognised ]
+          @ Where.fix_where Unknown "unknown"
           @ [
               `Confidence "low";
               `Failing

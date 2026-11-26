@@ -14,9 +14,10 @@
     A member that the JSON may hold as [null] (["old": null]: a dependency line
     added, not changed) is a {!field}, which keeps [null] apart from an absent
     member so that both print as they were read. The others are options: absent
-    or set. Strings are kept as they come: [confidence] ("high", "low
-    (dependencies released after ...)", "") and [where_kind] (missing in
-    suggestions stored before it existed: see {!Where}) are open sets. *)
+    or set. [confidence] is kept as it comes, an open set ("high", "low
+    (dependencies released after ...)", ""); [rule] and [kind] are variants that
+    keep names they do not know ([Other]); [where_kind] is a closed set (missing
+    in suggestions stored before it existed: see {!Where}). *)
 
 module T : sig
   (** A member that can be absent, [null], or set. *)
@@ -59,20 +60,21 @@ module T : sig
             [compilers,4.14,lwt.5.10.2,revdeps,osc.0.1.4]; for a pattern over
             several packages, a summary *)
     mutable url : string option;  (** the job's page *)
-    mutable kind : string option;  (** the job's kind: build, tests, lint... *)
+    mutable kind : Ci.Kind.t option;  (** the job's kind *)
     mutable experimental : bool option;
         (** whether the job runs on an experimental platform (it does not block
             the PR) *)
     mutable failing : string field;
         (** the failing package ([name.version]), or several, comma-separated *)
     mutable fix_in : string option;  (** where the fix goes, in words *)
-    mutable where_kind : string option;
-        (** where the fix goes: one of {!Where.where_kinds}; missing in old
-            results ({!Where.where_kind} derives it) *)
+    mutable where_kind : Where_kind.t option;
+        (** where the fix goes; missing in old results ({!Where.where_kind}
+            derives it). A stored value that is not a {!Where_kind.t} is kept in
+            [extra], and the member is absent. *)
     mutable where_pkg : string field;
         (** the other package where the fix goes ([where_kind] "other-package")
         *)
-    mutable rule : string option;  (** the rule that recognised the failure *)
+    mutable rule : Rule.t option;  (** the rule that recognised the failure *)
     mutable error : string option;  (** the error, in short *)
     mutable lint_level : string option;  (** "error" or "warning" for lint *)
     mutable dep : string option;  (** the dependency the change is about *)
@@ -202,13 +204,13 @@ val candidate :
 type set =
   [ `Variant of string
   | `Url of string
-  | `Kind of string
+  | `Kind of Ci.Kind.t
   | `Experimental of bool
   | `Failing of string option
   | `Fix_in of string
-  | `Where_kind of string
+  | `Where_kind of Where_kind.t
   | `Where_pkg of string option
-  | `Rule of string
+  | `Rule of Rule.t
   | `Error of string
   | `Lint_level of string
   | `Dep of string

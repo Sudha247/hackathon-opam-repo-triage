@@ -315,7 +315,7 @@ let actual_fix number initial final =
 let new_archive = S.of_list [ "field:checksum"; "field:x-commit-hash" ]
 
 (* The rules that compare with opam-health-check's latest run (see main). *)
-let health_rules = [ "health-check-new" ]
+let health_rules : Rule.t list = [ Health_check_new ]
 let error_re = Rx.v {|Error in (\S+?):|}
 
 (** Packages of the PR that failed in that CI run: non-experimental build, test
@@ -331,10 +331,13 @@ let failing_packages sha =
         List.filter_map
           (fun j ->
             if
-              List.mem (Json.str "kind" j) [ "build"; "tests"; "lower-bounds" ]
+              List.mem
+                (Ci.Kind.of_string (Json.str "kind" j))
+                [ Build; Tests; Lower_bounds ]
               && (not (Json.bool "experimental" j))
-              && List.mem (Json.str "category" j)
-                   [ "build"; "build-or-test"; "dependency"; "solver" ]
+              && List.mem
+                   (Ci.Category.of_string (Json.str "category" j))
+                   Ci.failing
             then Some (Json.str "target" j)
             else None)
           jobs
@@ -480,11 +483,13 @@ let run ~since ~limit ~max_ ~json () =
                     let hit = not (S.is_empty (S.inter toks fixed)) in
                     Some
                       ( pkg,
-                        Suggestion.str s.rule,
+                        s.rule,
                         `Assoc
                           [
                             ("package", pkg);
-                            ("rule", Json.opt_string s.rule);
+                            ( "rule",
+                              Json.opt_string (Option.map Rule.to_string s.rule)
+                            );
                             ( "new",
                               `String
                                 (Util.prefix_chars
@@ -504,12 +509,19 @@ let run ~since ~limit ~max_ ~json () =
              added after the PR). Their suggestions are counted apart. *)
             let health =
               List.filter
-                (fun (_, rule, _, _, _) -> List.mem rule health_rules)
+                (fun (_, rule, _, _, _) ->
+                  Option.fold ~none:false
+                    ~some:(fun r -> List.mem r health_rules)
+                    rule)
                 scored
             in
             let scored =
               List.filter
-                (fun (_, rule, _, _, _) -> not (List.mem rule health_rules))
+                (fun (_, rule, _, _, _) ->
+                  not
+                    (Option.fold ~none:false
+                       ~some:(fun r -> List.mem r health_rules)
+                       rule))
                 scored
             in
             (* Recall: only the author's changes in packages that failed in the

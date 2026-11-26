@@ -28,11 +28,11 @@ let mk ?(platform = []) ?target ?(kind = "build") ?revdep ?(status = "failed")
     variant;
     url;
     label = "";
-    status;
+    status = Ci.Status.of_string status;
     reason;
-    category;
+    category = Ci.Category.of_string category;
     target;
-    kind;
+    kind = Ci.Kind.of_string kind;
     revdep;
     platform;
     experimental;
@@ -63,7 +63,7 @@ let job ?(category = "build") ?(reason = "The compilation of x failed")
   }
 
 let aborted j =
-  { j with status = "aborted"; category = "aborted"; reason = None }
+  { j with status = Aborted; category = Status Aborted; reason = None }
 
 let data jobs =
   {
@@ -349,7 +349,11 @@ let test_jobs_not_run () =
     (List.length (Context.rerun_rules (data [ an "failed"; lint ]) []));
   (* Still running: a job waiting for another one is not finished. *)
   let running =
-    { (job "compilers,5.3,foo.1") with status = "active"; category = "active" }
+    {
+      (job "compilers,5.3,foo.1") with
+      status = Active;
+      category = Status Active;
+    }
   in
   Alcotest.(check int)
     "running" 0

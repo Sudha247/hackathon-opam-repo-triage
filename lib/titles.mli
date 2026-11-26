@@ -19,9 +19,16 @@ val readable : Suggestion.t list -> Suggestion.t list
 (** Sets the members for people: a title for the rule, the job in words, where
     the fix goes, and the note and the error as sentences. *)
 
-val per_package_rules : string list
+val per_package_rules : Rule.t list
 (** The rules whose explanation does not depend on the platform: reported once
     per package. *)
+
+val has_rule : Rule.t list -> Suggestion.t -> bool
+(** Whether the rule of a suggestion is one of the list. *)
+
+val is_systemic : Suggestion.t -> bool
+(** Whether a suggestion is a pattern over several packages
+    ({!Rule.is_systemic}). *)
 
 val classify : Suggestion.t -> string
 (** "fix" (a change in this PR), "workaround" (skips platforms or tests),
