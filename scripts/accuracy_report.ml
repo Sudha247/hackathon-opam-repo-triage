@@ -90,17 +90,17 @@ let hits row =
 
 let diff a b = List.filter (fun x -> not (List.mem x b)) a
 
-(* A PR's number, as Python's str() printed it. *)
-let pr_text = function Some n -> string_of_int n | None -> "None"
+(* A PR's number, "?" when unknown. *)
+let pr_text = function Some n -> string_of_int n | None -> "?"
 let pct = function None -> "n/a" | Some x -> Printf.sprintf "%.0f%%" x
 
-(* Python's str() of a JSON number. *)
+(* A number of the totals, "?" when absent. *)
 let s (v : Json.t) =
   match v with
   | `Int n -> string_of_int n
   | `Float f -> Json.repr_float f
   | `String s -> s
-  | `Null -> "None"
+  | `Null -> "?"
   | v -> Json.dumps v
 
 let run ~current ~history ~commit ~max_drop ~min_scored () =

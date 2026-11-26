@@ -151,17 +151,6 @@ let masked line =
      after "package" in a sentence is not a name.) *)
   U.sub value_module_constructor_re {|\1 x|} s
 
-(* Python's str() of a JSON scalar. *)
-let py_str (v : Json.t) =
-  match v with
-  | `String s -> s
-  | `Int n -> string_of_int n
-  | `Float f -> Json.repr_float f
-  | `Bool true -> "True"
-  | `Bool false -> "False"
-  | `Null -> "None"
-  | v -> Json.dumps v
-
 (** A reference to opam-repository PR [n] that GitHub does not turn into a
     cross-reference (a "mentioned this" event on the PR): a link to the PR on
     the triage page when it is known, else a code span. *)
@@ -434,14 +423,16 @@ let update_issue repo title body =
   let found =
     List.find_map
       (fun i ->
-        if Json.str "title" i = title then Some (Json.member "number" i)
+        if Json.str "title" i = title then
+          match Json.member "number" i with
+          | `Int n -> Some (string_of_int n)
+          | v -> Some (Json.dumps v)
         else None)
       (Json.to_list (Json.parse q.stdout))
   in
   let cmd =
     match found with
-    | Some n ->
-        [ "gh"; "issue"; "edit"; py_str n; "-R"; repo; "--body-file"; "-" ]
+    | Some n -> [ "gh"; "issue"; "edit"; n; "-R"; repo; "--body-file"; "-" ]
     | None ->
         [
           "gh";
@@ -459,8 +450,9 @@ let update_issue repo title body =
   prerr_endline
     (match String.trim p.stdout with
     | "" -> (
-        "updated issue #"
-        ^ match found with Some n -> py_str n | None -> "None")
+        match found with
+        | Some n -> "updated issue #" ^ n
+        | None -> "created the issue")
     | s -> s)
 
 let run ~sources ~min_prs ~issue ~title () =

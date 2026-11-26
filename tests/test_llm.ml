@@ -641,8 +641,8 @@ let test_http_request () =
   | Status_error (401, m) ->
       Alcotest.(check string)
         "message"
-        "Error code: 401 - {'type': 'error', 'error': {'type': \
-         'authentication_error', 'message': 'invalid x-api-key'}}"
+        "Error code: 401 - {\"type\": \"error\", \"error\": {\"type\": \
+         \"authentication_error\", \"message\": \"invalid x-api-key\"}}"
         m
   | _ -> Alcotest.fail "no 401");
   Alcotest.(check int) "one request" 1 (List.length !sent);

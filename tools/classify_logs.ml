@@ -596,14 +596,13 @@ let rjust w s =
   let n = Util.char_length s in
   if n >= w then s else String.make (w - n) ' ' ^ s
 
-(* Python's repr() of a dict of counts. *)
-let repr_counts (v : Json.t) =
-  "{"
-  ^ String.concat ", "
-      (List.map
-         (fun (k, n) -> Util.repr k ^ ": " ^ string_of_int (Json.to_int n))
-         (Json.to_assoc v))
-  ^ "}"
+(* A dict of counts: "k=n, ...", "-" when empty. *)
+let counts_text (v : Json.t) =
+  match Json.to_assoc v with
+  | [] -> "-"
+  | kv ->
+      String.concat ", "
+        (List.map (fun (k, n) -> Printf.sprintf "%s=%d" k (Json.to_int n)) kv)
 
 let print_report title results groups verbose =
   Printf.printf "\n=== %s\n" title;
@@ -662,11 +661,11 @@ let print_report title results groups verbose =
           Printf.printf
             "        failing: %s | relation: %s | platforms: %d | e.g. %s\n"
             (if pk = "" then "-" else pk)
-            (repr_counts (Json.member "relations" g))
+            (counts_text (Json.member "relations" g))
             (List.length (Json.list "platforms" g))
             (match Json.member "log_file" (Json.member "representative" g) with
             | `String s -> s
-            | _ -> "None"))
+            | _ -> "-"))
       groups
   end
 

@@ -155,7 +155,7 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
               let last =
                 match Util.splitlines (String.trim proc.stderr) with
                 | [] -> string_of_int proc.code
-                | l -> "[" ^ Util.repr (Util.last l) ^ "]"
+                | l -> Util.last l
               in
               Printf.printf "#%d: failed: %s\n%!" n last;
               None

@@ -117,7 +117,7 @@ let logs args sha (data : data) =
           match g "builder" with
           | Some "classic" -> "main"
           | Some b -> b
-          | None -> "None"
+          | None -> "?"
         in
         Printf.printf "%s  [%s] builder=%s base=%s\n" j.variant
           (Category.to_string j.category)
@@ -242,8 +242,11 @@ let suggest_command args sha (data : data) =
       (fun m -> Printf.eprintf "  miss: %s\n%!" m)
       (Util.take 10 !Net.offline_misses)
   end;
-  let pr_num =
-    match data.pr with Some n -> string_of_int n | None -> "None"
+  (* The PR to post on. *)
+  let pr_num () =
+    match data.pr with
+    | Some n -> string_of_int n
+    | None -> Util.die "cannot post: the CI page does not name a PR"
   in
   match args.command with
   | "review" ->
@@ -256,7 +259,7 @@ let suggest_command args sha (data : data) =
             [
               "gh";
               "api";
-              Printf.sprintf "repos/%s/pulls/%s/reviews" Net.repo pr_num;
+              Printf.sprintf "repos/%s/pulls/%s/reviews" Net.repo (pr_num ());
               "-X";
               "POST";
               "--input";
@@ -277,12 +280,17 @@ let suggest_command args sha (data : data) =
   | "comment" ->
       let body = Render.render_comment sha data results in
       if args.post then begin
-        if data.pr = None then
-          Util.die "cannot post: the CI page does not name a PR";
         let out =
           Proc.run ~input:body
             [
-              "gh"; "pr"; "comment"; pr_num; "-R"; Net.repo; "--body-file"; "-";
+              "gh";
+              "pr";
+              "comment";
+              pr_num ();
+              "-R";
+              Net.repo;
+              "--body-file";
+              "-";
             ]
         in
         print_endline

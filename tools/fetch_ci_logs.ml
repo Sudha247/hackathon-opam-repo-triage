@@ -54,7 +54,7 @@ let fetch ?(retries = 6) ?(backoff = 3.0) ?(timeout = 60.) url =
       | exception ((Http.Http_error _ | Http.Net_error _) as e) ->
           retry (Http.error_text e)
   in
-  attempt 0 "None"
+  attempt 0 "no attempt"
 
 let br_re = Rx.v ~flags:[ Rx.I ] {|<br\s*/?>|}
 let tag_re = Rx.v "<[^>]+>"

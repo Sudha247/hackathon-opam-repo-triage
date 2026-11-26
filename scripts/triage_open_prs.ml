@@ -83,9 +83,9 @@ let graphql query variables token : Json.t =
           raise
             (Graphql_error
                ("GraphQL errors: "
-               ^ Util.prefix_chars (Json.py_repr (Json.member "errors" d)) 500));
+               ^ Util.prefix_chars (Json.dumps (Json.member "errors" d)) 500));
         Printf.eprintf "GitHub GraphQL errors, using the data returned: %s\n%!"
-          (Util.prefix_chars (Json.py_repr (Json.member "errors" d)) 300)
+          (Util.prefix_chars (Json.dumps (Json.member "errors" d)) 300)
       end;
       (match data with
       | `Assoc _ -> ()
@@ -1163,7 +1163,7 @@ let main ?(argv = Sys.argv) () =
       Printf.eprintf "#%d %s summary failed: %s; the previous %s is kept\n%!"
         (number_or_0 it.p)
         (Util.prefix_chars it.sha 12)
-        (Option.value ~default:"None" serr)
+        (Option.value ~default:"?" serr)
         (if has_result it.pv then "result" else "analysis");
       Stop Summary_failed
     end
@@ -1257,7 +1257,8 @@ let main ?(argv = Sys.argv) () =
         llm_left := 0
       end
     end;
-    let err_s = Option.value ~default:"None" err in
+    let err_s = Option.value ~default:"?" err in
+
     let reqs = match counts_text net with "" -> "?" | s -> s in
     let seconds () = Float.round ((Unix.gettimeofday () -. t0) *. 10.) /. 10. in
     if result = None && it.same_sha && has_result pv then begin

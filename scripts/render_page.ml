@@ -968,7 +968,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
     add (Printf.sprintf "<div class=\"meta\">%s</div>" (e_s what));
     List.iter
       (fun (c : Suggestion.Candidate.t) ->
-        let g = Option.value ~default:"None" in
+        let g = Option.value ~default:"?" in
         let what =
           if c.first_after <> None then
             Printf.sprintf "CI used %s; first release after it: %s"

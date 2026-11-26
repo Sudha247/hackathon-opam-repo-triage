@@ -596,22 +596,24 @@ let run ~since ~limit ~max_ ~json () =
                 ]
       end)
     cands;
-  let py_str (v : Json.t) =
+  (* A value in the report, "?" when absent. *)
+  let text (v : Json.t) =
     match v with
     | `String s -> s
     | `Int n -> string_of_int n
-    | `Null -> "None"
+    | `Null -> "?"
     | v -> Json.dumps v
   in
+
   List.iter
     (fun r ->
       if Json.mem "error" r then
         Printf.printf "\n#%s: suggest failed: %s\n"
-          (py_str (r |. "pr"))
+          (text (r |. "pr"))
           (Json.str "error" r)
       else begin
         Printf.printf "\n#%s %s\n"
-          (py_str (r |. "pr"))
+          (text (r |. "pr"))
           (Util.prefix_chars (Json.str "title" r) 70);
         List.iter
           (fun (p, toks) ->
@@ -622,16 +624,16 @@ let run ~since ~limit ~max_ ~json () =
           (fun s ->
             Printf.printf "  %s [%s] %s: %s\n"
               (if Json.bool "hit" s then "HIT " else "miss")
-              (py_str (s |. "rule"))
-              (py_str (s |. "package"))
+              (text (s |. "rule"))
+              (text (s |. "package"))
               (Json.str "new" s))
           (Json.list "suggestions" r);
         List.iter
           (fun s ->
             Printf.printf "  (%s, not counted) [%s] %s: %s\n"
               (if Json.bool "hit" s then "hit" else "miss")
-              (py_str (s |. "rule"))
-              (py_str (s |. "package"))
+              (text (s |. "rule"))
+              (text (s |. "package"))
               (Json.str "new" s))
           (Json.list "health_suggestions" r);
         if

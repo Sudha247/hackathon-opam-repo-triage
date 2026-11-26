@@ -324,7 +324,7 @@ let llm_answer_error (out : Json.t) =
               else
                 Some
                   (Printf.sprintf "unknown %s %s" k
-                     (Util.repr (Util.prefix_chars v 40))))
+                     (Json.dumps (`String (Util.prefix_chars v 40)))))
             [ ("fix_in", fix_in_enum); ("confidence", confidence_enum) ])
   | _ -> Some "not a JSON object"
 
@@ -383,7 +383,7 @@ let credentials () =
 let status_message status body =
   let t = String.trim body in
   match Json.parse_opt t with
-  | Some j -> Printf.sprintf "Error code: %d - %s" status (Json.py_repr j)
+  | Some j -> Printf.sprintf "Error code: %d - %s" status (Json.dumps j)
   | None -> if t <> "" then t else Printf.sprintf "Error code: %d" status
 
 (* The SDK's retry rule for a response. *)

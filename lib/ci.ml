@@ -529,8 +529,11 @@ let resolve_sha target pr =
       | Some m -> Rx.group m 1
       | None ->
           Util.die
-            (Printf.sprintf "cannot find a commit sha in %s"
-               (match target with Some t -> Util.repr t | None -> "None")))
+            (match target with
+            | Some t -> Printf.sprintf "cannot find a commit sha in \"%s\"" t
+            | None ->
+                "no commit to analyse: give a commit sha, an opam.ci.ocaml.org \
+                 URL or --pr N"))
 
 (* ------------------------------------------------------------------------ *)
 (* Log excerpt extraction *)

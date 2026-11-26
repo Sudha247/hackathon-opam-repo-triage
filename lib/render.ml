@@ -7,8 +7,8 @@ let pad w s =
 
 let render_summary sha (data : data) show_all =
   let jobs = data.jobs in
-  Printf.printf "PR #%s  commit %s  %s%s\n"
-    (match data.pr with Some n -> string_of_int n | None -> "None")
+  Printf.printf "PR %s  commit %s  %s%s\n"
+    (match data.pr with Some n -> "#" ^ string_of_int n | None -> "?")
     (Util.prefix_chars sha 12) Net.base sha;
   if data.unfinished > 0 then
     Printf.printf "CI still running: %d of %d jobs not finished\n"
@@ -72,7 +72,7 @@ let render_summary sha (data : data) show_all =
         List.iter
           (fun (pkg, js) ->
             (* Group identical reasons across platforms. *)
-            let pkg = Option.value ~default:"None" pkg in
+            let pkg = Option.value ~default:"?" pkg in
             List.iter
               (fun ((cat, reason), js) ->
                 Printf.printf "    %s %s %s\n" (pad 32 pkg)
@@ -176,12 +176,12 @@ let compare jobs base_jobs : Json.t list =
 let render_compare ?(show_all = false) target (info : Json.t)
     (results : Json.t list) =
   let sha = Json.str "sha" info in
-  Printf.printf "== %s vs baseline %s: PR #%s commit %s\n" target
+  Printf.printf "== %s vs baseline %s: PR %s commit %s\n" target
     (Json.str "prev" info)
     (match Json.member "pr" info with
-    | `Int n -> string_of_int n
-    | `String s -> s
-    | _ -> "None")
+    | `Int n -> "#" ^ string_of_int n
+    | `String s -> "#" ^ s
+    | _ -> "?")
     (Util.prefix_chars sha 12);
   let order =
     [ "NEW"; "builder-specific"; "no-baseline"; "unknown"; "pre-existing" ]
@@ -309,7 +309,7 @@ let compared_text ?year r =
 
 (** One candidate of a suggestion, in words: what CI used and what passes. *)
 let candidate_text ?year r (c : Suggestion.Candidate.t) =
-  let g = Option.value ~default:"None" in
+  let g = Option.value ~default:"?" in
   if c.first_after <> None then
     let after =
       match Rx.match_ release_date (Suggestion.str r.compared_with) with
@@ -365,7 +365,9 @@ let confidence_text r =
     match Rx.match_ verdict_re c with
     | Some m -> (Rx.group m 1, Rx.group_opt m 2)
     | None ->
-        ( (match Suggestion.get r.confidence with Some v -> v | None -> "None"),
+        ( (match Suggestion.get r.confidence with
+          | Some v -> v
+          | None -> "unknown"),
           None )
   in
   Printf.sprintf "possible causes (%s confidence)" word
@@ -1048,7 +1050,7 @@ let render_suggestions (results : Suggestion.t list) =
       List.iter
         (fun (c : Suggestion.Candidate.t) ->
           Printf.printf "    %s: %s\n"
-            (Option.value ~default:"None" c.dep)
+            (Option.value ~default:"?" c.dep)
             (candidate_text r c);
           (match Suggestion.get c.old with
           | Some old when old <> "" -> Printf.printf "    - %s\n" old
