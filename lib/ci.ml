@@ -270,13 +270,13 @@ let categorize status reason =
   else if Rx.test {|failed at ".*(@runtest|test)|} r then "build-or-test"
   else "build"
 
-let parse_commit_page page =
+let parse_page_uncached page =
   let pr, raw = parse_page page in
-  let summary_hrefs =
-    List.filter_map
-      (fun r -> if r.sec = "summary" then Some r.href else None)
-      raw
-  in
+  (* The links of the summary: a set, the page can list thousands of jobs. *)
+  let summary_hrefs = Hashtbl.create 64 in
+  List.iter
+    (fun r -> if r.sec = "summary" then Hashtbl.replace summary_hrefs r.href ())
+    raw;
   let jobs =
     List.filter_map
       (fun r ->
@@ -316,7 +316,7 @@ let parse_commit_page page =
                 List.exists
                   (fun a -> Py.contains a "(experimental)")
                   r.ancestors;
-              in_summary = List.mem r.href summary_hrefs;
+              in_summary = Hashtbl.mem summary_hrefs r.href;
               messages = r.msgs;
             }
         end)
@@ -331,6 +331,29 @@ let parse_commit_page page =
     llm_unanswered = None;
     sha = None;
   }
+
+(* A run reads some pages several times (the baseline page of the previous
+   release, by several checks), and parsing a page of thousands of jobs
+   takes a while: each page is parsed once. Callers get their own copy of
+   the record, whose analysis fields they set. *)
+let parsed_pages : (Digest.t, data) Hashtbl.t = Hashtbl.create 4
+let parsed_pages_lock = Mutex.create ()
+
+let parse_commit_page page =
+  let key = Digest.string page in
+  let d =
+    match
+      Mutex.protect parsed_pages_lock (fun () ->
+          Hashtbl.find_opt parsed_pages key)
+    with
+    | Some d -> d
+    | None ->
+        let d = parse_page_uncached page in
+        Mutex.protect parsed_pages_lock (fun () ->
+            Hashtbl.replace parsed_pages key d);
+        d
+  in
+  { d with unfinished = d.unfinished }
 
 let load_commit ?(refresh = false) sha cache_dir =
   let url = base ^ sha in
