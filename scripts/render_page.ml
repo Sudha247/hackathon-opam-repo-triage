@@ -154,6 +154,8 @@ let lower s =
 
 (* ------------------------------------------------------------------------ *)
 
+let unsafe_char_re = Rx.v {|[\s"'<>`]|}
+
 (** An <a> only for https URLs; plain escaped text otherwise. *)
 let link ?cls (url : Json.t) text =
   let c =
@@ -162,17 +164,18 @@ let link ?cls (url : Json.t) text =
   match url with
   | `String u
     when String.starts_with ~prefix:"https://" u
-         && not (Rx.test {|[\s"'<>`]|} u) ->
+         && not (Rx.test unsafe_char_re u) ->
       Printf.sprintf "<a href=\"%s\"%s rel=\"noopener noreferrer\">%s</a>"
         (e_s u) c (e_s text)
   | _ -> Printf.sprintf "<span%s>%s</span>" c (e_s text)
 
 let links url text = link (`String url) text
+let date_re = Rx.v {|(\d{4})-(\d\d)-(\d\d)|}
 
 (** '2026-11-20T…' -> '20 Nov', with the year when it is not [year]. *)
 let day ?year iso =
   let iso = Option.value ~default:"" iso in
-  match Rx.match_ {|(\d{4})-(\d\d)-(\d\d)|} iso with
+  match Rx.match_ date_re iso with
   | Some m
     when let mo = int_of_string (Rx.group m 2) in
          1 <= mo && mo <= 12 ->
@@ -643,7 +646,7 @@ let blocked_by sugg =
 let title_of = Titles.title_of
 
 (* A suggested change written as an opam line: a quoted package, a field, a variable. *)
-let opam_line = {|\s*("[\w+.@-]+"|[a-z][\w-]*:|extra-source\b|%\{)|}
+let opam_line = Rx.v {|\s*("[\w+.@-]+"|[a-z][\w-]*:|extra-source\b|%\{)|}
 
 (** The failed jobs of a PR in words ("1 analysis failed"), network errors,
     cancelled and skipped jobs left out; None if there are none. *)
@@ -852,8 +855,8 @@ let copy_block pr =
          Markdown\">%s</textarea></details>"
         n n (e_s md)
 
-let safe_variant = "[A-Za-z0-9._+~,-]{1,200}"
-let safe_sha = "[0-9a-f]{7,40}"
+let safe_variant = Rx.v "[A-Za-z0-9._+~,-]{1,200}"
+let safe_sha = Rx.v "[0-9a-f]{7,40}"
 
 let job_link sha variant =
   match sha with
@@ -878,7 +881,7 @@ let conf_note r =
   let c = conf_word r in
   if c <> "" && c <> "high" then Some (c ^ " confidence") else None
 
-let release_date = {|release date of (\S+) \((\d{4}-\d\d-\d\d)\)$|}
+let release_date = Rx.v {|release date of (\S+) \((\d{4}-\d\d-\d\d)\)$|}
 
 (** The details of a suggestion: job, error, change, candidates, notes and jobs.
 *)

@@ -73,11 +73,13 @@ let curl_failure code msg =
   else if msg = "" then Printf.sprintf "curl failed with status %d" code
   else msg
 
+let libcurl_re = Rx.v {|libcurl/(\S+)|}
+
 (* The headers the curl command sends by default, which libcurl does not. *)
 let default_headers =
   lazy
     (let version =
-       match Rx.search {|libcurl/(\S+)|} (Curl.version ()) with
+       match Rx.search libcurl_re (Curl.version ()) with
        | Some m -> Rx.group m 1
        | None -> ""
      in

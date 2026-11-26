@@ -29,11 +29,12 @@ let os_family =
     ("fedora", "fedora");
   ]
 
+let unstable_testing_re = Rx.v {|-[\d.]+$|-(unstable|testing)$|}
+
 let platform_vars job =
   let d = job_dims job in
   let dist =
-    Rx.sub {|-[\d.]+$|-(unstable|testing)$|} ""
-      (Option.value ~default:"" d.distro)
+    Rx.sub unstable_testing_re "" (Option.value ~default:"" d.distro)
   in
   let arch =
     match d.arch with "amd64" -> "x86_64" | "aarch64" -> "arm64" | a -> a
@@ -48,7 +49,7 @@ let platform_vars job =
   | None -> []
 
 let filter_token =
-  {|\s*("(?:[^"\\]|\\.)*"|<=|>=|!=|[=<>&|!()]|[A-Za-z_][\w:+.-]*)|}
+  Rx.v {|\s*("(?:[^"\\]|\\.)*"|<=|>=|!=|[=<>&|!()]|[A-Za-z_][\w:+.-]*)|}
 
 exception Bad
 

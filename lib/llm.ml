@@ -105,6 +105,7 @@ let excerpt_hook :
   ref Ci.excerpt
 
 let none_str = function Some s -> s | None -> "None"
+let packages_re = Rx.v {|^\s*=== \w+ \d+ packages?|}
 
 let llm_prompt src (r : Suggestion.t) (job : Ci.job) text (data : Ci.data)
     pr_packages =
@@ -167,21 +168,22 @@ let llm_prompt src (r : Suggestion.t) (job : Ci.job) text (data : Ci.data)
   (* What opam did with the failing package, in order: the plans (install,
      recompile, downgrade...) and the actions (removed, installed...). A
      lower-bounds job, for instance, reinstalls packages after downgrading. *)
-  let name_rx = Rx.escape fname in
+  (* lines naming the package: [before], its name, [after] *)
+  let naming before after =
+    Rx.of_re (Re.seq [ Rx.re before; Re.str fname; Rx.re after ])
+  in
+  let action =
+    naming {|^\s*- (install|recompile|downgrade|upgrade|reinstall|remove)\s+|}
+      {|\s|}
+  and done_ = naming {|^-> \w+\s+|} {|\.|}
+  and error = naming {|^#=== ERROR while \w+ |} {|\.|} in
   let actions =
     List.filter_map
       (fun l ->
         if
-          Rx.test_match {|^\s*=== \w+ \d+ packages?|} l
-          || Rx.test_match
-               (Printf.sprintf
-                  {|^\s*- (install|recompile|downgrade|upgrade|reinstall|remove)\s+%s\s|}
-                  name_rx)
-               l
-          || Rx.test_match (Printf.sprintf {|^-> \w+\s+%s\.|} name_rx) l
-          || Rx.test_match
-               (Printf.sprintf {|^#=== ERROR while \w+ %s\.|} name_rx)
-               l
+          Rx.test_match packages_re l
+          || Rx.test_match action l || Rx.test_match done_ l
+          || Rx.test_match error l
         then Some (String.trim l)
         else None)
       (Util.splitlines text)
@@ -280,15 +282,16 @@ let name_tokens s =
   in
   scan 0 []
 
+(* The parts of a prompt that name packages. *)
+let prompt_parts =
+  Rx.v ~flags:[ Rx.M; Rx.S ]
+    ({|^Packages of this PR: ([^\n]*)$|^Failing package: (\S+)|}
+   ^ {||^Dependency versions installed by CI:\n([^\n]*)$|}
+   ^ {||<opam_file[^>]*>\n(.*?)</opam_file>|<error_excerpt>\n(.*?)</error_excerpt>|}
+    )
+
 let prompt_names prompt =
-  let parts =
-    Rx.findall_groups ~flags:[ Rx.M; Rx.S ]
-      ({|^Packages of this PR: ([^\n]*)$|^Failing package: (\S+)|}
-     ^ {||^Dependency versions installed by CI:\n([^\n]*)$|}
-     ^ {||<opam_file[^>]*>\n(.*?)</opam_file>|<error_excerpt>\n(.*?)</error_excerpt>|}
-      )
-      prompt
-  in
+  let parts = Rx.findall_groups prompt_parts prompt in
   let names = Hashtbl.create 64 in
   List.iter
     (fun p ->
@@ -611,7 +614,7 @@ let llm_suggest_hook = ref llm_suggest
    picks from the installed version, not from where the API changed) and
    depexts (distribution package names it cannot check). *)
 let llm_unsafe_change =
-  {|(?:[<>]=?|!?=)\s*"v?\d|depexts?\s*:|\{[^}]*\bos-(distribution|family)|}
+  Rx.v {|(?:[<>]=?|!?=)\s*"v?\d|depexts?\s*:|\{[^}]*\bos-(distribution|family)|}
 
 (* The only changes shown as a diff (each line of [change_new]): a dependency
    without a version, possibly with {with-test}, {build} or {with-doc}
@@ -619,15 +622,19 @@ let llm_unsafe_change =
    fields. Anything else (build or install commands, url, a whole depends
    block) is shown as text to check. *)
 let llm_diff_line =
-  {|"[\w+.-]+"(?:\s*\{\s*(?:with-test|build|with-doc)(?:\s*&\s*(?:with-test|build|with-doc))*\s*\})?|}
-  ^ {||(?:available|x-ci-accept-failures|x-maintained)\s*:\s*\S.*|}
+  Rx.v
+    ({|"[\w+.-]+"(?:\s*\{\s*(?:with-test|build|with-doc)(?:\s*&\s*(?:with-test|build|with-doc))*\s*\})?|}
+   ^ {||(?:available|x-ci-accept-failures|x-maintained)\s*:\s*\S.*|})
+
+let quoted_name_re = Rx.v {|"([\w+.-]+)"|}
+let field_name_re = Rx.v {|([\w-]+)\s*:|}
 
 (* What an opam line sets: ("dep", name) or ("field", name), or None. *)
 let change_key line =
-  match Rx.match_ {|"([\w+.-]+)"|} line with
+  match Rx.match_ quoted_name_re line with
   | Some m -> Some ("dep", Rx.group m 1)
   | None -> (
-      match Rx.match_ {|([\w-]+)\s*:|} line with
+      match Rx.match_ field_name_re line with
       | Some m -> Some ("field", Rx.group m 1)
       | None -> None)
 
@@ -676,6 +683,25 @@ let checked_package name (r : Suggestion.t) (job : Ci.job) pr_packages =
     | [ a ] -> Some a
     | _ -> None
 
+let error_while_context_re =
+  Rx.v
+    {|(=== ERROR while|context |path |command |exit-code |env-file |output-file |## output|\[\.\.\.)|}
+
+let make_re = Rx.v {|make(\[\d+\])?: \*\*\*|}
+
+let error_compilation_installation_re =
+  Rx.v ~flags:[ Rx.M ]
+    {|^\[ERROR\] (The (?:compilation|installation) of \S+ failed at "[^"\n]*")|}
+
+(* The marks of the line that best names an error, strongest first. *)
+let error_markers =
+  List.map Rx.v
+    [
+      {|\b(?:Error|error|Fatal error|fatal error):|};
+      {|\bError\b|\b[Ee]xception\b|};
+      {|\bfailed\b|not found|No such file|Read-only|cannot|};
+    ]
+
 let key_error_line text =
   let lines =
     List.filter_map
@@ -683,39 +709,23 @@ let key_error_line text =
       (Loginfo.log_info text).error_lines
   in
   let lines =
-    List.filter
-      (fun l ->
-        not
-          (Rx.test_match
-             {|(=== ERROR while|context |path |command |exit-code |env-file |output-file |## output|\[\.\.\.)|}
-             l))
-      lines
+    List.filter (fun l -> not (Rx.test_match error_while_context_re l)) lines
   in
   let lines =
-    List.filter
-      (fun l -> not (Rx.test_match {|make(\[\d+\])?: \*\*\*|} l))
-      lines
+    List.filter (fun l -> not (Rx.test_match make_re l)) lines
     (* make's own summary *)
   in
   let hit =
     List.find_map
       (fun rx -> List.find_opt (fun l -> Rx.test rx l) lines)
-      [
-        {|\b(?:Error|error|Fatal error|fatal error):|};
-        {|\bError\b|\b[Ee]xception\b|};
-        {|\bfailed\b|not found|No such file|Read-only|cannot|};
-      ]
+      error_markers
   in
   match hit with
   | Some h -> Some (Util.prefix_chars h 300)
   | None -> (
       (* No error line (a conf package's check prints nothing), or only test
        output ("Passed tests"): opam's line naming the command that failed. *)
-      match
-        Rx.search ~flags:[ Rx.M ]
-          {|^\[ERROR\] (The (?:compilation|installation) of \S+ failed at "[^"\n]*")|}
-          text
-      with
+      match Rx.search error_compilation_installation_re text with
       | Some m -> Some (Util.prefix_chars (Rx.group m 1) 300)
       | None -> (
           match Util.last_opt lines with
@@ -741,6 +751,8 @@ let llm_todo (results : Suggestion.t list) (data : Ci.data) =
       && unexplained r)
     results
 
+let number_re = Rx.v {|\d+|}
+
 let llm_sig (r : Suggestion.t) =
   let s =
     match r.error with
@@ -750,7 +762,7 @@ let llm_sig (r : Suggestion.t) =
         | Some f when f <> "" -> f
         | _ -> Suggestion.str r.Suggestion.variant)
   in
-  Util.prefix_chars (Rx.sub {|\d+|} "N" s) 120
+  Util.prefix_chars (Rx.sub number_re "N" s) 120
 
 (* The name of an exception's constructor, without its module path (the
    name of the error's class in the stored answers). *)
@@ -759,6 +771,8 @@ let exn_name e =
   match String.rindex_opt s '.' with
   | Some i -> String.sub s (i + 1) (String.length s - i - 1)
   | None -> s
+
+let check_verify_that_re = Rx.v {|^(Check|Verify)( that)?:?\s*|}
 
 let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
     pr_packages limit model dry_run =
@@ -914,7 +928,7 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
             | _ -> ""
           in
           let verify =
-            Rx.sub ~count:1 {|^(Check|Verify)( that)?:?\s*|} ""
+            Rx.sub ~count:1 check_verify_that_re ""
               (String.trim (Dict.str res "verify"))
           in
           let verify = String.capitalize_ascii verify in

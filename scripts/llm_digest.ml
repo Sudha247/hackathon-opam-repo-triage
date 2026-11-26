@@ -42,22 +42,30 @@ let answers sources =
           (Json.list "suggestions" d))
     sources
 
+let file_line_characters_re =
+  Rx.v {|File "[^"]*", line \d+(, characters \d+-\d+)?:?|}
+
+let path_re = Rx.v {|(?:[\w.+-]*/)+[\w.+-]+|}
+
+let ml_mli_cpp_re =
+  Rx.v {|\b[\w.-]+\.(?:ml|mli|c|h|cpp|hpp|cc|rs|dune|opam):\d+(?::\d+)?|}
+
+let number_re = Rx.v {|\b\d+\b|}
+let spaces_re = Rx.v {|\s+|}
+
 (** An error line without its locations and numbers. *)
 let exact line =
-  let s = U.sub {|File "[^"]*", line \d+(, characters \d+-\d+)?:?|} "" line in
+  let s = U.sub file_line_characters_re "" line in
   let s =
-    U.sub {|(?:[\w.+-]*/)+[\w.+-]+|} "<path>" s
+    U.sub path_re "<path>" s
     (* paths *)
   in
+  let s = U.sub ml_mli_cpp_re "<file>" s in
   let s =
-    U.sub {|\b[\w.-]+\.(?:ml|mli|c|h|cpp|hpp|cc|rs|dune|opam):\d+(?::\d+)?|}
-      "<file>" s
-  in
-  let s =
-    U.sub {|\b\d+\b|} "N" s
+    U.sub number_re "N" s
     (* numbers, not the digits of a name (collect2, msys2) *)
   in
-  String.trim (U.sub {|\s+|} " " s)
+  String.trim (U.sub spaces_re " " s)
 
 (* Python's \s on characters: ASCII whitespace (with the separators
    0x1c-0x1f) and Unicode white space. *)
@@ -106,17 +114,20 @@ let mask_quoted s =
   done;
   Buffer.contents b
 
+let masked_numbers_re = Rx.v {|N(?:\.N)+\b|}
+let module_path = Rx.v {|\b[A-Z][\w']*(?:\.[\w']+)+\b|}
+
 (* Python: re.sub(r"\b(?!N(?:\.N)+\b)[A-Z][\w']*(?:\.[\w']+)+\b", "M.x", s):
    Module.path.ident, not N.N. *)
 let mask_paths s =
   let e, offs = U.prepare s in
   let b = Buffer.create (String.length s) in
   let rec go pos last =
-    match Rx.search ~pos {|\b[A-Z][\w']*(?:\.[\w']+)+\b|} e with
+    match Rx.search ~pos module_path e with
     | None -> Buffer.add_string b (String.sub s last (String.length s - last))
     | Some m ->
         let a = Rx.start m in
-        if Rx.match_ ~pos:a {|N(?:\.N)+\b|} e <> None then go (a + 1) last
+        if Rx.match_ ~pos:a masked_numbers_re e <> None then go (a + 1) last
         else begin
           Buffer.add_string b (String.sub s last (offs.(a) - last));
           Buffer.add_string b "M.x";
@@ -125,6 +136,9 @@ let mask_paths s =
   in
   go 0 0;
   Buffer.contents b
+
+let value_module_constructor_re =
+  Rx.v {|\b(value|module|constructor|field|type constructor) [\w.'-]+|}
 
 let masked line =
   let s = exact line in
@@ -135,8 +149,7 @@ let masked line =
   let s = mask_paths s in
   (* (A library or package name is quoted in the errors, masked above: the word
      after "package" in a sentence is not a name.) *)
-  U.sub {|\b(value|module|constructor|field|type constructor) [\w.'-]+|}
-    {|\1 x|} s
+  U.sub value_module_constructor_re {|\1 x|} s
 
 (* Python's str() of a JSON scalar. *)
 let py_str (v : Json.t) =
@@ -160,14 +173,14 @@ let pr_ref ?page (n : Json.t) =
     | Some page -> Printf.sprintf "[`#%s`](%s#pr-%s)" n page n
     | None -> Md.md_code ("ocaml/opam-repository#" ^ n)
 
+let https_za_z0_re =
+  Rx.v {|(https://[A-Za-z0-9.-]+/(?:[A-Za-z0-9._~-]+/)*)data\.json|}
+
 (** The triage page, when the data comes from its data.json. *)
 let page_url sources =
   List.find_map
     (fun s ->
-      match
-        Rx.fullmatch
-          {|(https://[A-Za-z0-9.-]+/(?:[A-Za-z0-9._~-]+/)*)data\.json|} s
-      with
+      match Rx.fullmatch https_za_z0_re s with
       | Some m -> Some (Rx.group m 1)
       | None -> None)
     sources

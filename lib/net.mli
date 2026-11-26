@@ -103,7 +103,7 @@ val git_protocols : string list
 val safe_git_url : string option -> bool
 (** Whether a URL may be given to git: a plain https URL. *)
 
-val git_unreachable : string
+val git_unreachable : Rx.t
 (** A regular expression matching the errors of a git fetch or ls-remote that a
     dead or misconfigured host gives every time (no DNS name, a bad certificate,
     nothing listening, no answer): the URL is not asked again for

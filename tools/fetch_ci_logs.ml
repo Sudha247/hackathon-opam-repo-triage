@@ -22,7 +22,8 @@ let headers =
 let busy_marker = "The site is busy"
 
 let job_re =
-  {|<li class="(?P<status>[a-z_]+)"><a href="(?P<href>[^"]*/variant/[^"]*)">(?P<label>.*?)</a>|}
+  Rx.v ~flags:[ Rx.S ]
+    {|<li class="(?<status>[a-z_]+)"><a href="(?<href>[^"]*/variant/[^"]*)">(?<label>.*?)</a>|}
 
 (* Log lines that indicate a CI worker problem rather than a package problem. *)
 let infra_patterns =
@@ -32,7 +33,7 @@ let infra_patterns =
     "No space left on device";
   ]
 
-let commit_url_re = {|^/github/[^/]+/[^/]+/commit/[0-9a-f]{7,40}/?$|}
+let commit_url_re = Rx.v {|^/github/[^/]+/[^/]+/commit/[0-9a-f]{7,40}/?$|}
 
 (** GET a URL, retrying on errors and on the site's 'busy' page. *)
 let fetch ?(retries = 6) ?(backoff = 3.0) ?(timeout = 60.) url =
@@ -55,13 +56,17 @@ let fetch ?(retries = 6) ?(backoff = 3.0) ?(timeout = 60.) url =
   in
   attempt 0 "None"
 
+let br_re = Rx.v ~flags:[ Rx.I ] {|<br\s*/?>|}
+let tag_re = Rx.v "<[^>]+>"
+let script_or_style = Rx.v ~flags:[ Rx.S; Rx.I ] {|<(script|style)\b|}
+
 (** Turn a job page into plain text: keep the log, drop markup. *)
 let html_to_text page =
   (* Python: re.sub(r"<(script|style)\b.*?</\1>", "", page, flags=re.S | re.I) *)
   let lower = String.lowercase_ascii page in
   let b = Buffer.create (String.length page) in
   let rec go pos =
-    match Rx.search ~flags:[ Rx.S; Rx.I ] ~pos {|<(script|style)\b|} page with
+    match Rx.search ~pos script_or_style page with
     | None ->
         Buffer.add_string b (String.sub page pos (String.length page - pos))
     | Some m ->
@@ -80,8 +85,8 @@ let html_to_text page =
   in
   go 0;
   let page = Buffer.contents b in
-  let page = Rx.sub ~flags:[ Rx.I ] {|<br\s*/?>|} "\n" page in
-  String.trim (Html.unescape (Rx.sub "<[^>]+>" "" page)) ^ "\n"
+  let page = Rx.sub br_re "\n" page in
+  String.trim (Html.unescape (Rx.sub tag_re "" page)) ^ "\n"
 
 let parse_jobs page =
   let jobs = Odict.create () in
@@ -92,7 +97,7 @@ let parse_jobs page =
       let variant = Http.unquote (Util.last (Util.rsplit1 "/variant/" href)) in
       let label =
         String.concat " "
-          (Util.split (Html.unescape (Rx.sub "<[^>]+>" "" (g "label"))))
+          (Util.split (Html.unescape (Rx.sub tag_re "" (g "label"))))
       in
       if not (Odict.mem jobs variant) then
         Odict.set jobs variant
@@ -103,10 +108,11 @@ let parse_jobs page =
                ("label", `String label);
                ("url", `String (base ^ href));
              ]))
-    (Rx.finditer ~flags:[ Rx.S ] job_re page);
+    (Rx.finditer job_re page);
   Odict.values jobs
 
-let safe_name variant = Rx.sub {|[^A-Za-z0-9._,+-]|} "_" variant ^ ".log"
+let unsafe_name_char_re = Rx.v {|[^A-Za-z0-9._,+-]|}
+let safe_name variant = Rx.sub unsafe_name_char_re "_" variant ^ ".log"
 
 (** Pull out the interesting lines: opam [ERROR]s, lint errors, the final 'Job
     failed' line. *)
@@ -128,10 +134,14 @@ let extract_errors text =
     (Util.splitlines text);
   !keep
 
+let failed_re = Rx.v {|\(failed: (.*)\)\s*$|}
+let error_failed_re = Rx.v {|\[ERROR\] (\S+) failed|}
+let error_while_re = Rx.v {|#=== ERROR while \w+ (\S+)|}
+
 let root_cause job =
   let label = Dict.str job "label" in
   let cause =
-    match Rx.search {|\(failed: (.*)\)\s*$|} label with
+    match Rx.search failed_re label with
     | Some m -> Rx.group m 1
     | None -> label
   in
@@ -141,12 +151,10 @@ let root_cause job =
     match
       List.find_map
         (fun e ->
-          match Rx.match_ {|\[ERROR\] (\S+) failed|} e with
+          match Rx.match_ error_failed_re e with
           | Some m -> Some (Rx.group m 1)
           | None ->
-              Option.map
-                (fun m -> Rx.group m 1)
-                (Rx.match_ {|#=== ERROR while \w+ (\S+)|} e))
+              Option.map (fun m -> Rx.group m 1) (Rx.match_ error_while_re e))
         errors
     with
     | Some d -> d ^ " failed: (via dependency)"
@@ -178,13 +186,12 @@ let root_cause job =
   end
   else default
 
+let url_re = Rx.v {|^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]*)([^?#]*)|}
+
 let run ~url ~out ~status ~all ~jobs_n ~force () =
   let arg_url = url in
   let netloc, path =
-    match
-      Rx.match_ {|^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]*)([^?#]*)|}
-        (String.trim arg_url)
-    with
+    match Rx.match_ url_re (String.trim arg_url) with
     | Some m -> (Rx.group m 1, Rx.group m 2)
     | None -> ("", "")
   in

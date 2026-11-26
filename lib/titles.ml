@@ -50,6 +50,8 @@ let rule_titles =
     ("conf-no-depext", "No system package for this platform");
   ]
 
+let packages_re = Rx.v {|(\d+) packages \[|}
+
 let title_of (r : Suggestion.t) =
   match r.rule with
   | None | Some "" -> (
@@ -63,7 +65,7 @@ let title_of (r : Suggestion.t) =
       in
       let m =
         if String.ends_with ~suffix:"-systemic" rule then
-          Rx.match_ {|(\d+) packages \[|} (Suggestion.str r.Suggestion.variant)
+          Rx.match_ packages_re (Suggestion.str r.Suggestion.variant)
         else None
       in
       match m with

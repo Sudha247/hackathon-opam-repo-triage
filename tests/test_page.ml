@@ -597,6 +597,8 @@ let test_unknown_is_an_explanation () =
          ("fix_in", s "the CI environment (day10 builder)");
        ])
 
+let data_re = Rx.v {|data-f="(\w+)"[^>]*>.*?<b>(\d+)</b>|}
+
 let test_verdict_counts_add_up () =
   let prs =
     [
@@ -631,7 +633,7 @@ let test_verdict_counts_add_up () =
       (fun m ->
         if Rx.group m 1 = "all" then None
         else Some (int_of_string (Rx.group m 2)))
-      (Rx.finditer {|data-f="(\w+)"[^>]*>.*?<b>(\d+)</b>|} page)
+      (Rx.finditer data_re page)
   in
   Alcotest.(check int)
     "counts" (List.length prs)
@@ -974,8 +976,8 @@ let hostile =
   "@ocaml/maintainers ![x](https://evil.example/x.png) <img src=x> see #123, \
    ocaml/dune#4 GH-5 www.evil.example"
 
-let allowed_tags = {|</?(details|summary|sub|br)>|}
-let trusted_link = {|\]\(https://opam\.ci\.ocaml\.org/[\w.~,+%/=-]+\)|}
+let allowed_tags = Rx.v {|</?(details|summary|sub|br)>|}
+let trusted_link = Rx.v {|\]\(https://opam\.ci\.ocaml\.org/[\w.~,+%/=-]+\)|}
 
 (* The first run of exactly [run] backticks at or after [from] (Python:
    (?<!`)RUN(?!`)): its end, or None. *)
@@ -992,13 +994,15 @@ let find_closing text run from =
   in
   go from
 
+let fence_re = Rx.v {|\s*(`{3,})|}
+
 (** What GitHub would parse as Markdown in [md]: without fenced code blocks,
     code spans and backslash-escaped characters (a rough CommonMark reading). *)
 let outside_code md =
   let out = ref [] and fence = ref None in
   List.iter
     (fun line ->
-      let m = Rx.match_ {|\s*(`{3,})|} line in
+      let m = Rx.match_ fence_re line in
       match !fence with
       | Some f -> (
           match m with
@@ -1042,7 +1046,7 @@ let assert_inert md =
   let rest = Rx.sub allowed_tags "" rest in
   List.iter
     (fun bad ->
-      if Rx.test bad rest then
+      if Rx.test (Rx.v bad) rest then
         Alcotest.failf "%S in:\n%s\n--- from:\n%s" bad rest md)
     [ {|@\w|}; {|#\d|}; "<"; {|\]\(|}; "://"; {|www\.|}; {|GH-\d|} ]
 

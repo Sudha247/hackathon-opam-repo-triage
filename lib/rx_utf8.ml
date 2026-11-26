@@ -51,15 +51,15 @@ let wrap s offs = Option.map (fun x -> { m = x; s; offs })
 let prepare s =
   if ascii s then (s, Array.init (String.length s + 1) Fun.id) else encode s
 
-let search ?flags pattern s =
+let search t s =
   let e, offs = prepare s in
-  wrap s offs (Rx.search ?flags pattern e)
+  wrap s offs (Rx.search t e)
 
-let match_ ?flags pattern s =
+let match_ t s =
   let e, offs = prepare s in
-  wrap s offs (Rx.match_ ?flags pattern e)
+  wrap s offs (Rx.match_ t e)
 
-let subf ?flags pattern f s =
+let subf t f s =
   let e, offs = prepare s in
   let b = Buffer.create (String.length s) in
   let last =
@@ -69,16 +69,17 @@ let subf ?flags pattern f s =
         Buffer.add_string b (String.sub s last (offs.(a) - last));
         Buffer.add_string b (f { m = x; s; offs });
         offs.(z))
-      0
-      (Rx.finditer ?flags pattern e)
+      0 (Rx.finditer t e)
   in
   Buffer.add_string b (String.sub s last (String.length s - last));
   Buffer.contents b
 
-let sub ?flags pattern template s =
-  subf ?flags pattern
+let group_ref = Rx.v {|\\(\d)|}
+
+let sub t template s =
+  subf t
     (fun m ->
-      Rx.subf {|\\(\d)|}
+      Rx.subf group_ref
         (fun d -> group m (int_of_string (Rx.group d 1)))
         template)
     s

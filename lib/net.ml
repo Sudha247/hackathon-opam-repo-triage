@@ -262,7 +262,7 @@ let gh_api ?(cache_dir = ".opam-ci-cache") ?(cache = true) path : Json.t option
    Upstream git URLs come from the dev-repo and src fields of opam files
    (untrusted): only plain https URLs reach git, after [--] where git takes
    it, and git may only use the https transport (no ssh://, file://, ext::). *)
-let safe_git_url_re = {|https://[A-Za-z0-9][A-Za-z0-9.-]*/[^\s]+|}
+let safe_git_url_re = Rx.v {|https://[A-Za-z0-9][A-Za-z0-9.-]*/[^\s]+|}
 
 let git_protocols =
   [ "-c"; "protocol.allow=never"; "-c"; "protocol.https.allow=always" ]
@@ -278,10 +278,12 @@ let git_fetch_timeout =
    find remote ref"), repository ("not found", 404) or a private one
    (credentials asked). *)
 let git_net_failure =
-  {|timed out|Could not resolve (host|proxy)|Failed to connect|Connection (refused|reset|timed out)|returned error: (5\d\d|429)|RPC failed|early EOF|unexpected disconnect|hung up unexpectedly|transfer closed|Recv failure|Empty reply|SSL|TLS|gnutls|Couldn't connect|}
+  Rx.v ~flags:[ Rx.I ]
+    {|timed out|Could not resolve (host|proxy)|Failed to connect|Connection (refused|reset|timed out)|returned error: (5\d\d|429)|RPC failed|early EOF|unexpected disconnect|hung up unexpectedly|transfer closed|Recv failure|Empty reply|SSL|TLS|gnutls|Couldn't connect|}
 
 let git_unreachable =
-  {|timed out|Could not resolve host|Failed to connect|Couldn't connect|Connection (refused|timed out)|SSL|TLS|gnutls|certificate|}
+  Rx.v ~flags:[ Rx.I ]
+    {|timed out|Could not resolve host|Failed to connect|Couldn't connect|Connection (refused|timed out)|SSL|TLS|gnutls|certificate|}
 
 let git_down_max_age = 24. *. 3600.
 
@@ -318,7 +320,7 @@ let git ?cwd ?(check = true) ?git_dir args : Proc.result =
     if
       (cmd = "fetch" || cmd = "ls-remote")
       && out.code <> 0
-      && Rx.test ~flags:[ Rx.I ] git_net_failure out.stderr
+      && Rx.test git_net_failure out.stderr
     then net_error ();
     if check && out.code <> 0 then
       failwith
@@ -328,19 +330,25 @@ let git ?cwd ?(check = true) ?git_dir args : Proc.result =
     out
   end
 
+let git_re = Rx.v "^git://"
+let git_re2 = Rx.v "^git@([^:]+):"
+
+let https_github_com_re =
+  Rx.v {|(https://github\.com/[^/]+/[^/]+?)(?:\.git)?(?:/.*)?$|}
+
+let archive_tags_tree_re = Rx.v "/-/(archive|tags|tree)/.*$"
+
 let repo_url dev_repo =
   let u = Util.removeprefix (String.trim dev_repo) "git+" in
-  let u = Rx.sub "^git://" "https://" u in
-  let u = Rx.sub "^git@([^:]+):" {|https://\1/|} u in
+  let u = Rx.sub git_re "https://" u in
+  let u = Rx.sub git_re2 {|https://\1/|} u in
   let u = List.hd (Util.split_on ~maxsplit:1 "#" u) in
-  match
-    Rx.match_ {|(https://github\.com/[^/]+/[^/]+?)(?:\.git)?(?:/.*)?$|} u
-  with
+  match Rx.match_ https_github_com_re u with
   | Some m ->
       Some (Rx.group m 1)
       (* also archive URLs: https://github.com/o/r/releases/... -> repo *)
   | None ->
-      let u = Rx.sub "/-/(archive|tags|tree)/.*$" "" u in
+      let u = Rx.sub archive_tags_tree_re "" u in
       (* GitLab archive URLs (nested groups kept) *)
       let u = Util.removesuffix u "/" in
       if safe_git_url (Some u) then Some u else None

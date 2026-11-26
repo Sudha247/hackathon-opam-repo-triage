@@ -17,12 +17,17 @@
    [pre] and [a] elements, so a code span keeps the token readable and
    copyable (unlike a zero-width joiner) and links nothing. *)
 
-let special = {|([\\`*_\[\]<>|&])|}
-let linkish = {|[@#]|://|\bwww\.|\bgh-\d|}
-let flat s = String.trim (Rx.sub {|\s+|} " " s)
+let special = Rx.v {|([\\`*_\[\]<>|&])|}
+let linkish = Rx.v ~flags:[ Rx.I ] {|[@#]|://|\bwww\.|\bgh-\d|}
+let spaces_re = Rx.v {|\s+|}
+let flat s = String.trim (Rx.sub spaces_re " " s)
+let backticks_re = Rx.v "`+"
 
 let longest_run s =
-  List.fold_left (fun a r -> max a (String.length r)) 0 (Rx.findall "`+" s)
+  List.fold_left
+    (fun a r -> max a (String.length r))
+    0
+    (Rx.findall backticks_re s)
 
 let md_code s =
   let s = flat s in
@@ -39,12 +44,13 @@ let md_fence ?(lang = "") text =
   fence ^ lang ^ "\n" ^ text ^ "\n" ^ fence
 
 let escape s = Rx.sub special {|\\\1|} s
+let word_parts_re = Rx.v {|([(\["']*)(.*?)([.,;:!?)\]"']*)|}
 
 let word w =
-  if not (Rx.test ~flags:[ Rx.I ] linkish w) then escape w
+  if not (Rx.test linkish w) then escape w
   else
     (* Punctuation around the token stays outside the code span: `#123`. *)
-    match Rx.fullmatch {|([(\["']*)(.*?)([.,;:!?)\]"']*)|} w with
+    match Rx.fullmatch word_parts_re w with
     | Some m ->
         let lead = Rx.group m 1
         and core = Rx.group m 2
@@ -53,7 +59,8 @@ let word w =
         else md_code w
     | None -> md_code w
 
-let words s = Rx.subf {|\S+|} (fun m -> word (Rx.group0 m)) s
+let word_re = Rx.v {|\S+|}
+let words s = Rx.subf word_re (fun m -> word (Rx.group0 m)) s
 
 let join pieces =
   let b = Buffer.create 256 in
@@ -117,9 +124,9 @@ let md_text ?limit s =
   pieces := words (String.sub s !pos (String.length s - !pos)) :: !pieces;
   join (List.filter (fun p -> p <> "") (List.rev !pieces))
 
-let sha_re = "[0-9a-f]{7,40}"
-let variant_re = "[A-Za-z0-9._+~,-]+"
-let ci_url_re = "https://opam\\.ci\\.ocaml\\.org/[A-Za-z0-9._~,+%/=-]+"
+let sha_re = Rx.v "[0-9a-f]{7,40}"
+let variant_re = Rx.v "[A-Za-z0-9._+~,-]+"
+let ci_url_re = Rx.v "https://opam\\.ci\\.ocaml\\.org/[A-Za-z0-9._~,+%/=-]+"
 
 let ci_job_url base sha variant =
   if Rx.fullmatch sha_re sha <> None && Rx.fullmatch variant_re variant <> None

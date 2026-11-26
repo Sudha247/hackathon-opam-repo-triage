@@ -2947,6 +2947,8 @@ let rec find_up dir rel n =
   else if n = 0 then None
   else find_up (Filename.dirname dir) rel (n - 1)
 
+let run_re = Rx.v {|(\s+)run: \|$|}
+
 let test_prune_step () =
   match find_up (Sys.getcwd ()) ".github/workflows/triage-page.yml" 6 with
   | None -> Alcotest.skip ()
@@ -2966,7 +2968,7 @@ let test_prune_step () =
       if !start < 0 then Alcotest.fail "no Prune cache step";
       let run_line = lines.(!start + 1) in
       let indent =
-        match Rx.match_ {|(\s+)run: \|$|} run_line with
+        match Rx.match_ run_re run_line with
         | Some m -> Rx.group m 1
         | None -> Alcotest.fail "no run: |"
       in
@@ -3022,8 +3024,8 @@ let hostile =
   "@ocaml/maintainers ![x](https://evil.example/x.png) <img src=x> see #123, \
    ocaml/dune#4 GH-5 www.evil.example"
 
-let allowed_tags = {|</?(details|summary|sub|br)>|}
-let trusted_link = {|\]\(https://opam\.ci\.ocaml\.org/[\w.~,+%/=-]+\)|}
+let allowed_tags = Rx.v {|</?(details|summary|sub|br)>|}
+let trusted_link = Rx.v {|\]\(https://opam\.ci\.ocaml\.org/[\w.~,+%/=-]+\)|}
 
 let find_closing text run from =
   let n = String.length text and k = String.length run in
@@ -3038,13 +3040,15 @@ let find_closing text run from =
   in
   go from
 
+let fence_re = Rx.v {|\s*(`{3,})|}
+
 (** What GitHub would parse as Markdown in [md]: without fenced code blocks,
     code spans and backslash-escaped characters (a rough CommonMark reading). *)
 let outside_code md =
   let out = ref [] and fence = ref None in
   List.iter
     (fun line ->
-      let m = Rx.match_ {|\s*(`{3,})|} line in
+      let m = Rx.match_ fence_re line in
       match !fence with
       | Some f -> (
           match m with
@@ -3089,7 +3093,7 @@ let assert_inert md =
   in
   List.iter
     (fun bad ->
-      if Rx.test bad rest then
+      if Rx.test (Rx.v bad) rest then
         Alcotest.failf "%S in:\n%s\n--- from:\n%s" bad rest md)
     [ {|@\w|}; {|#\d|}; "<"; {|\]\(|}; "://"; {|www\.|}; {|GH-\d|} ]
 

@@ -13,8 +13,9 @@ let hostile =
   "@ocaml/maintainers ![x](https://evil.example/x.png) <img src=x> see #123, \
    ocaml/dune#4 GH-5 www.evil.example"
 
-let allowed_tags = {|</?(details|summary|sub|br)>|}
-let trusted_link = {|\]\(https://opam\.ci\.ocaml\.org/[\w.~,+%/=-]+\)|}
+let allowed_tags = Rx.v {|</?(details|summary|sub|br)>|}
+let trusted_link = Rx.v {|\]\(https://opam\.ci\.ocaml\.org/[\w.~,+%/=-]+\)|}
+let fence_re = Rx.v {|\s*(`{3,})|}
 
 (** What GitHub would parse as Markdown in [md]: without fenced code blocks,
     code spans and backslash-escaped characters (a rough CommonMark reading). *)
@@ -22,7 +23,7 @@ let outside_code md =
   let out = ref [] and fence = ref None in
   List.iter
     (fun line ->
-      let m = Rx.match_ {|\s*(`{3,})|} line in
+      let m = Rx.match_ fence_re line in
       match !fence with
       | Some f -> (
           match m with
@@ -77,7 +78,7 @@ let assert_inert md =
   in
   List.iter
     (fun bad ->
-      if Rx.test bad rest then
+      if Rx.test (Rx.v bad) rest then
         Alcotest.failf "%S in:\n%s\n--- from:\n%s" bad rest md)
     [ {|@\w|}; {|#\d|}; "<"; {|\]\(|}; "://"; {|www\.|}; {|GH-\d|} ]
 
@@ -85,6 +86,9 @@ let contains s sub =
   Alcotest.(check bool)
     (Printf.sprintf "%S in the report" sub)
     true (Util.contains s sub)
+
+let https_github_io_re =
+  Rx.v {|\[`#\d+`\]\(https://x\.github\.io/triage/#pr-\d+\)|}
 
 let test_llm_digest () =
   let r =
@@ -114,8 +118,7 @@ let test_llm_digest () =
   List.iter
     (fun page ->
       md := D.report ?page items 2;
-      assert_inert
-        (Rx.sub {|\[`#\d+`\]\(https://x\.github\.io/triage/#pr-\d+\)|} "" !md);
+      assert_inert (Rx.sub https_github_io_re "" !md);
       Alcotest.(check bool)
         "no PR link" false
         (Util.contains !md "github.com/ocaml/opam-repository/pull"))

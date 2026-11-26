@@ -56,14 +56,17 @@ let json_text (v : Json.t) =
   | v -> Json.dumps v
 
 let picked match_ variant =
-  match match_ with None | Some "" -> true | Some m -> Rx.test m variant
+  match match_ with
+  | None | Some "" -> true
+  | Some m -> Rx.test (Rx.v m) variant
 
 (* ------------------------------------------------------------------------ *)
 
 (* A URL that can be pasted in a shell command between single quotes: https,
    no space, quote, `;|&$`, backtick, parenthesis, `<>`, `!`, `#`... *)
 let shell_safe_url =
-  {|https://[A-Za-z0-9][A-Za-z0-9.-]*(?::\d{1,5})?(?:/[A-Za-z0-9._~%+=,:/?-]*)?|}
+  Rx.v
+    {|https://[A-Za-z0-9][A-Za-z0-9.-]*(?::\d{1,5})?(?:/[A-Za-z0-9._~%+=,:/?-]*)?|}
 
 let checksum_command url =
   match url with
@@ -71,14 +74,17 @@ let checksum_command url =
       Some (Printf.sprintf "curl -sL '%s' | sha256sum" u)
   | _ -> None
 
+let ci_accept_failures_re = Rx.v {|x-ci-accept-failures:\s*\[([^\]]*)\]|}
+let quoted_re = Rx.v {|"([^"]+)"|}
+let comment_re = Rx.v "#[^\n]*"
+
 (** The platforms listed in x-ci-accept-failures. *)
 let accepted_platforms opam_text =
   match
-    Rx.search {|x-ci-accept-failures:\s*\[([^\]]*)\]|}
-      (Option.value ~default:"" opam_text)
+    Rx.search ci_accept_failures_re (Option.value ~default:"" opam_text)
   with
   | Some m ->
-      SS.of_list (Rx.findall {|"([^"]+)"|} (Rx.sub "#[^\n]*" "" (Rx.group m 1)))
+      SS.of_list (Rx.findall quoted_re (Rx.sub comment_re "" (Rx.group m 1)))
   | None -> SS.empty
 
 let accepted_but_failing (results : Suggestion.t list) src sha pr_packages =
@@ -121,7 +127,7 @@ let accepted_but_failing (results : Suggestion.t list) src sha pr_packages =
       end)
     results
 
-let opam_path_re = {|packages/[^/]+/([^/]+)/opam$|}
+let opam_path_re = Rx.v {|packages/[^/]+/([^/]+)/opam$|}
 
 let compare_files base sha cache_dir =
   let d =
@@ -133,6 +139,10 @@ let compare_files base sha cache_dir =
     | _ -> None
   in
   match d with Some d -> Json.list "files" d | None -> []
+
+let filtered_dependency_re = Rx.v {|"([\w+-]+)"\s*\{(.*)\}$|}
+let dependency_re = Rx.v {|"([\w+-]+)"\s*(?:\{(.*)\})?$|}
+let upper_bound_re = Rx.v {|<\s*"([^"]+)"|}
 
 (** [name.version -> dep {< "V"}] for the opam files this PR modifies only by
     adding an upper bound that excludes a version the PR adds: their dependency
@@ -183,8 +193,8 @@ let bound_only_changes base sha cache_dir =
             let rec go acc = function
               | [] -> Some (List.rev acc)
               | (r, a) :: rest -> (
-                  let ma = Rx.match_ {|"([\w+-]+)"\s*\{(.*)\}$|} a
-                  and mr = Rx.match_ {|"([\w+-]+)"\s*(?:\{(.*)\})?$|} r in
+                  let ma = Rx.match_ filtered_dependency_re a
+                  and mr = Rx.match_ dependency_re r in
                   match (ma, mr) with
                   | Some ma, Some mr when Rx.group ma 1 = Rx.group mr 1 -> (
                       let ta = terms (Rx.group_opt ma 2)
@@ -194,7 +204,7 @@ let bound_only_changes base sha cache_dir =
                       in
                       let mv =
                         match extra with
-                        | [ e ] -> Rx.fullmatch {|<\s*"([^"]+)"|} e
+                        | [ e ] -> Rx.fullmatch upper_bound_re e
                         | _ -> None
                       in
                       match mv with
@@ -321,6 +331,8 @@ let sorted_bindings tbl =
     (fun (a, _) (b, _) -> compare a b)
     (Hashtbl.fold (fun k v acc -> (k, v) :: acc) tbl [])
 
+let revdeps_re = Rx.v ",([^,]+),revdeps,"
+
 let health_summary ?src (notes : notes) =
   let run = Option.join notes.run in
   let when_ =
@@ -353,9 +365,7 @@ let health_summary ?src (notes : notes) =
         List.sort_uniq compare
           (List.filter_map
              (fun (_, v) ->
-               Option.map
-                 (fun m -> Rx.group m 1)
-                 (Rx.search ",([^,]+),revdeps," v))
+               Option.map (fun m -> Rx.group m 1) (Rx.search revdeps_re v))
              (PS.elements xs))
       in
       let target = match targets with t :: _ -> Some t | [] -> None in
@@ -497,6 +507,11 @@ let add_pair tbl k x =
   Hashtbl.replace tbl k
     (PS.add x (Option.value ~default:PS.empty (Hashtbl.find_opt tbl k)))
 
+let command_noise_re = Rx.v {|[`"']|-j \d+|}
+
+let compilation_installation_failed_re =
+  Rx.v {|The (compilation|installation) of \S+ failed at |}
+
 let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
     (failure_key * string) list =
   let failing =
@@ -554,7 +569,7 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
               (* The reason with the release's version left out, normalised as in failure_key. *)
               let reason job version =
                 String.trim
-                  (Rx.sub {|[`"']|-j \d+|} ""
+                  (Rx.sub command_noise_re ""
                      (Util.replace
                         (Option.value ~default:"" job.reason)
                         version name))
@@ -584,8 +599,7 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
                         in
                         let own_build =
                           (j.revdep = None || j.revdep = Some "")
-                          && Rx.test_match
-                               {|The (compilation|installation) of \S+ failed at |}
+                          && Rx.test_match compilation_installation_failed_re
                                (Option.value ~default:"" j.reason)
                         in
                         if not own_build then
@@ -766,6 +780,11 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
       if List.mem None whys then None else Some (k, Option.get (List.hd whys)))
     out
 
+let sources_re = Rx.v {|sources of (\S+?):|}
+
+let cannot_create_symlink_re =
+  Rx.v {|([^\s:]+): Cannot create symlink to '([^']+)'|}
+
 let sources_rules ?match_ (data : data) cache_dir =
   let out = ref [] and seen = Hashtbl.create 8 in
   List.iter
@@ -776,9 +795,7 @@ let sources_rules ?match_ (data : data) cache_dir =
       then ()
       else begin
         let pkg =
-          match
-            Rx.search {|sources of (\S+?):|} (Option.value ~default:"" j.reason)
-          with
+          match Rx.search sources_re (Option.value ~default:"" j.reason) with
           | Some m -> Some (Rx.group m 1)
           | None -> (
               match j.revdep with
@@ -800,9 +817,7 @@ let sources_rules ?match_ (data : data) cache_dir =
           let text =
             try !log_text_hook (fetch j.url cache_dir) with _ -> ""
           in
-          let m =
-            Rx.search {|([^\s:]+): Cannot create symlink to '([^']+)'|} text
-          in
+          let m = Rx.search cannot_create_symlink_re text in
           let distro = s_none dims.distro in
           let r =
             Suggestion.make
@@ -852,13 +867,16 @@ let sources_rules ?match_ (data : data) cache_dir =
 (* Architectures whose CI machines abort jobs routinely (slow emulated or few
    workers): an aborted job there is listed but, like one on an experimental
    platform, does not hold a PR back. The analysis job is never one of them. *)
-let routine_abort_re = {|(?:^|[,-])(?:riscv64|s390x)(?:[,-]|$)|}
+let routine_abort_re = Rx.v {|(?:^|[,-])(?:riscv64|s390x)(?:[,-]|$)|}
 
 let routine_abort j =
   j.status = "aborted" && j.kind <> "analysis"
   && Rx.test routine_abort_re
        (String.concat "," (Util.take 2 (String.split_on_char ',' j.variant)))
 (* the platform, not a package *)
+
+let http_error_code_re =
+  Rx.v {|HTTP error code (\d+)|curl failed|Could not resolve|}
 
 let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
   let unfinished = List.map (fun j -> j.variant) (unfinished_jobs data.jobs) in
@@ -888,8 +906,7 @@ let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
       if j.status <> "failed" then (Some j.status, None)
       else
         let m =
-          Rx.search {|HTTP error code (\d+)|curl failed|Could not resolve|}
-            (Option.value ~default:"" j.reason)
+          Rx.search http_error_code_re (Option.value ~default:"" j.reason)
         in
         let detail =
           match m with
@@ -1049,15 +1066,21 @@ let pr_opam_changes_hook :
     =
   ref pr_opam_changes
 
+let upper_bound_term_re = Rx.v {|(<=|<)\s*"([^"]+)"|}
+
 (** The lowest upper bound ([<] or [<=] version) of a dependency line, or None.
 *)
 let upper_bound line =
   let ups =
     List.map
       (function [ _; v ] -> v | _ -> assert false)
-      (Rx.findall_groups {|(<=|<)\s*"([^"]+)"|} line)
+      (Rx.findall_groups upper_bound_term_re line)
   in
   Sources.min_version ups
+
+let hunk_field_re = Rx.v {|@@[^@]*@@\s*([a-z][\w-]*):|}
+let field_re = Rx.v {|[-+ ]?([a-z][\w-]*):|}
+let dependency_change_re = Rx.v {|([-+])\s*"([\w+.-]+)"\s*(\{[^}]*\})?|}
 
 let pr_added_bounds base sha cache_dir =
   List.fold_left
@@ -1072,14 +1095,12 @@ let pr_added_bounds base sha cache_dir =
               if String.starts_with ~prefix:"@@" l then
                 (* The hunk header names the field the hunk starts in (git's default function context). *)
                 field :=
-                  Option.map
-                    (fun h -> Rx.group h 1)
-                    (Rx.match_ {|@@[^@]*@@\s*([a-z][\w-]*):|} l)
+                  Option.map (fun h -> Rx.group h 1) (Rx.match_ hunk_field_re l)
               else begin
-                (match Rx.match_ {|[-+ ]?([a-z][\w-]*):|} l with
+                (match Rx.match_ field_re l with
                 | Some fm -> field := Some (Rx.group fm 1)
                 | None -> ());
-                match Rx.match_ {|([-+])\s*"([\w+.-]+)"\s*(\{[^}]*\})?|} l with
+                match Rx.match_ dependency_change_re l with
                 | Some dm when !field = Some "depends" ->
                     Odict.set
                       (if Rx.group dm 1 = "-" then old else new_)
@@ -1215,7 +1236,8 @@ let relaxed_available_rules (data : data) sha base cache_dir
 
 (* A job that failed because of the CI rather than what it checks. *)
 let ci_failure =
-  {|Cancelled|curl failed|HTTP error code|Could not resolve|Connection (?:refused|reset|timed out)|exited with status 128|}
+  Rx.v
+    {|Cancelled|curl failed|HTTP error code|Could not resolve|Connection (?:refused|reset|timed out)|exited with status 128|}
 
 let analysis_rules ?match_ (data : data) cache_dir =
   List.filter_map
@@ -1279,7 +1301,7 @@ let analysis_rules ?match_ (data : data) cache_dir =
 
 (* A finding of opam-ci-check: "Error in pkg.ver: …" or "Warning in pkg.ver: …".
    It fails the lint job on warnings too. *)
-let lint_message = {|(Error|Warning) in ([\w+-]+)\.(\S+?): (.*)$|}
+let lint_message = Rx.v {|(Error|Warning) in ([\w+-]+)\.(\S+?): (.*)$|}
 
 (** (PR number, set of (package name, message)) of the lint errors in the CI run
     of the PR that published the previous version of a package of this PR. *)
@@ -1318,6 +1340,16 @@ let lint_baseline (data : data) cache_dir =
   in
   go targets
 
+let git_re = Rx.v {|"git"|}
+let status_re = Rx.v "status 128"
+let https_github_com_re = Rx.v {|https://github\.com/([^/]+/[^/]+)/blob/(.+)$|}
+let github_repository_re = Rx.v {|https://github\.com/([^/]+/[^/]+)$|}
+let field_start_re = Rx.v ~flags:[ Rx.M ] "^[a-z][\\w-]*:"
+let md5_sha_re = Rx.v {|\[\s*"([^"]+)"\s+"(?:md5|sha\d+)=|}
+let quoted_name_re = Rx.v {|"([\w+-]+)"|}
+let depexts_npm_version_re = Rx.v {|depexts:[\s\S]*?npm-version|}
+let missing_field_re = Rx.v {|Missing field '([\w-]+)'|}
+
 let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
   let out = ref [] in
   (* [src] is None in some tests: the lookups that need it then find nothing. *)
@@ -1342,7 +1374,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
           | Some m when m <> "" -> m
           | _ -> "no message"
         in
-        let git = Rx.test {|"git"|} msg && Rx.test "status 128" msg in
+        let git = Rx.test git_re msg && Rx.test status_re msg in
         out :=
           !out
           @ [
@@ -1387,15 +1419,12 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                 let note n = `Note n and conf c = `Confidence c in
                 if has "warning 62" then begin
                   let v =
-                    match List.rev (Rx.findall {|"([^"]+)"|} text) with
+                    match List.rev (Rx.findall quoted_re text) with
                     | x :: _ -> x
                     | [] -> ""
                   in
                   let lid =
-                    match
-                      Rx.match_ {|https://github\.com/([^/]+/[^/]+)/blob/(.+)$|}
-                        v
-                    with
+                    match Rx.match_ https_github_com_re v with
                     | Some gm ->
                         Sources.license_id
                           (Sources.raw s
@@ -1460,7 +1489,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                       | None -> None
                     in
                     match
-                      Rx.match_ {|https://github\.com/([^/]+/[^/]+)$|}
+                      Rx.match_ github_repository_re
                         (Option.value ~default:"" up)
                     with
                     | Some gm ->
@@ -1553,12 +1582,10 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                     | _ -> ""
                   in
                   let section =
-                    List.hd (Rx.split ~maxsplit:1 "(?m)^[a-z][\\w-]*:" section)
+                    List.hd (Rx.split ~maxsplit:1 field_start_re section)
                   in
                   (* up to the next field *)
-                  let files =
-                    Rx.findall {|\[\s*"([^"]+)"\s+"(?:md5|sha\d+)=|} section
-                  in
+                  let files = Rx.findall md5_sha_re section in
                   let f0 = match files with f :: _ -> f | [] -> "<file>" in
                   upd
                     [
@@ -1623,7 +1650,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                       conf "medium";
                     ]
                 else if has "warning 41" then begin
-                  let named = Rx.findall {|"([\w+-]+)"|} text in
+                  let named = Rx.findall quoted_name_re text in
                   if List.mem name named then
                     upd
                       [
@@ -1665,7 +1692,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                   end
                 else if has "conf packages should always use" then
                   begin if
-                    Rx.test {|depexts:[\s\S]*?npm-version|}
+                    Rx.test depexts_npm_version_re
                       (Option.value ~default:"" (pr_opam name ver))
                   then
                     upd
@@ -1700,7 +1727,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                  deprecates or bounds old versions): the lint job reports it
                  again. Some authors add it then (#31205), others do not
                  (#30832): the change stays, with the note. *)
-                let mf = Rx.search {|Missing field '([\w-]+)'|} text in
+                let mf = Rx.search missing_field_re text in
                 let on_master =
                   match (mf, src) with
                   | Some _, Some src -> opam_file src name ver
@@ -1710,8 +1737,14 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                 | Some mf, Some om
                   when om <> ""
                        && not
-                            (Rx.test ~flags:[ Rx.M ]
-                               ("^" ^ Rx.escape (Rx.group mf 1) ^ {|\s*:|})
+                            (Rx.test
+                               (Rx.of_re
+                                  (Re.seq
+                                     [
+                                       Rx.re ~flags:[ Rx.M ] "^";
+                                       Re.str (Rx.group mf 1);
+                                       Rx.re ~flags:[ Rx.M ] {|\s*:|};
+                                     ]))
                                om) ->
                     let n = Suggestion.str r.note in
                     r.note <-
@@ -1805,9 +1838,19 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
                    the line after a chain gives the reason, such as "unknown
                    package". *)
                   let pat =
-                    Printf.sprintf
-                      {|^\s*- (%s(?: [<>=!]+ \S+)? -> .+)\n\s*(.*)$|}
-                      (Rx.escape (List.hd (String.split_on_char '.' t)))
+                    let m = [ Rx.M ] in
+                    Rx.of_re
+                      (Re.seq
+                         [
+                           Rx.re ~flags:m {|^\s*- |};
+                           Re.group
+                             (Re.seq
+                                [
+                                  Re.str (List.hd (String.split_on_char '.' t));
+                                  Rx.re ~flags:m {|(?: [<>=!]+ \S+)? -> .+|};
+                                ]);
+                           Rx.re ~flags:m {|\n\s*(.*)$|};
+                         ])
                   in
                   List.filter_map
                     (function
@@ -1817,7 +1860,7 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
                               Util.last (Util.split_on " -> " chain),
                               String.trim why )
                       | _ -> None)
-                    (Rx.findall_groups ~flags:[ Rx.M ] pat txt))
+                    (Rx.findall_groups pat txt))
             pick
         in
         let chains = List.map (fun (chain, _, _) -> chain) conflicts in
@@ -2038,11 +2081,10 @@ let accepted_elsewhere ?(max_versions = 3) (results : Suggestion.t list) src
       let name, ver = split_pkg failing in
       if ver = "" || String.contains failing ' ' then ()
       else begin
-        let m = Rx.match_ {|x-ci-accept-failures:\s*\[([^\]]*)\]|} new_ in
+        let m = Rx.match_ ci_accept_failures_re new_ in
         let wanted =
           match m with
-          | Some m ->
-              Some (SS.of_list (Rx.findall {|"([^"]+)"|} (Rx.group m 1)))
+          | Some m -> Some (SS.of_list (Rx.findall quoted_re (Rx.group m 1)))
           | None ->
               if Util.contains new_ {|os != "win32"|} then
                 Some (SS.of_list [ "cygwin"; "msys2" ])

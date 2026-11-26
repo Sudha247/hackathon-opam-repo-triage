@@ -30,24 +30,33 @@ module U = Rx_utf8
 (* ------------------------------------------------------------------------ *)
 (* Normalisation *)
 
+let path_re = Rx.v {|(?:[A-Za-z]:)?(?:[\\/][\w.@+~-]+){2,}[\\/]?|}
+let hash_re = Rx.v {|\b[0-9a-f]{12,}\b|}
+let package_version_re = Rx.v {|\b([a-z][\w-]*)\.v?\d[\w.~+-]*|}
+let jobs_flag_re = Rx.v {|-j \d+|}
+let line_characters_re = Rx.v {|\bline \d+(, characters \d+-\d+)?|}
+let spaces_re = Rx.v {|\s+|}
+
 (** Make an error line comparable across jobs: drop versions, paths, numbers,
     hashes. *)
 let normalise s =
   let s = Util.strip ~chars:"." (String.trim s) in
   let s =
-    U.sub {|(?:[A-Za-z]:)?(?:[\\/][\w.@+~-]+){2,}[\\/]?|} "<path>" s
+    U.sub path_re "<path>" s
     (* unix + windows paths *)
   in
-  let s = U.sub {|\b[0-9a-f]{12,}\b|} "<hash>" s in
+  let s = U.sub hash_re "<hash>" s in
   (* package.version -> package   (conf-bison.2, plcairo.5.15.0.1, ocaml.4.14.4) *)
-  let s = U.sub {|\b([a-z][\w-]*)\.v?\d[\w.~+-]*|} {|\1|} s in
-  let s = U.sub {|-j \d+|} "-j N" s in
-  let s = U.sub {|\bline \d+(, characters \d+-\d+)?|} "line N" s in
-  U.sub {|\s+|} " " s
+  let s = U.sub package_version_re {|\1|} s in
+  let s = U.sub jobs_flag_re "-j N" s in
+  let s = U.sub line_characters_re "line N" s in
+  U.sub spaces_re " " s
+
+let line_prefix_re = Rx.v {|^(?:[#\-]\s?)?(?:\s*\|\s?)?|}
 
 (** Strip the prefixes opam/day10 put in front of build output ('# ', '- ', '# |
     '). *)
-let clean line = U.sub {|^(?:[#\-]\s?)?(?:\s*\|\s?)?|} "" (Util.rstrip line)
+let clean line = U.sub line_prefix_re "" (Util.rstrip line)
 
 (* ------------------------------------------------------------------------ *)
 (* Rules: (category, regex, flags, signature template, generic?). The
@@ -56,14 +65,13 @@ let clean line = U.sub {|^(?:[#\-]\s?)?(?:\s*\|\s?)?|} "" (Util.rstrip line)
 
 type rule = {
   category : string;
-  pattern : string;
-  flags : Rx.flag list;
+  pattern : Rx.t;
   template : string;
   generic : bool;
 }
 
 let r ?(generic = false) ?(flags = []) category pattern template =
-  { category; pattern; flags; template; generic }
+  { category; pattern = Rx.v ~flags pattern; template; generic }
 
 (* Searched over the whole log, before the error block. *)
 let log_rules =
@@ -153,17 +161,19 @@ let build_rules =
     r "build_error" {|\*\*\* (.*)|} "make: {1}" ~generic:true;
   ]
 
-let error_block_re = {|^#=== ERROR while (\w+) (\S+) =+#|}
+let error_block_re = Rx.v {|^#=== ERROR while (\w+) (\S+) =+#|}
 
 let block_end_re =
-  {|^(?:#===|<><>|\[ERROR\]|\[WARNING\]|Job (?:succeeded|failed)|\d{4}-\d\d-\d\d \d\d:)|}
+  Rx.v
+    {|^(?:#===|<><>|\[ERROR\]|\[WARNING\]|Job (?:succeeded|failed)|\d{4}-\d\d-\d\d \d\d:)|}
 
-let lint_re = {|^Error in (\S+?): (.*)|}
+let lint_re = Rx.v {|^Error in (\S+?): (.*)|}
+let placeholder_re = Rx.v {|\{(\d+)\}|}
 
 (** [tmpl] with [{0}] standing for the whole match, [{1}] ... for its groups
     ("None" when a group did not take part). *)
 let format tmpl m =
-  Rx.subf {|\{(\d+)\}|}
+  Rx.subf placeholder_re
     (fun g ->
       Option.value ~default:"None"
         (U.group_opt m (int_of_string (Rx.group g 1))))
@@ -200,9 +210,7 @@ let apply_rules rules lines =
     (fun rule ->
       List.find_mapi
         (fun idx l ->
-          Option.map
-            (fun m -> (rule, m, idx))
-            (U.search ~flags:rule.flags rule.pattern l))
+          Option.map (fun m -> (rule, m, idx)) (U.search rule.pattern l))
         cleaned)
     rules
 
@@ -216,10 +224,7 @@ let all_specific_signatures ?(limit = 5) lines =
       (List.find_map
          (fun rule ->
            if rule.generic then None
-           else
-             Option.map
-               (fun m -> (rule, m))
-               (U.search ~flags:rule.flags rule.pattern l))
+           else Option.map (fun m -> (rule, m)) (U.search rule.pattern l))
          build_rules)
   in
   (* line by line, until [limit] signatures are found *)
@@ -243,7 +248,8 @@ let excerpt ?(before = 8) ?(after = 6) ?(width = 300) lines idx =
        (fun l -> Util.prefix_chars l width)
        (Util.sublist ~start:lo ~stop:hi lines))
 
-let pkg_name p = U.sub {|\.v?\d[\w.~+-]*$|} "" p
+let version_suffix_re = Rx.v {|\.v?\d[\w.~+-]*$|}
+let pkg_name p = U.sub version_suffix_re "" p
 
 (* ------------------------------------------------------------------------ *)
 
@@ -289,6 +295,20 @@ let parse_variant variant =
   end
 
 let opt = Json.opt_string
+let failed_re = Rx.v {|^.*?\(failed: ?|\)$|}
+
+(* The lines naming the failing package (name.version, so that script text
+   like ${x} never matches), when the log has no error block. *)
+let failing_package_res =
+  let pkg = {|([a-z][\w+-]*\.[\w.~+-]+?)|} in
+  List.map (Rx.v ~flags:[ Rx.M ])
+    [
+      {|\[ERROR\] (?:The compilation of |The installation of )?|} ^ pkg
+      ^ "(?: failed|:)";
+      "Failed to get sources of " ^ pkg ^ ":";
+      {|dependencies failing:\s+|} ^ pkg ^ {|\s*$|};
+      "Package " ^ pkg ^ " depends on the unavailable";
+    ]
 
 let classify_job job log_text =
   let lines = Util.splitlines log_text in
@@ -374,25 +394,15 @@ let classify_job job log_text =
     (match !blocks with
     | (_, pkg, _, _) :: _ -> Dict.set_str res "failing_package" pkg
     | [] ->
-        let pkg =
-          {|([a-z][\w+-]*\.[\w.~+-]+?)|}
-          (* name.version, so script text like ${x} never matches *)
-        in
         ignore
           (List.find_map
              (fun pat ->
-               match U.search ~flags:[ Rx.M ] pat log_text with
+               match U.search pat log_text with
                | Some m ->
                    Dict.set_str res "failing_package" (U.group m 1);
                    Some ()
                | None -> None)
-             [
-               {|\[ERROR\] (?:The compilation of |The installation of )?|} ^ pkg
-               ^ "(?: failed|:)";
-               "Failed to get sources of " ^ pkg ^ ":";
-               {|dependencies failing:\s+|} ^ pkg ^ {|\s*$|};
-               "Package " ^ pkg ^ " depends on the unavailable";
-             ]));
+             failing_package_res));
     (* 1. log-wide failures that happen outside a package build *)
     let hit = apply_rules log_rules lines in
     let hit =
@@ -443,9 +453,7 @@ let classify_job job log_text =
             | None ->
                 (* 3. nothing matched: fall back to the CI's own one-line reason *)
                 let reason =
-                  match
-                    U.sub {|^.*?\(failed: ?|\)$|} "" (Dict.str job "label")
-                  with
+                  match U.sub failed_re "" (Dict.str job "label") with
                   | "" -> "unknown"
                   | s -> s
                 in

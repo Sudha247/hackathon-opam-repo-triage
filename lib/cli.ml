@@ -68,7 +68,7 @@ let logs args sha (data : data) =
         &&
         match args.match_ with
         | None | Some "" -> true
-        | Some m -> Rx.test m j.variant)
+        | Some m -> Rx.test (Rx.v m) j.variant)
       data.jobs
   in
   let sel =

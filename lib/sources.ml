@@ -177,7 +177,7 @@ let git_down src url =
 (* Remember a failure of git on [url] that a dead host gives every time (not
    offline: write_atomic writes nothing then). *)
 let note_down src url (out : Proc.result) =
-  if out.code <> 0 && Rx.test ~flags:[ Rx.I ] git_unreachable out.stderr then begin
+  if out.code <> 0 && Rx.test git_unreachable out.stderr then begin
     write_atomic (down_marker src url)
       (Util.prefix_chars (String.trim out.stderr) 300);
     Hashtbl.replace src.down url true
@@ -304,9 +304,10 @@ let tree ?(is_tag = true) src url ref =
 (* Test seam. *)
 let tree_hook = ref tree
 let tree ?is_tag src url ref = !tree_hook ?is_tag src url ref
+let https_github_com_re = Rx.v {|https://github\.com/([^/]+/[^/]+)$|}
 
 let file_at ?(is_tag = true) src url ref path =
-  match Rx.match_ {|https://github\.com/([^/]+/[^/]+)$|} url with
+  match Rx.match_ https_github_com_re url with
   | Some m ->
       (* Upstream paths may hold spaces or non-ASCII characters: quoted
        (characters allowed in a URL path are kept, so are the cache keys). *)
@@ -694,30 +695,28 @@ let doc_page src pkg version path =
   if Json.truthy d then Json.str_opt "content" d else None
 
 let defines text kind ident =
-  let i = Rx.escape ident in
+  (* the identifier between [before] and [after] *)
+  let around ?flags before after =
+    Rx.of_re (Re.seq [ Rx.re ?flags before; Re.str ident; Rx.re ?flags after ])
+  in
   let pats =
     match kind with
-    | "value" ->
-        [ Printf.sprintf {|\b(val|external|let|and)\s+(rec\s+)?%s\b|} i ]
+    | "value" -> [ around {|\b(val|external|let|and)\s+(rec\s+)?|} {|\b|} ]
     | "constructor" ->
-        [
-          Printf.sprintf {|(\||=|\[)\s*%s\b|} i;
-          Printf.sprintf {|\b%s\s+of\b|} i;
-        ]
+        [ around {|(\||=|\[)\s*|} {|\b|}; around {|\b|} {|\s+of\b|} ]
     (* a record field starts a line or follows { or ; (not `val x :`, not `~x:`) *)
     | "field" ->
-        [ Printf.sprintf {|(?m)(^|[{;])[ \t]*(mutable\s+)?%s\s*:([^:]|$)|} i ]
-    | "type" -> [ Printf.sprintf {|\btype\s+(nonrec\s+)?([^=]*\s)?%s\b|} i ]
-    | "module" -> [ Printf.sprintf {|\bmodule\s+(type\s+)?%s\b|} i ]
-    | "module-type" -> [ Printf.sprintf {|\bmodule\s+type\s+%s\b|} i ]
-    | "class" ->
-        [ Printf.sprintf {|\bclass\s+(virtual\s+)?(\[[^\]]*\]\s*)?%s\b|} i ]
-    | "class-type" ->
         [
-          Printf.sprintf {|\bclass\s+type\s+(virtual\s+)?(\[[^\]]*\]\s*)?%s\b|}
-            i;
+          around ~flags:[ Rx.M ] {|(^|[{;])[ \t]*(mutable\s+)?|}
+            {|\s*:([^:]|$)|};
         ]
-    | "exception" -> [ Printf.sprintf {|\bexception\s+%s\b|} i ]
+    | "type" -> [ around {|\btype\s+(nonrec\s+)?([^=]*\s)?|} {|\b|} ]
+    | "module" -> [ around {|\bmodule\s+(type\s+)?|} {|\b|} ]
+    | "module-type" -> [ around {|\bmodule\s+type\s+|} {|\b|} ]
+    | "class" -> [ around {|\bclass\s+(virtual\s+)?(\[[^\]]*\]\s*)?|} {|\b|} ]
+    | "class-type" ->
+        [ around {|\bclass\s+type\s+(virtual\s+)?(\[[^\]]*\]\s*)?|} {|\b|} ]
+    | "exception" -> [ around {|\bexception\s+|} {|\b|} ]
     | k -> raise (Invalid_argument ("defines: " ^ k))
   in
   List.exists (fun p -> Rx.test p text) pats
@@ -806,7 +805,8 @@ let api_kinds = function
 
 (* The tool's error when the module is documented but the item is in none of
    the versions checked: '... "x" not found in M in versions 1.0 to 2.0'. *)
-let api_not_found = {|^[\w-]+ ".*" not found in \S+ in (versions? |no version)|}
+let api_not_found =
+  Rx.v {|^[\w-]+ ".*" not found in \S+ in (versions? |no version)|}
 
 let api_history src pkg mods kind ident versions =
   if mods = [] || versions = [] then None
@@ -908,7 +908,13 @@ let module_find_max_age = 24. *. 3600.
 
 (* The most candidates ocaml_module_find searches in one call. *)
 let module_find_max_packages = 40
-let module_name = {|[A-Z][\w']*|}
+let module_name = Rx.v {|[A-Z][\w']*|}
+
+(* The shapes of the fields of ocaml.org's module search. *)
+let module_path_re = Rx.v {|[\w'.]+|}
+let package_name_re = Rx.v {|[\w+-]+|}
+let version_re = Rx.v {|[\w+.~-]+|}
+let library_name_re = Rx.v {|[\w+.-]+|}
 
 let module_providers src name packages =
   let packages = Util.take module_find_max_packages (Util.dedup packages) in
@@ -947,10 +953,10 @@ let module_providers src name packages =
                         let path =
                           String.split_on_char '.'
                             (Option.value ~default:""
-                               (field m "module" {|[\w'.]+|}))
+                               (field m "module" module_path_re))
                         in
                         if
-                          field m "package" {|[\w+-]+|} = None
+                          field m "package" package_name_re = None
                           || not
                                (List.for_all
                                   (fun c -> Rx.fullmatch module_name c <> None)
@@ -961,8 +967,8 @@ let module_providers src name packages =
                             {
                               package = Json.str "package" m;
                               module_path = path;
-                              mversion = field m "version" {|[\w+.~-]+|};
-                              library = field m "library" {|[\w+.-]+|};
+                              mversion = field m "version" version_re;
+                              library = field m "library" library_name_re;
                             }
                     | _ -> None (* a library, a module type *))
                   (Json.list "matches" d)
@@ -1001,12 +1007,14 @@ let module_providers_hook = ref module_providers
 let module_providers src name packages =
   !module_providers_hook src name packages
 
+let date_re = Rx.v {|\d{4}-\d\d-\d\d|}
+
 let published src pkg version =
   List.find_map
     (fun v ->
       if Json.str_opt "version" v = Some version then
         match Json.member "published" v with
-        | `String p when Rx.fullmatch {|\d{4}-\d\d-\d\d|} p <> None -> Some p
+        | `String p when Rx.fullmatch date_re p <> None -> Some p
         | _ -> None
       else None)
     (Option.value ~default:[] (mcp_versions src pkg))
@@ -1029,6 +1037,10 @@ let opam_file ?(ref = "master") src name version =
 (* Test seam. *)
 let opam_file_hook = ref opam_file
 let opam_file ?ref src name version = !opam_file_hook ?ref src name version
+let dev_repo_re = Rx.v ~flags:[ Rx.M ] {|^dev-repo:\s*"([^"]+)"|}
+
+let src_https_github_re =
+  Rx.v {|src:\s*"(https://(?:github|gitlab)\.com/[^"]+)"|}
 
 let upstream ?(ref = "master") src name version =
   let text =
@@ -1039,12 +1051,10 @@ let upstream ?(ref = "master") src name version =
   match text with
   | None | Some "" -> None
   | Some text -> (
-      match Rx.search ~flags:[ Rx.M ] {|^dev-repo:\s*"([^"]+)"|} text with
+      match Rx.search dev_repo_re text with
       | Some m -> repo_url (Rx.group m 1)
       | None -> (
-          match
-            Rx.search {|src:\s*"(https://(?:github|gitlab)\.com/[^"]+)"|} text
-          with
+          match Rx.search src_https_github_re text with
           | Some m -> repo_url (Rx.group m 1)
           | None -> None))
 
@@ -1098,11 +1108,12 @@ let find_baseline_commit ?(cache_dir = ".opam-ci-cache") target =
            :: Option.value ~default:[] (find_publication ~cache_dir name prev)))
 
 let ocaml_repo = "https://github.com/ocaml/ocaml"
+let release_re = Rx.v {|[45]\.\d+\.0|}
 
 let ocaml_releases src =
   let rel =
     List.filter
-      (fun t -> Rx.fullmatch {|[45]\.\d+\.0|} t <> None)
+      (fun t -> Rx.fullmatch release_re t <> None)
       (tags src ocaml_repo)
   in
   sort_versions (List.filter (fun t -> opam_vcmp t "4.08.0" >= 0) rel)
@@ -1223,16 +1234,24 @@ let bisect_presence ?(allowed = fun _ -> true) ?(cap = bisect_cap) check
             Odict.to_list evidence )
       | None -> (None, Odict.to_list evidence))
 
+let bound_re = Rx.v {|(>=|<=|>|<|=)\s*"([^"]+)"|}
+
 let existing_bounds opam_text dep =
   match
-    Rx.search ~flags:[ Rx.M ]
-      ({|^\s*"|} ^ Rx.escape dep ^ {|"\s*\{([^}]*)\}|})
+    Rx.search
+      (Rx.of_re
+         (Re.seq
+            [
+              Rx.re ~flags:[ Rx.M ] {|^\s*"|};
+              Re.str dep;
+              Rx.re ~flags:[ Rx.M ] {|"\s*\{([^}]*)\}|};
+            ]))
       (Option.value ~default:"" opam_text)
   with
   | Some m when not (String.contains (Rx.group m 1) '|') ->
       List.map
         (function [ op; v ] -> (op, v) | _ -> assert false)
-        (Rx.findall_groups {|(>=|<=|>|<|=)\s*"([^"]+)"|} (Rx.group m 1))
+        (Rx.findall_groups bound_re (Rx.group m 1))
   | _ -> []
 
 let satisfies v bounds =
@@ -1248,12 +1267,21 @@ let satisfies v bounds =
       | _ -> false)
     bounds
 
-let norm s = Rx.sub "[-_]" "" (String.lowercase_ascii s)
+let separator_re = Rx.v "[-_]"
+let norm s = Rx.sub separator_re "" (String.lowercase_ascii s)
+let lower_bound_term = Rx.v {|(>=|>)\s*"|}
+let upper_bound_term = Rx.v {|(<=|<)\s*"|}
 
 let constraint_edit opam_text dep op version =
   let m =
-    Rx.search ~flags:[ Rx.M ]
-      ({|^([ \t]*)"|} ^ Rx.escape dep ^ {|"[ \t]*(\{([^}]*)\})?[^\n]*$|})
+    Rx.search
+      (Rx.of_re
+         (Re.seq
+            [
+              Rx.re ~flags:[ Rx.M ] {|^([ \t]*)"|};
+              Re.str dep;
+              Rx.re ~flags:[ Rx.M ] {|"[ \t]*(\{([^}]*)\})?[^\n]*$|};
+            ]))
       (Option.value ~default:"" opam_text)
   in
   let new_term = Printf.sprintf {|%s "%s"|} op version in
@@ -1269,7 +1297,7 @@ let constraint_edit opam_text dep op version =
         else
           let terms = List.map String.trim (String.split_on_char '&' filt) in
           let drop =
-            if op = ">=" || op = ">" then {|(>=|>)\s*"|} else {|(<=|<)\s*"|}
+            if op = ">=" || op = ">" then lower_bound_term else upper_bound_term
           in
           List.filter (fun t -> not (Rx.test_match drop t)) terms
       in
@@ -1277,15 +1305,17 @@ let constraint_edit opam_text dep op version =
         Printf.sprintf {|"%s" {%s}|} dep
           (String.concat " & " (terms @ [ new_term ])) )
 
+let spaces_re = Rx.v {|\s+|}
+let neither_name_names_re = Rx.v "Neither the name|names of its contributors"
+
 let license_id text =
-  let t = Rx.sub {|\s+|} " " (Option.value ~default:"" text) in
+  let t = Rx.sub spaces_re " " (Option.value ~default:"" text) in
   let has = Util.contains t in
   if has "Permission is hereby granted, free of charge" then Some "MIT"
   else if has "Apache License" && has "Version 2.0" then Some "Apache-2.0"
   else if has "Redistribution and use in source and binary forms" then
     Some
-      (if Rx.test "Neither the name|names of its contributors" t then
-         "BSD-3-Clause"
+      (if Rx.test neither_name_names_re t then "BSD-3-Clause"
        else "BSD-2-Clause")
   else if
     has "Permission to use, copy, modify, and/or distribute"
@@ -1306,17 +1336,22 @@ let license_id text =
 
 let opam_field text field =
   match
-    Rx.search ~flags:[ Rx.M ]
-      ("^" ^ Rx.escape field ^ {|:\s*"([^"]*)"|})
+    Rx.search
+      (Rx.of_re
+         (Re.seq
+            [
+              Rx.re ~flags:[ Rx.M ] "^";
+              Re.str field;
+              Rx.re ~flags:[ Rx.M ] {|:\s*"([^"]*)"|};
+            ]))
       (Option.value ~default:"" text)
   with
   | Some m -> Some (Rx.group m 1)
   | None -> None
 
+let url_src_re = Rx.v ~flags:[ Rx.M; Rx.S ] {|^url\s*\{.*?\bsrc:\s*"([^"]+)"|}
+
 let url_src text =
-  match
-    Rx.search ~flags:[ Rx.M; Rx.S ] {|^url\s*\{.*?\bsrc:\s*"([^"]+)"|}
-      (Option.value ~default:"" text)
-  with
+  match Rx.search url_src_re (Option.value ~default:"" text) with
   | Some m -> Some (Rx.group m 1)
   | None -> None

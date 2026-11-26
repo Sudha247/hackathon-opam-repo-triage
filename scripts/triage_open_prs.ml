@@ -492,6 +492,9 @@ let set_count (net : counts) k v =
     List.map (fun (k', x) -> if k' = k then (k', v) else (k', x)) net
   else net @ [ (k, v) ]
 
+let network_requests_re = Rx.v "network requests: (.*)"
+let count_re = Rx.v {|([\w-]+)=(\d+)|}
+
 let run_tool ?tool args timeout : Json.t option * string option * counts =
   let counts = Filename.temp_file "opam-ci-net-" ".json" in
   let tool = match tool with Some t -> t | None -> tool_path () in
@@ -518,11 +521,11 @@ let run_tool ?tool args timeout : Json.t option * string option * counts =
   | Error net -> (None, Some (Printf.sprintf "timeout after %ds" timeout), net)
   | Ok (p, net) -> (
       let net =
-        match Rx.search "network requests: (.*)" p.stderr with
+        match Rx.search network_requests_re p.stderr with
         | Some m when net = [] ->
             List.map
               (function [ k; v ] -> (k, int_of_string v) | _ -> assert false)
-              (Rx.findall_groups {|([\w-]+)=(\d+)|} (Rx.group m 1))
+              (Rx.findall_groups count_re (Rx.group m 1))
         | _ -> net
       in
       if p.code <> 0 then begin
@@ -611,7 +614,7 @@ let save_state path (prs : (string * Dict.t) list) =
 let shared_min =
   3 (* other open PRs a failure must also appear in to be marked *)
 
-let revdep_job = "(?:^|,)([^,]+),revdeps,([^,]+)"
+let revdep_job = Rx.v "(?:^|,)([^,]+),revdeps,([^,]+)"
 
 let job_platform variant =
   match Rx.search revdep_job (Option.value ~default:"" variant) with
@@ -907,6 +910,8 @@ let args_term =
     $ limit $ state $ out $ cache_dir $ max $ timeout $ time_budget $ llm_max
     $ llm_budget)
 
+let negative_number_re = Rx.v "-[0-9]+"
+
 (* cmdliner reads a negative number after an option as another option: join
    them ("--time-budget -1" as "--time-budget=-1"). Every option takes a
    value. *)
@@ -915,7 +920,7 @@ let join_negative_values argv =
     | o :: v :: rest
       when String.starts_with ~prefix:"--" o
            && (not (String.contains o '='))
-           && Rx.fullmatch "-[0-9]+" v <> None ->
+           && Rx.fullmatch negative_number_re v <> None ->
         (o ^ "=" ^ v) :: go rest
     | x :: rest -> x :: go rest
     | [] -> []

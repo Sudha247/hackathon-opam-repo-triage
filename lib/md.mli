@@ -15,7 +15,7 @@ val md_text : ?limit:int -> string -> string
 (** Untrusted prose as one line of inert Markdown, cut to [limit] characters of
     the original text (before escaping, so no escape is cut in half). *)
 
-val sha_re : string
+val sha_re : Rx.t
 (** A pattern matching an abbreviated or full commit sha. *)
 
 val ci_job_url : string -> string -> string -> string option

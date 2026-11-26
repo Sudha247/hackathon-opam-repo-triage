@@ -25,6 +25,8 @@ let rule_error (job : job) e jobs =
         `Keep;
       ])
 
+let warning_error_re = Rx.v {|\b(warning|error)\s+(\d+):|}
+
 (** The warning and error codes [opam lint] reports for an opam file, or None
     without opam. *)
 let lint_codes text =
@@ -45,14 +47,16 @@ let lint_codes text =
         (List.sort_uniq compare
            (List.map
               (function [ k; n ] -> k ^ " " ^ n | _ -> "")
-              (Rx.findall_groups {|\b(warning|error)\s+(\d+):|}
-                 (p.stdout ^ p.stderr))))
+              (Rx.findall_groups warning_error_re (p.stdout ^ p.stderr))))
 
 let first_part r =
   String.trim
     (List.hd
        (Util.split_on ~maxsplit:1 "   "
           (Suggestion.str_field r.Suggestion.new_)))
+
+let quoted_name_re = Rx.v {|"[\w+-]+"|}
+let depends_re = Rx.v ~flags:[ Rx.M ] {|^(depends:\s*\[)\s*$|}
 
 let applied text r =
   let new_ = first_part r in
@@ -61,23 +65,25 @@ let applied text r =
       Some (Util.replace ~count:1 text old new_)
   | _ ->
       if
-        Rx.test_match {|"[\w+-]+"|} new_
+        Rx.test_match quoted_name_re new_
         && Util.contains
              (Suggestion.str_field r.Suggestion.new_)
              "new line in depends"
       then
         Some
-          (Rx.subf ~count:1 {|(?m)^(depends:\s*\[)\s*$|}
+          (Rx.subf ~count:1 depends_re
              (fun m -> Rx.group m 1 ^ "\n  " ^ new_)
              text)
       else None
+
+let dependency_filter_re = Rx.v {|\s*"([\w+-]+)"\s*\{([^}]*)\}|}
 
 let check_changes results src sha pr_packages =
   List.iter
     (fun r ->
       let new_ = Suggestion.str_field r.Suggestion.new_ in
       let problem =
-        match Rx.match_ {|\s*"([\w+-]+)"\s*\{([^}]*)\}|} new_ with
+        match Rx.match_ dependency_filter_re new_ with
         | Some m when not (String.contains (Rx.group m 2) '|') -> (
             let dep = Rx.group m 1
             and terms = Constraints.version_terms (Rx.group m 2) in

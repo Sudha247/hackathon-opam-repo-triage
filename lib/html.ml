@@ -80,10 +80,13 @@ let cp1252 = function
   | 0x9F -> 0x0178
   | u -> u
 
+let xx_fa_za_re =
+  Rx.v {|&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[A-Za-z][A-Za-z0-9]*;?)|}
+
 let unescape s =
   if not (String.contains s '&') then s
   else
-    Rx.subf {|&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[A-Za-z][A-Za-z0-9]*;?)|}
+    Rx.subf xx_fa_za_re
       (fun m ->
         let r = Rx.group m 1 in
         let r' = Util.rstrip ~chars:";" r in

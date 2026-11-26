@@ -1,11 +1,16 @@
-(** Regular expressions with the syntax and matching rules of Python's [re]
-    module (the syntax the rules and their tests are written in), on ocaml-re.
+(** Regular expressions on ocaml-re, in Perl syntax as [Re.Perl] reads it.
 
-    Patterns are strings, compiled on first use and memoised. Supported:
-    Python's syntax as ocaml-re's Perl parser reads it, with leading inline
-    flags ([(?m)], [(?i)], [(?s)]), [(?P<name>...)] groups, [\Z], and [$]
-    matching at the end or before a final newline. Lookaround and backreferences
-    are not supported: they raise [Invalid_argument].
+    Static patterns are top-level values, compiled when their module is
+    initialised ([v]): a pattern [Re.Perl] cannot parse (lookaround,
+    backreferences) fails then, with a message naming it. Patterns that include
+    data (a package or module name) are built with Re's combinators, the data as
+    [Re.str], which needs no escaping ([re] and [of_re]).
+
+    [$] matches at the end of the text or before a final newline, as in Perl and
+    Python, unless the flag [M] makes it match at every line end. The functions
+    follow Python's [re] module, which the tool was first written with: [match_]
+    anchors at the start, [findall] returns the groups, [sub] takes a [\1] /
+    [\g<name>] template.
 
     Matching is on bytes: [\w], [\s] and character classes do not see a
     non-ASCII character as one character (see {!Rx_utf8}). *)
@@ -15,34 +20,51 @@ type flag =
   | M  (** multi-line: [^] and [$] match at line boundaries *)
   | S  (** [.] matches a newline *)
 
+type t
+(** A compiled pattern. *)
+
 type m
 (** A match. *)
 
+(** {1 Compiling} *)
+
+val v : ?flags:flag list -> string -> t
+(** [v pattern] compiles a pattern; static patterns are compiled once, as
+    top-level values. Raises [Invalid_argument] naming the pattern if it cannot
+    be parsed. *)
+
+val re : ?flags:flag list -> string -> Re.t
+(** A pattern as an [Re.t], to combine with others (e.g. with [Re.str] for a
+    name taken from the data, which then needs no escaping). *)
+
+val of_re : Re.t -> t
+(** Compiles a combined pattern. *)
+
 (** {1 Searching} *)
 
-val search : ?flags:flag list -> ?pos:int -> string -> string -> m option
+val search : ?pos:int -> t -> string -> m option
 (** The first match at or after [pos]. *)
 
-val match_ : ?flags:flag list -> ?pos:int -> string -> string -> m option
+val match_ : ?pos:int -> t -> string -> m option
 (** A match starting at [pos]. *)
 
-val fullmatch : ?flags:flag list -> string -> string -> m option
+val fullmatch : t -> string -> m option
 (** A match of the whole string. *)
 
-val test : ?flags:flag list -> string -> string -> bool
+val test : t -> string -> bool
 (** Does the pattern occur in the string? *)
 
-val test_match : ?flags:flag list -> string -> string -> bool
+val test_match : t -> string -> bool
 (** Does the string start with a match of the pattern? *)
 
-val finditer : ?flags:flag list -> string -> string -> m list
+val finditer : t -> string -> m list
 (** The non-overlapping matches, in order. *)
 
-val findall : ?flags:flag list -> string -> string -> string list
+val findall : t -> string -> string list
 (** The non-overlapping matches: the whole match if the pattern has no group,
     else the first group's value ([""] when it did not take part). *)
 
-val findall_groups : ?flags:flag list -> string -> string -> string list list
+val findall_groups : t -> string -> string list list
 (** The non-overlapping matches, as the values of all the groups. *)
 
 (** {1 Groups} *)
@@ -70,19 +92,14 @@ val span : ?i:int -> m -> int * int
 
 (** {1 Substituting and splitting} *)
 
-val subf :
-  ?flags:flag list -> ?count:int -> string -> (m -> string) -> string -> string
+val subf : ?count:int -> t -> (m -> string) -> string -> string
 (** The matches replaced with [f m] (the first [count] ones, if positive). *)
 
-val sub : ?flags:flag list -> ?count:int -> string -> string -> string -> string
+val sub : ?count:int -> t -> string -> string -> string
 (** The matches replaced with a template: [\1], [\g<1>], [\g<name>] stand for
     groups; [\n], [\t], [\r] for those characters, and a doubled backslash for a
     backslash. *)
 
-val split : ?flags:flag list -> ?maxsplit:int -> string -> string -> string list
+val split : ?maxsplit:int -> t -> string -> string list
 (** The parts between the matches, each followed by the values of the pattern's
     groups (at most [maxsplit] splits, if positive). *)
-
-val escape : string -> string
-(** The string with every character but ASCII letters, digits, [_] and non-ASCII
-    bytes escaped: a pattern matching it literally. *)

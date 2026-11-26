@@ -7,18 +7,23 @@ let installed_of (info : info) dep = List.assoc_opt dep info.installed
 let is_installed (info : info) dep = List.mem_assoc dep info.installed
 
 (* The forms of an unbound identifier in a compiler error. *)
+(* The messages of unbound identifiers: the text before the name, its kind,
+   and whether "type " may follow (Unbound class, Unbound module: then it is
+   a class or module type, matched by its own line). *)
 let unbound_res =
-  [
-    ({|Unbound value [`"']?([\w.']+)|}, "value", false);
-    ({|Unbound constructor [`"']?([\w.']+)|}, "constructor", false);
-    ({|Unbound record field [`"']?([\w.']+)|}, "field", false);
-    ({|Unbound type constructor [`"']?([\w.']+)|}, "type", false);
-    ({|Unbound module type [`"']?([\w.']+)|}, "module-type", false);
-    ({|Unbound class type [`"']?([\w.']+)|}, "class-type", false);
-    (* Python: Unbound class (?!type )... and Unbound module (?!type )... *)
-    ({|Unbound class [`"']?([\w.']+)|}, "class", true);
-    ({|Unbound module [`"']?([\w.']+)|}, "module", true);
-  ]
+  List.map
+    (fun (prefix, kind, not_type) ->
+      (prefix, Rx.v (prefix ^ {|[`"']?([\w.']+)|}), kind, not_type))
+    [
+      ("Unbound value ", "value", false);
+      ("Unbound constructor ", "constructor", false);
+      ("Unbound record field ", "field", false);
+      ("Unbound type constructor ", "type", false);
+      ("Unbound module type ", "module-type", false);
+      ("Unbound class type ", "class-type", false);
+      ("Unbound class ", "class", true);
+      ("Unbound module ", "module", true);
+    ]
 
 (* The standard library's sources, read for the releases ocaml.org's API history cannot tell. *)
 let stdlib_sources = "OCaml's stdlib .mli files"
@@ -34,12 +39,13 @@ let not_searched = [ "ocaml"; "dune"; "ocamlfind" ]
 (* How recent a dependency's release must be, before the job, to be
    suspected of removing a module. *)
 let recent_release_days = 30
+let log_date_re = Rx.v ~flags:[ Rx.M ] {|^(\d{4}-\d\d-\d\d) \d\d:\d\d|}
 
 (** The date of a job (days since the epoch), from the first timestamp of its
     log (today if none). *)
 let job_date text =
   let today () = Option.get (Date.days_of_date (Date.today ())) in
-  match Rx.search ~flags:[ Rx.M ] {|^(\d{4}-\d\d-\d\d) \d\d:\d\d|} text with
+  match Rx.search log_date_re text with
   | Some m -> (
       match Date.days_of_date (Rx.group m 1) with
       | Some d -> d
@@ -143,15 +149,14 @@ let module_find_note (found : S.module_find option) top (info : info) opam_text
                (if List.length no_docs > 5 then ", ..." else "")
            else "")
 
+let there_field_within_re =
+  Rx.v {|There is no field (\w+) within type [`"']?([\w.]+)|}
+
 let find_unbound lines =
   let text = String.concat "\n" lines in
   let found =
     List.find_map
-      (fun (rx, kind, not_type) ->
-        let prefix =
-          List.hd (String.split_on_char '[' rx)
-          (* "Unbound class " *)
-        in
+      (fun (prefix, rx, kind, not_type) ->
         let ok m =
           not
             (not_type
@@ -172,16 +177,15 @@ let find_unbound lines =
   match found with
   | Some r -> Some r
   | None -> (
-      match
-        Rx.search {|There is no field (\w+) within type [`"']?([\w.]+)|} text
-      with
+      match Rx.search there_field_within_re text with
       | Some m ->
           let parts = String.split_on_char '.' (Rx.group m 2) in
           Some ("field", Util.take (List.length parts - 1) parts, Rx.group m 1)
       | None -> None)
 
 let toplevel_line =
-  {|^[-+]\s*(val [\w'.]+ :|- : |type |module |exception |Line \d+, characters |Characters \d+-\d+|Error: |Warning \d+)|}
+  Rx.v
+    {|^[-+]\s*(val [\w'.]+ :|- : |type |module |exception |Line \d+, characters |Characters \d+-\d+|Error: |Warning \d+)|}
 
 (** Changed lines of a test diff, if most of them are OCaml toplevel output (mdx
     [# expr;;] answers, types, error locations). *)
@@ -206,62 +210,108 @@ let toplevel_diff err =
 (* C/C++ errors that newer compilers introduced: code that built with an
    older GCC fails on recent distributions (debian-13, fedora, archlinux, ...). *)
 let newer_cc =
-  [
-    ( {|error: .*\[-W(implicit-int|implicit-function-declaration|incompatible-pointer-types|int-conversion|return-mismatch|declaration-missing-parameter-type)\]|},
-      "GCC 14 turned -W{0} into an error by default: the C code relies on \
-       pre-C99 rules",
-      "Fix the C code upstream. For an old release, add a patch or \
-       `x-maintained: false`; adding -fpermissive or -Wno-error={0} to the C \
-       flags also works." );
-    ( {|'u?int(?:8|16|32|64)_t' (?:does not name a type|was not declared in this scope|has not been declared)|is defined in header '<cstdint>'|},
-      "Since GCC 13, libstdc++ headers no longer include <cstdint> for you",
-      "Add `#include <cstdint>` upstream, or a patch in the opam file for an \
-       old release." );
-    ( {|(?:cannot use keyword|expected identifier or '\(' before) '(?:bool|true|false)'|'bool' cannot be defined via 'typedef'|},
-      "GCC 15 compiles C as C23 by default, where bool, true and false are \
-       keywords",
-      "Fix the C code upstream, or build it with -std=gnu17." );
-    ( {|error: .*\[-Werror=([\w-]+?)=?\]|},
-      "The package builds with -Werror, and a newer compiler emits a new \
-       warning (-W{0})",
-      "Drop -Werror from release builds upstream. For an old release, add a \
-       patch or `x-maintained: false`." );
-  ]
+  List.map
+    (fun (pattern, cause, fix) -> (Rx.v pattern, cause, fix))
+    [
+      ( {|error: .*\[-W(implicit-int|implicit-function-declaration|incompatible-pointer-types|int-conversion|return-mismatch|declaration-missing-parameter-type)\]|},
+        "GCC 14 turned -W{0} into an error by default: the C code relies on \
+         pre-C99 rules",
+        "Fix the C code upstream. For an old release, add a patch or \
+         `x-maintained: false`; adding -fpermissive or -Wno-error={0} to the C \
+         flags also works." );
+      ( {|'u?int(?:8|16|32|64)_t' (?:does not name a type|was not declared in this scope|has not been declared)|is defined in header '<cstdint>'|},
+        "Since GCC 13, libstdc++ headers no longer include <cstdint> for you",
+        "Add `#include <cstdint>` upstream, or a patch in the opam file for an \
+         old release." );
+      ( {|(?:cannot use keyword|expected identifier or '\(' before) '(?:bool|true|false)'|'bool' cannot be defined via 'typedef'|},
+        "GCC 15 compiles C as C23 by default, where bool, true and false are \
+         keywords",
+        "Fix the C code upstream, or build it with -std=gnu17." );
+      ( {|error: .*\[-Werror=([\w-]+?)=?\]|},
+        "The package builds with -Werror, and a newer compiler emits a new \
+         warning (-W{0})",
+        "Drop -Werror from release builds upstream. For an old release, add a \
+         patch or `x-maintained: false`." );
+    ]
+
+let trailing_number_re = Rx.v {|\d+$|}
 
 (** Version of the system package providing [lib], from the depext installation
     lines of a log (apt, dnf/yum, apk, pacman, zypper). *)
 let system_package_version text lib =
+  (* each pattern is (flags, before, after): the package's name goes between *)
   let pats =
     [
-      {|Setting up (?:lib)?{0}[\w.+-]*?(?:-dev)?:\w+ \(([^)]+)\)|};
+      ([], {|Setting up (?:lib)?|}, {|[\w.+-]*?(?:-dev)?:\w+ \(([^)]+)\)|});
       (* apt *)
-      {|(?m)^[-\s]*(?:lib)?{0}[\w+-]*?-devel\s+\w+\s+(\d\S*)\s|};
+      ([ Rx.M ], {|^[-\s]*(?:lib)?|}, {|[\w+-]*?-devel\s+\w+\s+(\d\S*)\s|});
       (* dnf table *)
-      {|Installing\s*:\s*(?:lib)?{0}[\w+-]*?-devel-(\d[^\s]*)|};
-      {|Installing (?:lib)?{0}[\w+-]*? \(([^)]+)\)|};
+      ([], {|Installing\s*:\s*(?:lib)?|}, {|[\w+-]*?-devel-(\d[^\s]*)|});
+      ([], {|Installing (?:lib)?|}, {|[\w+-]*? \(([^)]+)\)|});
       (* apk *)
-      {|installing (?:lib)?{0} \(([^)]+)\)|} (* pacman *);
+      ([], {|installing (?:lib)?|}, {| \(([^)]+)\)|}) (* pacman *);
     ]
   in
   List.find_map
     (fun name ->
       List.find_map
-        (fun pat ->
-          match
-            Rx.search ~flags:[ Rx.I ]
-              (Util.replace pat "{0}" (Rx.escape name))
-              text
-          with
-          | Some m -> Some (Rx.group m 1)
-          | None -> None)
+        (fun (flags, before, after) ->
+          let pat =
+            Rx.of_re
+              (Re.no_case
+                 (Re.seq
+                    [ Rx.re ~flags before; Re.str name; Rx.re ~flags after ]))
+          in
+          Option.map (fun m -> Rx.group m 1) (Rx.search pat text))
         pats)
-    (Util.dedup [ lib; Rx.sub {|\d+$|} "" lib ])
+    (Util.dedup [ lib; Rx.sub trailing_number_re "" lib ])
 
 type ctx = {
   pr_packages : string list;
   full_text : string;
   job_variant : string;
 }
+
+let such_function_unixepoch_re = Rx.v "no such function: unixepoch"
+let lib_meta_such_re = Rx.v {|/lib/([\w+-]+)/META: No such file or directory|}
+
+let undefined_reference_re =
+  Rx.v {|undefined reference to (?:[`']|‘)?([\w.$@]+)|}
+
+let collect2_ld_returned_re =
+  Rx.v {|collect2|ld returned|linker command failed|/ld:|}
+
+let unsupported_option_target_re =
+  Rx.v {|unsupported option '(-m[\w=-]+)' for target '(arm64|aarch64)[^']*'|}
+
+let execve_such_file_re =
+  Rx.v {|execve\((\./[\w./-]+)\): No such file or directory|}
+
+let exception_stack_overflow_re = Rx.v "exception Stack overflow"
+let could_find_python3_re = Rx.v {|Could NOT find Python3?\b[^\n]*|}
+let fatal_git_repository_re = Rx.v "fatal: not a git repository"
+let git_describe_rev_re = Rx.v "git (describe|rev-parse|log)"
+let error_program_library_re = Rx.v "Error: (Program|Library) "
+
+let cannot_create_regular_re =
+  Rx.v
+    {|cannot create (?:regular file|directory) '?(/usr/[^':\s]*)'?: Read-only file system|}
+
+let known_cycle_counting_re = Rx.v "No known cycle-counting instruction"
+let core_kernel_shadows_re = Rx.v {|Core_kernel shadows Unix|Core_kernel\.Unix|}
+let unbound_constructor_value_re = Rx.v "Unbound (constructor|value)"
+let unbound_value_conv_re = Rx.v {|Unbound value Conv\.(\w+)|}
+let checking_ar_re = Rx.v {|checking for ar\.\.\. no|}
+
+let notforredeclaration_member_clang_re =
+  Rx.v
+    {|'NotForRedeclaration' is not a member of 'clang::Sema'|has no member named 'getOriginalNamespace'|}
+
+let libclang_dev_re = Rx.v {|libclang-(\d+)-dev|}
+
+let expected_type_string_re =
+  Rx.v
+    {|the expected type is\s+(?:# )?string option \* Parsetree\.(expression|pattern|core_type)|}
 
 (** Failures with a recognisable message and a known cause. *)
 let known_errors text full fname opam_text (info : info) (ctx : ctx)
@@ -270,7 +320,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
   Util.first_some
     [
       (fun () ->
-        if Rx.test "no such function: unixepoch" text then
+        if Rx.test such_function_unixepoch_re text then
           let have = system_package_version full "sqlite3" in
           Some
             [
@@ -292,9 +342,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             ]
         else None);
       (fun () ->
-        match
-          Rx.search {|/lib/([\w+-]+)/META: No such file or directory|} text
-        with
+        match Rx.search lib_meta_such_re text with
         | Some m when Rx.group m 1 <> fname ->
             let pkg = Rx.group m 1 in
             Some
@@ -316,12 +364,8 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         | _ -> None);
       (fun () ->
         (* Python: undefined reference to [`'‘]?([\w.$@]+) *)
-        match
-          Rx.search {|undefined reference to (?:[`']|‘)?([\w.$@]+)|} text
-        with
-        | Some m
-          when Rx.test {|collect2|ld returned|linker command failed|/ld:|} text
-          ->
+        match Rx.search undefined_reference_re text with
+        | Some m when Rx.test collect2_ld_returned_re text ->
             let sym = Rx.group m 1 in
             let hint =
               if sym = "core_unix_gettid" then
@@ -347,11 +391,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
               ]
         | _ -> None);
       (fun () ->
-        match
-          Rx.search
-            {|unsupported option '(-m[\w=-]+)' for target '(arm64|aarch64)[^']*'|}
-            text
-        with
+        match Rx.search unsupported_option_target_re text with
         | Some m ->
             Some
               [
@@ -371,9 +411,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
               ]
         | None -> None);
       (fun () ->
-        match
-          Rx.search {|execve\((\./[\w./-]+)\): No such file or directory|} text
-        with
+        match Rx.search execve_such_file_re text with
         | Some m when dims.os = "freebsd" ->
             let p = Rx.group m 1 in
             Some
@@ -393,7 +431,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         | _ -> None);
       (fun () ->
         if
-          Rx.test "exception Stack overflow" text
+          Rx.test exception_stack_overflow_re text
           && Util.contains ctx.job_variant "flambda"
         then
           Some
@@ -410,7 +448,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             ]
         else None);
       (fun () ->
-        match Rx.search {|Could NOT find Python3?\b[^\n]*|} text with
+        match Rx.search could_find_python3_re text with
         | Some m ->
             let r =
               [
@@ -441,9 +479,9 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         | None -> None);
       (fun () ->
         if
-          Rx.test "fatal: not a git repository" text
-          && Rx.test "git (describe|rev-parse|log)" text
-          && not (Rx.test "Error: (Program|Library) " text)
+          Rx.test fatal_git_repository_re text
+          && Rx.test git_describe_rev_re text
+          && not (Rx.test error_program_library_re text)
           (* another cause, with git noise *)
         then
           Some
@@ -462,11 +500,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             ]
         else None);
       (fun () ->
-        match
-          Rx.search
-            {|cannot create (?:regular file|directory) '?(/usr/[^':\s]*)'?: Read-only file system|}
-            text
-        with
+        match Rx.search cannot_create_regular_re text with
         | Some m ->
             Some
               [
@@ -484,7 +518,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
               ]
         | None -> None);
       (fun () ->
-        if Rx.test "No known cycle-counting instruction" text then
+        if Rx.test known_cycle_counting_re text then
           let arch = dims.arch in
           let fname =
             match info.failing with Some (n, v) -> n ^ "." ^ v | None -> fname
@@ -509,8 +543,8 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
         else None);
       (fun () ->
         if
-          Rx.test {|Core_kernel shadows Unix|Core_kernel\.Unix|} text
-          && Rx.test "Unbound (constructor|value)" text
+          Rx.test core_kernel_shadows_re text
+          && Rx.test unbound_constructor_value_re text
         then
           Some
             [
@@ -531,7 +565,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             ]
         else None);
       (fun () ->
-        match Rx.search {|Unbound value Conv\.(\w+)|} text with
+        match Rx.search unbound_value_conv_re text with
         | Some m
           when match List.assoc_opt "cmdliner" installed with
                | Some v -> opam_vcmp v "2.0.0" >= 0
@@ -556,7 +590,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
               ]
         | _ -> None);
       (fun () ->
-        if Rx.test {|checking for ar\.\.\. no|} text && dims.os = "win32" then
+        if Rx.test checking_ar_re text && dims.os = "win32" then
           Some
             [
               `Rule "platform-unsupported";
@@ -574,14 +608,10 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             ]
         else None);
       (fun () ->
-        match
-          Rx.search
-            {|'NotForRedeclaration' is not a member of 'clang::Sema'|has no member named 'getOriginalNamespace'|}
-            text
-        with
+        match Rx.search notforredeclaration_member_clang_re text with
         | Some m ->
             let clang =
-              match Rx.search {|libclang-(\d+)-dev|} full with
+              match Rx.search libclang_dev_re full with
               | Some c -> Some (Rx.group c 1)
               | None -> None
             in
@@ -608,11 +638,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
               ]
         | None -> None);
       (fun () ->
-        if
-          Rx.test
-            {|the expected type is\s+(?:# )?string option \* Parsetree\.(expression|pattern|core_type)|}
-            text
-        then
+        if Rx.test expected_type_string_re text then
           let old, new_ = S.constraint_edit opam_text "ocaml" "<" "5.4" in
           Some
             [
@@ -662,15 +688,20 @@ let c_compiler_rule text platform =
       | None -> None)
     newer_cc
 
+let depexts_re = Rx.v ~flags:[ Rx.M ] {|^depexts:|}
+let field_start_re = Rx.v ~flags:[ Rx.M ] {|^[a-z][\w-]*:|}
+let quoted_re = Rx.v {|"([^"]+)"|}
+let depext_entry_re = Rx.v {|(\[[^\]]*\]|"[^"]*")\s*(?:\{([^}]*)\})?|}
+
 let depext_entries opam_text =
   let t = Option.value ~default:"" opam_text in
-  match Rx.search {|(?m)^depexts:|} t with
+  match Rx.search depexts_re t with
   | None -> None
   | Some m ->
       let rest =
         String.trim
           (List.hd
-             (Rx.split ~maxsplit:1 {|(?m)^[a-z][\w-]*:|}
+             (Rx.split ~maxsplit:1 field_start_re
                 (Util.slice ~start:(Rx.end_ m) t)))
       in
       let rest =
@@ -681,9 +712,9 @@ let depext_entries opam_text =
       Some
         (List.map
            (function
-             | [ pkgs; flt ] -> (Rx.findall {|"([^"]+)"|} pkgs, flt)
+             | [ pkgs; flt ] -> (Rx.findall quoted_re pkgs, flt)
              | _ -> assert false)
-           (Rx.findall_groups {|(\[[^\]]*\]|"[^"]*")\s*(?:\{([^}]*)\})?|} rest))
+           (Rx.findall_groups depext_entry_re rest))
 
 let conf_without_depext fname opam_text (info : info) (ctx : ctx) job platform =
   if
@@ -693,8 +724,13 @@ let conf_without_depext fname opam_text (info : info) (ctx : ctx) job platform =
   else
     let m =
       Rx.search
-        ({|The compilation of |} ^ Rx.escape fname
-       ^ {|\.\S+ failed at "([^"\n]*)"|})
+        (Rx.of_re
+           (Re.seq
+              [
+                Rx.re {|The compilation of |};
+                Re.str fname;
+                Rx.re {|\.\S+ failed at "([^"\n]*)"|};
+              ]))
         ctx.full_text
     in
     match (m, depext_entries opam_text) with
@@ -845,6 +881,51 @@ let conf_depext_platforms (r : Suggestion.t) (jobs : (string, job) Hashtbl.t) =
     end
   end
 
+let implicit_declaration_function_re =
+  Rx.v {|implicit declaration of function (?:'|‘)?(caml_\w+)|}
+
+let maximum_version_llvm_re =
+  Rx.v {|maximum_version=(\d+)[\s\S]*?llvm_version=(\d[\w.]*)|}
+
+let usable_version_llvm_re =
+  Rx.v {|No usable version of LLVM <= ([\d.x]+) found|}
+
+let pkg_config_atleast_re =
+  Rx.v
+    {|pkg-config (?:--atleast-version[= ](\S+)|--exact-version[= ](\S+)|--max-version[= ](\S+)) ([\w.+-]+)\)?\s*\n(?:.*\n){0,2}?.*(?:exited with code|exit status) 1|}
+
+let requested_but_version_re =
+  Rx.v
+    {|Requested '([\w.+-]+) (>=|<=|=) ([\w.~+-]+)' but version of .* is ([\w.~+-]+)|}
+
+let version_dune_language_re =
+  Rx.v {|Version (\d+\.\d+) of the dune language is not supported|}
+
+let distro_version_re = Rx.v {|[-\d]|}
+let filtered_list_re = Rx.v {|\[([^\]]*)\]\s*\{([^}]*)\}|}
+
+let package_was_found_re =
+  Rx.v {|Package (\S+) was not found in the pkg-config search path|}
+
+let configure_error_pc_re = Rx.v {|configure: error: ([\w.+-]+)\.pc not found|}
+let library_found_re = Rx.v {|Library "([\w.-]+)" not found|}
+let package_found_re = Rx.v {|Package `([\w.-]+)' not found|}
+let tests_re = Rx.v {|(^|/)tests?/|}
+
+let fatal_error_such_re =
+  Rx.v {|fatal error: ([\w/.+-]+): No such file or directory|}
+
+(* The messages of a missing tool, its name in group 1. *)
+let missing_tool_messages =
+  List.map Rx.v
+    [
+      {|Program "?([\w.+-]+)"? not found in the tree or in PATH|};
+      {|"([\w.+-]+)": command not found|};
+      {|([\w.+-]+): command not found|};
+      {|Command not found: ([\w.+-]+)|};
+    ]
+  @ [ Rx.v ~flags:[ Rx.M ] {|^\S*?([\w.+-]+): (?:command )?not found$|} ]
+
 let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
   let text = String.concat "\n" err in
   let deps = direct_deps opam_text in
@@ -858,9 +939,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
     [
       (fun () ->
         (* Python: implicit declaration of function ['‘]?(caml_\w+) *)
-        match
-          Rx.search {|implicit declaration of function (?:'|‘)?(caml_\w+)|} text
-        with
+        match Rx.search implicit_declaration_function_re text with
         | Some m ->
             let ocaml = Option.value ~default:"this OCaml" info.ocaml in
             let f = Rx.group m 1 in
@@ -890,10 +969,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
           (if ctx.full_text <> "" then ctx.full_text else text)
           fname opam_text info ctx dims platform deps);
       (fun () ->
-        match
-          Rx.search {|maximum_version=(\d+)[\s\S]*?llvm_version=(\d[\w.]*)|}
-            text
-        with
+        match Rx.search maximum_version_llvm_re text with
         | Some m
           when let major = List.hd (String.split_on_char '.' (Rx.group m 2)) in
                match
@@ -923,9 +999,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
               ]
         | _ -> None);
       (fun () ->
-        match
-          Rx.search {|No usable version of LLVM <= ([\d.x]+) found|} text
-        with
+        match Rx.search usable_version_llvm_re text with
         | Some m ->
             Some
               [
@@ -942,11 +1016,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
         | None -> None);
       (fun () ->
         let found =
-          match
-            Rx.search
-              {|pkg-config (?:--atleast-version[= ](\S+)|--exact-version[= ](\S+)|--max-version[= ](\S+)) ([\w.+-]+)\)?\s*\n(?:.*\n){0,2}?.*(?:exited with code|exit status) 1|}
-              text
-          with
+          match Rx.search pkg_config_atleast_re text with
           | Some m ->
               let want =
                 match Rx.group_opt m 1 with
@@ -964,11 +1034,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
               let lib = Rx.group m 4 in
               Some (lib, op, want, system_package_version ctx.full_text lib)
           | None -> (
-              match
-                Rx.search
-                  {|Requested '([\w.+-]+) (>=|<=|=) ([\w.~+-]+)' but version of .* is ([\w.~+-]+)|}
-                  text
-              with
+              match Rx.search requested_but_version_re text with
               | Some m ->
                   Some
                     ( Rx.group m 1,
@@ -1007,10 +1073,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
               ]
         | None -> None);
       (fun () ->
-        match
-          Rx.search {|Version (\d+\.\d+) of the dune language is not supported|}
-            text
-        with
+        match Rx.search version_dune_language_re text with
         | Some m ->
             let old, new_ =
               S.constraint_edit opam_text "dune" ">=" (Rx.group m 1)
@@ -1027,15 +1090,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
         | None -> None);
       (fun () ->
         let m =
-          List.find_map
-            (fun p -> Rx.search p text)
-            [
-              {|Program "?([\w.+-]+)"? not found in the tree or in PATH|};
-              {|"([\w.+-]+)": command not found|};
-              {|([\w.+-]+): command not found|};
-              {|Command not found: ([\w.+-]+)|};
-              {|(?m)^\S*?([\w.+-]+): (?:command )?not found$|};
-            ]
+          List.find_map (fun p -> Rx.search p text) missing_tool_messages
         in
         let m =
           match m with
@@ -1055,7 +1110,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             let conf = "conf-" ^ tool in
             let r = [ `Rule "missing-tool"; `Error (Rx.group0 m) ] in
             let distro = Option.value ~default:"" dims.distro in
-            let family = List.hd (Rx.split {|[-\d]|} distro) in
+            let family = List.hd (Rx.split distro_version_re distro) in
             let field_text name =
               let t = Option.value ~default:"" opam_text in
               if not (Util.contains t (name ^ ":")) then ""
@@ -1063,11 +1118,11 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
                 let rest =
                   match Util.partition t (name ^ ":") with _, _, r -> r
                 in
-                List.hd (Rx.split ~maxsplit:1 {|(?m)^[a-z][\w-]*:|} rest)
+                List.hd (Rx.split ~maxsplit:1 field_start_re rest)
             in
             let depexts_text = field_text "depexts" in
             let accepted =
-              Rx.findall {|"([^"]+)"|} (field_text "x-ci-accept-failures")
+              Rx.findall quoted_re (field_text "x-ci-accept-failures")
             in
             let declared =
               List.filter_map
@@ -1077,7 +1132,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
                         Some (String.trim pk)
                       else None
                   | _ -> None)
-                (Rx.findall_groups {|\[([^\]]*)\]\s*\{([^}]*)\}|} depexts_text)
+                (Rx.findall_groups filtered_list_re depexts_text)
             in
             let is_conf = String.starts_with ~prefix:"conf-" fname in
             Some
@@ -1165,13 +1220,9 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
                        ]));
       (fun () ->
         let m =
-          match
-            Rx.search
-              {|Package (\S+) was not found in the pkg-config search path|} text
-          with
+          match Rx.search package_was_found_re text with
           | Some m -> Some m
-          | None ->
-              Rx.search {|configure: error: ([\w.+-]+)\.pc not found|} text
+          | None -> Rx.search configure_error_pc_re text
         in
         match m with
         | None -> None
@@ -1225,9 +1276,9 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
                        ]));
       (fun () ->
         let m =
-          match Rx.search {|Library "([\w.-]+)" not found|} text with
+          match Rx.search library_found_re text with
           | Some m -> Some m
-          | None -> Rx.search {|Package `([\w.-]+)' not found|} text
+          | None -> Rx.search package_found_re text
         in
         match m with
         | None -> None
@@ -1237,7 +1288,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             let pkg =
               Option.value ~default:pkg0 (List.assoc_opt pkg0 findlib_packages)
             in
-            let in_tests = Rx.test {|(^|/)tests?/|} text in
+            let in_tests = Rx.test tests_re text in
             let r = [ `Rule "missing-library"; `Error (Rx.group0 m) ] in
             let siblings =
               List.fold_left
@@ -1353,9 +1404,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
                           `Confidence "medium";
                         ])));
       (fun () ->
-        match
-          Rx.search {|fatal error: ([\w/.+-]+): No such file or directory|} text
-        with
+        match Rx.search fatal_error_such_re text with
         | Some m ->
             Some
               [
@@ -1390,6 +1439,18 @@ let version_ints r =
     (fun x -> Option.value ~default:0 (int_of_string_opt x))
     (String.split_on_char '.' r)
 
+let these_packages_are_re = Rx.v "These packages are still missing: (.+)"
+
+let segmentation_fault_bus_re =
+  Rx.v
+    {|(Segmentation fault|Bus error|Illegal instruction)\s+(day10[\w-]*|obuilder[\w-]*)|}
+
+let runc_run_failed_re = Rx.v {|runc run failed: [^\n]{0,120}|}
+
+let http_error_code_re =
+  Rx.v
+    {|HTTP error code (5\d\d|429)|Could not resolve host|Connection (?:reset|timed out)|}
+
 (* Failures of the CI rather than of the build: a system package missing
    from the distribution, a crash of the CI tool, a container that did not
    start, a network error. *)
@@ -1398,7 +1459,7 @@ let ci_failure job text (info : info) pr_packages =
   Util.first_some
     [
       (fun () ->
-        match Rx.search "These packages are still missing: (.+)" text with
+        match Rx.search these_packages_are_re text with
         | Some m when info.failing = None ->
             let names = Util.split (Rx.group m 1) in
             let dims = job_dims job in
@@ -1434,11 +1495,7 @@ let ci_failure job text (info : info) pr_packages =
                 ])
         | _ -> None);
       (fun () ->
-        match
-          Rx.search
-            {|(Segmentation fault|Bus error|Illegal instruction)\s+(day10[\w-]*|obuilder[\w-]*)|}
-            text
-        with
+        match Rx.search segmentation_fault_bus_re text with
         | Some m ->
             Some
               [
@@ -1450,7 +1507,7 @@ let ci_failure job text (info : info) pr_packages =
               ]
         | None -> None);
       (fun () ->
-        if Rx.test {|runc run failed: [^\n]{0,120}|} text then
+        if Rx.test runc_run_failed_re text then
           Some
             [
               `Rule "transient";
@@ -1461,11 +1518,7 @@ let ci_failure job text (info : info) pr_packages =
             ]
         else None);
       (fun () ->
-        match
-          Rx.search
-            {|HTTP error code (5\d\d|429)|Could not resolve host|Connection (?:reset|timed out)|}
-            text
-        with
+        match Rx.search http_error_code_re text with
         | Some m when info.failing = None ->
             Some
               [
@@ -1489,6 +1542,8 @@ type build = {
   opam_text : string option;
 }
 
+let remove_re = Rx.v ~flags:[ Rx.M ] {|^remove:|}
+
 (* opam reinstalls a package at the same version (a "recompile" in the
      plan, e.g. after downgrading its dependencies) and removes it first;
      for a package with a [remove:] field, the rebuild then runs in an empty
@@ -1501,22 +1556,33 @@ let same_version_reinstall (b : build) =
   let plan =
     List.find_opt
       (fun m -> not (Util.contains (Rx.group m 1) "pinned"))
-      (Rx.finditer ~flags:[ Rx.M ]
-         (Printf.sprintf {|^\s*- recompile\s+%s\s+%s\s+(.*)$|} (Rx.escape fname)
-            (Rx.escape fver))
+      (Rx.finditer
+         (Rx.of_re
+            (Re.seq
+               [
+                 Rx.re ~flags:[ Rx.M ] {|^\s*- recompile\s+|};
+                 Re.str fname;
+                 Rx.re {|\s+|};
+                 Re.str fver;
+                 Rx.re ~flags:[ Rx.M ] {|\s+(.*)$|};
+               ]))
          text)
   in
   let removed =
     match plan with
     | Some p ->
-        Rx.test ~flags:[ Rx.M ]
-          (Printf.sprintf {|^-> removed\s+%s\.%s\s*$|} (Rx.escape fname)
-             (Rx.escape fver))
+        Rx.test
+          (Rx.of_re
+             (Re.seq
+                [
+                  Rx.re ~flags:[ Rx.M ] {|^-> removed\s+|};
+                  Re.str (fname ^ "." ^ fver);
+                  Rx.re ~flags:[ Rx.M ] {|\s*$|};
+                ]))
           (Util.slice ~start:(Rx.end_ p) text)
     | None -> false
   in
-  if removed && Rx.test {|(?m)^remove:|} (Option.value ~default:"" opam_text)
-  then
+  if removed && Rx.test remove_re (Option.value ~default:"" opam_text) then
     Some
       ([ `Rule "opam-same-version-reinstall"; `Confidence "high" ]
       @ Where.fix_where "ci" "opam (the CI's opam version)"
@@ -1549,15 +1615,21 @@ type install_failure =
       string list
       * string (* the earlier build errors, and the failure in words *)
 
+let to_re = Rx.v {|/([^/\s]+) to /|}
+let error_error_parse_re = Rx.v {|\bError\b|error:|Parse error|fatal error|}
+
+let error_report_error_re =
+  Rx.v {|Error report|\[ERROR\] The (compilation|installation)|}
+
+let output_mark_re = Rx.v "^[-#] ?"
+
 let install_failure text (info : info) =
   let err = info.error_lines in
   if
     info.action = Some "installing"
     && List.exists (fun l -> Util.contains l "couldn't be installed") err
   then begin
-    let missing =
-      List.concat_map (fun l -> Rx.findall {|/([^/\s]+) to /|} l) err
-    in
+    let missing = List.concat_map (fun l -> Rx.findall to_re l) err in
     let exts =
       Util.counter
         (List.map
@@ -1569,11 +1641,9 @@ let install_failure text (info : info) =
       List.filter_map
         (fun l ->
           if
-            Rx.test {|\bError\b|error:|Parse error|fatal error|} l
-            && not
-                 (Rx.test
-                    {|Error report|\[ERROR\] The (compilation|installation)|} l)
-          then Some (String.trim (Rx.sub ~count:1 "^[-#] ?" "" l))
+            Rx.test error_error_parse_re l
+            && not (Rx.test error_report_error_re l)
+          then Some (String.trim (Rx.sub ~count:1 output_mark_re "" l))
           else None)
         (Util.splitlines (Util.slice ~stop:cut text))
     in
@@ -1594,14 +1664,15 @@ let install_failure text (info : info) =
   end
   else None
 
+let has_type_string_re =
+  Rx.v ~flags:[ Rx.M ]
+    {|has type\s+string\s+but an expression was expected of type\s*$|}
+
+let bytes_re = Rx.v {|=?\s*bytes|}
+
 (* A string used where bytes are expected: safe-string. *)
 let safe_string err_text opam_text =
-  if
-    Rx.test ~flags:[ Rx.M ]
-      {|has type\s+string\s+but an expression was expected of type\s*$|}
-      err_text
-    && Rx.test {|=?\s*bytes|} err_text
-  then
+  if Rx.test has_type_string_re err_text && Rx.test bytes_re err_text then
     let old, new_ = S.constraint_edit opam_text "ocaml" "<" "4.06" in
     Some
       [
@@ -1616,21 +1687,24 @@ let safe_string err_text opam_text =
       ]
   else None
 
+let diff_git_git_re = Rx.v {|(diff --git|--- |\S*git --no-pager diff)|}
+
 (* In a test diff (cram/mdx), errors are part of the expected or actual
    output: only the lines before the diff are compiler errors. *)
 let compiler_errors (info : info) err =
   if info.test_diff then
     let cut =
-      match
-        List.find_index
-          (Rx.test_match {|(diff --git|--- |\S*git --no-pager diff)|})
-          err
-      with
+      match List.find_index (Rx.test_match diff_git_git_re) err with
       | Some i -> i
       | None -> List.length err
     in
     Util.take cut err
   else err
+
+let ocaml_re =
+  Rx.v ~flags:[ Rx.M ] {|^[ \t]*"ocaml"[ \t]*(?:\{([^}]*)\})?[^\n]*$|}
+
+let test_re = Rx.v {|\(<\s*"[^"]+"\s*\|\s*!with-test\)|}
 
 (* A test output diff (cram/mdx). *)
 let test_output (info : info) err opam_text =
@@ -1641,17 +1715,13 @@ let test_output (info : info) err opam_text =
       let mm =
         String.concat "." (Util.take 2 (String.split_on_char '.' ocaml))
       in
-      let m =
-        Rx.search ~flags:[ Rx.M ]
-          {|^[ \t]*"ocaml"[ \t]*(?:\{([^}]*)\})?[^\n]*$|}
-          (Option.value ~default:"" opam_text)
-      in
+      let m = Rx.search ocaml_re (Option.value ~default:"" opam_text) in
       let term = Printf.sprintf {|< "%s" | !with-test|} mm in
       let filt =
         match m with Some m -> String.trim (Rx.group m 1) | None -> ""
       in
       let new_ =
-        match Rx.search {|\(<\s*"[^"]+"\s*\|\s*!with-test\)|} filt with
+        match Rx.search test_re filt with
         | Some prev ->
             (* already disabled from a later version: lower it *)
             Printf.sprintf {|"ocaml" {%s}|}
@@ -1847,6 +1917,10 @@ let stdlib_bound (b : build) out kind mods ident top =
   end
   else false
 
+let dependency_name_re = Rx.v ~flags:[ Rx.M ] {|^\s*"([\w+-]+)"|}
+let module_prefix_re = Rx.v {|\b([A-Z]\w+)\.|}
+let file_tests_re = Rx.v ~flags:[ Rx.M ] {|^File "(?:[^"]*/)?tests?/|}
+
 (* An unbound identifier from a library: the bound on the dependency that
    adds or removes it. *)
 let library_bound (b : build) out err_text kind mods ident top =
@@ -1869,7 +1943,7 @@ let library_bound (b : build) out err_text kind mods ident top =
          Why3). Rank the direct dependencies by the module names in
          the error text. *)
         let block = depends_block ~close:"]" ot in
-        let deps = Rx.findall ~flags:[ Rx.M ] {|^\s*"([\w+-]+)"|} block in
+        let deps = Rx.findall dependency_name_re block in
         let deps =
           List.filter
             (fun d ->
@@ -1878,7 +1952,7 @@ let library_bound (b : build) out err_text kind mods ident top =
             deps
         in
         let mentioned =
-          List.map S.norm (Rx.findall {|\b([A-Z]\w+)\.|} err_text)
+          List.map S.norm (Rx.findall module_prefix_re err_text)
         in
         Util.sort_by
           (fun d ->
@@ -1959,9 +2033,7 @@ let library_bound (b : build) out err_text kind mods ident top =
           in
           let new_, note =
             if old = None then
-              let tests =
-                Rx.test ~flags:[ Rx.M ] {|^File "(?:[^"]*/)?tests?/|} err_text
-              in
+              let tests = Rx.test file_tests_re err_text in
               ( Printf.sprintf {|"%s" {%s< "%s"}   (new line in depends)|} pkg
                   (if tests then "with-test & " else "")
                   bad,
@@ -2382,6 +2454,9 @@ let changelog_excerpt src dep since until : Suggestion.Changelog.t option =
           extra = [];
         }
 
+let dependency_line_re = Rx.v ~flags:[ Rx.M ] {|^\s*"([\w+-]+)"([^\n]*)$|}
+let build_doc_dev_re = Rx.v {|\b(build|with-doc|with-dev-setup)\b|}
+
 (** No passing job to compare with: dependencies whose installed version was
     released after the failing package itself are candidates for having changed
     its test output. Bound: before their first release after that date. Cost:
@@ -2402,7 +2477,7 @@ let dated_candidates ?(max_lookups = 8) src (r : Suggestion.t) (bad : info)
       let dep_lines =
         List.map
           (function [ d; rest ] -> (d, rest) | _ -> assert false)
-          (Rx.findall_groups ~flags:[ Rx.M ] {|^\s*"([\w+-]+)"([^\n]*)$|} block)
+          (Rx.findall_groups dependency_line_re block)
       in
       let blob = String.lowercase_ascii (String.concat "\n" bad.error_lines) in
       let deps =
@@ -2411,7 +2486,7 @@ let dated_candidates ?(max_lookups = 8) src (r : Suggestion.t) (bad : info)
             if
               (not (List.mem d trivial_deps))
               && is_installed bad d
-              && not (Rx.test {|\b(build|with-doc|with-dev-setup)\b|} rest)
+              && not (Rx.test build_doc_dev_re rest)
             then Some d
             else None)
           dep_lines
@@ -2509,7 +2584,7 @@ let complete_test_output ?(fetch = fun url cache_dir -> Net.fetch url cache_dir)
                (match bad.base with Some b when b <> "" -> b | _ -> "master")
              src fname fver)
       in
-      let deps = Rx.findall ~flags:[ Rx.M ] {|^\s*"([\w+-]+)"|} opam_text in
+      let deps = Rx.findall dependency_name_re opam_text in
       let diffs =
         List.filter_map
           (fun (p, v) ->
@@ -2567,7 +2642,8 @@ let complete_test_output ?(fetch = fun url cache_dir -> Net.fetch url cache_dir)
 
 (* opam's plan lines: "- downgrade dune 3.24.2 to 3.15.3 [required by miaou-core]". *)
 let plan_line =
-  {|^\s*- (install|downgrade|upgrade|recompile)\s+([\w+-]+)\s+(\S+)(?:\s+to\s+(\S+))?[^\[\n]*(?:\[(?:required by|uses) ([^\]]*)\])?|}
+  Rx.v ~flags:[ Rx.M ]
+    {|^\s*- (install|downgrade|upgrade|recompile)\s+([\w+-]+)\s+(\S+)(?:\s+to\s+(\S+))?[^\[\n]*(?:\[(?:required by|uses) ([^\]]*)\])?|}
 
 (** (name -> (from, to) for the downgraded packages, name -> packages requiring
     it). *)
@@ -2590,8 +2666,10 @@ let opam_plan text =
           in
           Odict.set required_by name (List.sort_uniq compare (cur @ add))
       | _ -> ())
-    (Rx.finditer ~flags:[ Rx.M ] plan_line text);
+    (Rx.finditer plan_line text);
   (Odict.to_list downgraded, Odict.to_list required_by)
+
+let name_re = Rx.v {|\b([A-Za-z][\w-]+)|}
 
 let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
     Suggestion.t option =
@@ -2725,7 +2803,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
           (* B: the package itself fails, and no rule explains the error. *)
           let err = String.concat "\n" info.error_lines in
           let mentioned =
-            Util.dedup (List.map S.norm (Rx.findall {|\b([A-Za-z][\w-]+)|} err))
+            Util.dedup (List.map S.norm (Rx.findall name_re err))
           in
           let named d =
             let n = S.norm d in
@@ -2787,6 +2865,11 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
           end
         end
 
+let upper_bound_re = Rx.v {|(<=?)\s*"([^"]+)"|}
+
+let filtered_dependency_re =
+  Rx.v ~flags:[ Rx.M ] {|^[ \t]*"([\w+-]+)"[ \t]*\{([^}]*)\}[^\n]*$|}
+
 (** dependency -> (line, [(op, version)...]) for the dependencies with an upper
     bound (< or <=) in an opam file's depends. *)
 let upper_bounds opam_text =
@@ -2797,13 +2880,23 @@ let upper_bounds opam_text =
       let ups =
         List.map
           (function [ a; b ] -> (a, b) | _ -> assert false)
-          (Rx.findall_groups {|(<=?)\s*"([^"]+)"|} (Rx.group m 2))
+          (Rx.findall_groups upper_bound_re (Rx.group m 2))
       in
       if ups <> [] then
         Odict.set out (Rx.group m 1) (String.trim (Rx.group0 m), ups))
-    (Rx.finditer ~flags:[ Rx.M ] {|^[ \t]*"([\w+-]+)"[ \t]*\{([^}]*)\}[^\n]*$|}
-       block);
+    (Rx.finditer filtered_dependency_re block);
   Odict.to_list out
+
+let error_context_path_re =
+  Rx.v
+    {|\s*(=== ERROR|context |path |command |exit-code |env-file |output-file |## output|\(cd _build|\[\.\.\.)|}
+
+let dune_language_lang_re =
+  Rx.v ~flags:[ Rx.I ] {|dune language|lang dune|dune-project|version of dune|}
+
+let file_re = Rx.v {|File "[^"]*"|}
+let path_re = Rx.v {|(?:[\w.+-]*/)+[\w.+-]+|}
+let identifier_re = Rx.v {|[A-Za-z][\w-]+|}
 
 (** Does the error itself (not the command that failed) name the package [dep],
     or a module of it? *)
@@ -2811,24 +2904,20 @@ let error_mentions (info : info) dep =
   let lines =
     List.filter
       (fun l ->
-        (not
-           (Rx.test_match
-              {|\s*(=== ERROR|context |path |command |exit-code |env-file |output-file |## output|\(cd _build|\[\.\.\.)|}
-              l))
+        (not (Rx.test_match error_context_path_re l))
         && not (Util.contains l "dune build"))
       info.error_lines
   in
   let text = String.concat "\n" lines in
   if dep = "dune" then
     (* named in many errors ("your dune file"): only a dune version problem counts *)
-    Rx.test ~flags:[ Rx.I ]
-      {|dune language|lang dune|dune-project|version of dune|} text
+    Rx.test dune_language_lang_re text
   else
-    let text = Rx.sub {|File "[^"]*"|} "" text in
+    let text = Rx.sub file_re "" text in
     (* dune's locations: File "src/dune", line 3 *)
-    let text = Rx.sub {|(?:[\w.+-]*/)+[\w.+-]+|} "" text in
+    let text = Rx.sub path_re "" text in
     (* paths *)
-    let words = List.map S.norm (Rx.findall {|[A-Za-z][\w-]+|} text) in
+    let words = List.map S.norm (Rx.findall identifier_re text) in
     let d = S.norm dep in
     List.mem d words
     || String.length d >= 4
@@ -2842,6 +2931,11 @@ type prev_release = {
       (* the [upper_bounds] of each *)
   cur_up : (string * (string * (string * string) list)) list;
 }
+
+let dependency_re =
+  Rx.v ~flags:[ Rx.M ] {|^[ \t]*"([\w+-]+)"[ \t]*(?:\{([^}]*)\})?|}
+
+let lower_bound_re = Rx.v {|>=?\s*"([^"]+)"|}
 
 let previous_release_bound src job (info : info) pr_packages pr_sha
     (cache : (string, prev_release option) Hashtbl.t) : Suggestion.t option =
@@ -2889,15 +2983,14 @@ let previous_release_bound src job (info : info) pr_packages pr_sha
             let cur_lines = Odict.create () in
             List.iter
               (fun m -> Odict.set cur_lines (Rx.group m 1) (Rx.group m 2))
-              (Rx.finditer ~flags:[ Rx.M ]
-                 {|^[ \t]*"([\w+-]+)"[ \t]*(?:\{([^}]*)\})?|} block);
+              (Rx.finditer dependency_re block);
             List.find_map
               (fun (dep, (line, ups)) ->
                 if List.mem_assoc dep cur_up then None
                 else
                   let cl = Option.value ~default:"" (Odict.get cur_lines dep) in
-                  let mentioned = Rx.findall {|"([^"]+)"|} cl in
-                  let lowers = Rx.findall {|>=?\s*"([^"]+)"|} cl in
+                  let mentioned = Rx.findall quoted_re cl in
+                  let lowers = Rx.findall lower_bound_re cl in
                   if
                     List.exists (fun (_, v) -> List.mem v mentioned) ups
                     || List.exists

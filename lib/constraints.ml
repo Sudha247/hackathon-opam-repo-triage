@@ -5,7 +5,7 @@
    in the formula or after one of the characters {&|( . That character is
    consumed (ocaml-re has no lookbehind), which makes no difference, as a
    match never ends with one. *)
-let version_term = {|(?:^|[{&|(])\s*(<=|>=|!=|<|>|=)\s*"([^"]+)"|}
+let version_term = Rx.v {|(?:^|[{&|(])\s*(<=|>=|!=|<|>|=)\s*"([^"]+)"|}
 
 let version_terms s =
   List.map

@@ -18,7 +18,7 @@ let matrix_groups jobs match_ =
          &&
          match match_ with
          | None | Some "" -> true
-         | Some m -> Rx.test m j.variant)
+         | Some m -> Rx.test (Rx.v m) j.variant)
        jobs)
 
 let sorted_strings l = List.sort_uniq compare l
@@ -140,6 +140,7 @@ let cygwin_pkg =
 
 let keys_of js = List.map failure_key js
 let variants js = List.map (fun j -> j.variant) js
+let program_re = Rx.v {|(?:Program "?|")([\w.+-]+)|}
 
 let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
     match_ pr_packages =
@@ -394,8 +395,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                               && r.rule = Some "missing-tool"
                             then
                               tool :=
-                                Rx.search {|(?:Program "?|")([\w.+-]+)|}
-                                  (Suggestion.str r.error))
+                                Rx.search program_re (Suggestion.str r.error))
                           earlier;
                         let dep =
                           match !tool with
@@ -526,6 +526,9 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
     groups;
   List.rev !out
 
+let dependency_re = Rx.v {|the dependency \S+|}
+let in_re = Rx.v {|\(in (\S+)\)|}
+
 let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
   let sig_ r =
     let rule = Suggestion.str r.rule in
@@ -535,7 +538,7 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
       else Suggestion.str r.error
     in
     ( rule,
-      Rx.sub {|the dependency \S+|} "a dependency" pattern,
+      Rx.sub dependency_re "a dependency" pattern,
       if rule = "compiler-matrix" then
         List.hd (Util.split_on "   " (Suggestion.str_field r.Suggestion.new_))
       else "" )
@@ -571,7 +574,7 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
             let code, _, hint =
               Util.partition (Suggestion.str_field r0.Suggestion.new_) "   "
             in
-            let m = Rx.fullmatch {|\(in (\S+)\)|} (String.trim hint) in
+            let m = Rx.fullmatch in_re (String.trim hint) in
             let fix =
               match m with
               | Some m when code <> "" ->

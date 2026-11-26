@@ -1003,10 +1003,12 @@ let test_pending_summary_failed_keeps_failed_analysis () =
    can go in a run, its stderr lines, the run's counters (the [run] member
    of the page's data, in their order) and the state saved. *)
 
+let seconds_re = Rx.v {|\(\d+\.\ds;|}
+
 (** What the last run printed on stderr, with the seconds and the temporary
     directory masked. *)
 let run_err e =
-  Rx.sub {|\(\d+\.\ds;|} "(Ns;"
+  Rx.sub seconds_re "(Ns;"
     (In_channel.with_open_bin (err_file e) In_channel.input_all)
   |> fun s ->
   Util.replace s e.tmp "TMP" |> String.split_on_char '\n'

@@ -14,7 +14,9 @@ let group_key j =
   else Key (failure_key j)
 
 let matches match_ variant =
-  match match_ with None | Some "" -> true | Some m -> Rx.test m variant
+  match match_ with
+  | None | Some "" -> true
+  | Some m -> Rx.test (Rx.v m) variant
 
 let distinct_failures jobs match_ =
   let cats = [ "build"; "build-or-test"; "solver"; "dependency" ] in
@@ -77,6 +79,7 @@ let keys_of (r : Suggestion.t) =
 (* Test seams. *)
 let fetch_hook = ref (fun url cache_dir -> Net.fetch url cache_dir)
 let suggest_for_job_hook = ref Rules.suggest_for_job
+let windows_freebsd_macos_re = Rx.v "Windows|freebsd|macos"
 
 let suggest sha (data : data) src cache_dir max_logs match_ llm =
   let pr_packages =
@@ -453,7 +456,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
       (fun r ->
         if
           String.starts_with ~prefix:"platform-matrix" (Suggestion.str r.rule)
-          && Rx.test "Windows|freebsd|macos" (Suggestion.str r.error)
+          && Rx.test windows_freebsd_macos_re (Suggestion.str r.error)
         then
           r.note <-
             Some

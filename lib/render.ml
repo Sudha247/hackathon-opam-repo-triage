@@ -268,6 +268,8 @@ let jobs_note r =
   let n = List.length (Suggestion.list r.Suggestion.jobs) in
   if n > 1 then Printf.sprintf "%d failed jobs" n else ""
 
+let sentence_end_re = Rx.v {|[.!?]\s|}
+
 (** [s] on one line, cut to [limit] characters at the end of a sentence when
     there is one in the second half, else with "…" (by md_text). *)
 let cut s limit =
@@ -276,14 +278,16 @@ let cut s limit =
   else
     (* Python: [.!?](?=\s) in s[:limit + 1] *)
     let p = Util.prefix_chars s (limit + 1) in
-    let ends = List.map (fun m -> Rx.end_ m - 1) (Rx.finditer {|[.!?]\s|} p) in
+    let ends =
+      List.map (fun m -> Rx.end_ m - 1) (Rx.finditer sentence_end_re p)
+    in
     (* Ends in characters: the byte offset of the end of the punctuation. *)
     match Util.last_opt ends with
     | Some e when Util.char_length (String.sub p 0 e) > limit / 2 ->
         String.sub p 0 e
     | _ -> s
 
-let release_date = {|release date of (\S+) \((\d{4}-\d\d-\d\d)\)$|}
+let release_date = Rx.v {|release date of (\S+) \((\d{4}-\d\d-\d\d)\)$|}
 
 let compared_text ?year r =
   let cw = match r.compared_with with Some s when s <> "" -> s | _ -> "?" in
@@ -341,12 +345,14 @@ let evidence_text (ev : (string * bool option) list) =
     sorted;
   String.concat ", " (List.rev !parts)
 
+let verdict_re = Rx.v {|(\w+)(?: \((.*)\))?$|}
+
 (** 'possible causes (low confidence): dependencies released after …' for the
     candidates of a suggestion. *)
 let confidence_text r =
   let c = Suggestion.str_field r.confidence in
   let word, why =
-    match Rx.match_ {|(\w+)(?: \((.*)\))?$|} c with
+    match Rx.match_ verdict_re c with
     | Some m -> (Rx.group m 1, Rx.group_opt m 2)
     | None ->
         ( (match Suggestion.get r.confidence with Some v -> v | None -> "None"),
@@ -413,6 +419,9 @@ let evidence_line ?(limit = 600) r =
       "Defined in each version: " ^ Md.md_text ~limit (evidence_text ev)
   | _ -> Md.md_text ~limit (cut (Suggestion.str r.note) limit)
 
+let version_like_re = Rx.v {|[\w.+~-]{1,40}|}
+let name_like_re = Rx.v {|[\w+.-]{1,80}|}
+
 let changelog_details (c : Suggestion.Candidate.t) =
   let text, versions =
     match c.changelog with
@@ -423,12 +432,12 @@ let changelog_details (c : Suggestion.Candidate.t) =
   in
   (* The versions come from the changelog's headings: keep version-like ones only. *)
   let versions =
-    List.filter (fun v -> Rx.fullmatch {|[\w.+~-]{1,40}|} v <> None) versions
+    List.filter (fun v -> Rx.fullmatch version_like_re v <> None) versions
   in
   (* The summary is in an HTML block (no Markdown, no escaping): a package name or nothing. *)
   let dep =
     match c.dep with
-    | Some d when Rx.fullmatch {|[\w+.-]{1,80}|} d <> None -> d
+    | Some d when Rx.fullmatch name_like_re d <> None -> d
     | _ -> "a dependency"
   in
   "<details><summary>"
@@ -436,6 +445,9 @@ let changelog_details (c : Suggestion.Candidate.t) =
   ^ "</summary>\n\n"
   ^ Md.md_fence ~lang:"text" text
   ^ "\n\n</details>"
+
+let aside_re = Rx.v {|\s{2,}\(|}
+let jobs_re = Rx.v {|\d+ jobs?|}
 
 let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
     ~unanalysed sha (results : Suggestion.t list) =
@@ -566,7 +578,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
             (* also without [new]: a change described in the note. Python: \s{2,}(?=\() *)
             let a = Suggestion.str r.alternative in
             let alt =
-              match Rx.search {|\s{2,}\(|} a with
+              match Rx.search aside_re a with
               | Some m ->
                   [
                     String.sub a 0 (Rx.start m);
@@ -628,7 +640,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
         in
         [
           Printf.sprintf "**%s**" title;
-          (if Rx.fullmatch {|\d+ jobs?|} job <> None then "" else Md.md_text job);
+          (if Rx.fullmatch jobs_re job <> None then "" else Md.md_text job);
         ]
     in
     let w =
@@ -728,12 +740,14 @@ let render_comment ?placed ?placed_lines sha (data : data) results =
   render_comment_counts ?placed ?placed_lines ~unfinished:data.unfinished
     ~njobs:(List.length data.jobs) ~unanalysed:data.unanalysed sha results
 
+let hunk_header_re = Rx.v {|@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@|}
+
 (** Line numbers (new side) a review comment can be attached to. *)
 let commentable_lines patch =
   let lines = ref [] and nw = ref 0 in
   List.iter
     (fun l ->
-      match Rx.match_ {|@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@|} l with
+      match Rx.match_ hunk_header_re l with
       | Some m -> nw := int_of_string (Rx.group m 1)
       | None ->
           if String.starts_with ~prefix:"-" l then ()
@@ -746,6 +760,9 @@ let commentable_lines patch =
     (Util.splitlines (Option.value ~default:"" patch));
   !lines
 
+let leading_space_re = Rx.v {|\s*|}
+let field_name_re = Rx.v {|([a-z][\w-]*):|}
+
 (** [(line number, replacement)] for a fix on the file [text], or []. *)
 let line_edits r text =
   let lines = Array.of_list (Util.splitlines (Option.value ~default:"" text)) in
@@ -755,7 +772,7 @@ let line_edits r text =
       (List.hd (Util.split_on "   " (Suggestion.str_field r.Suggestion.new_)))
   in
   let indent l =
-    match Rx.match_ {|\s*|} l with Some m -> Rx.group0 m | None -> ""
+    match Rx.match_ leading_space_re l with Some m -> Rx.group0 m | None -> ""
   in
   let find_index p =
     let rec go i =
@@ -813,7 +830,7 @@ let line_edits r text =
         | _ -> [])
     end
   else
-    match Rx.match_ {|([a-z][\w-]*):|} new_ with
+    match Rx.match_ field_name_re new_ with
     | Some _ ->
         (* new field: after a related one *)
         let count c l = List.length (String.split_on_char c l) - 1 in

@@ -797,6 +797,8 @@ let record names =
       Printf.printf "  fixture size: %d KiB\n%!" (du d / 1024))
     names
 
+let miss_mcp_re = Rx.v ~flags:[ Rx.M ] "^  miss: mcp (.*)$"
+
 (** Add to existing fixtures the ocaml.org MCP answers they miss (after a change
     that makes new MCP calls), without fetching anything else again. *)
 let top_up ?(rounds = 4) names =
@@ -808,9 +810,7 @@ let top_up ?(rounds = 4) names =
       (try
          for _ = 1 to rounds do
            let out = run case in
-           let misses =
-             Rx.findall ~flags:[ Rx.M ] "^  miss: mcp (.*)$" out.stderr
-           in
+           let misses = Rx.findall miss_mcp_re out.stderr in
            let others =
              List.filter
                (fun l ->

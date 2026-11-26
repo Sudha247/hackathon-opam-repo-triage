@@ -99,13 +99,17 @@ let initial_commit pr =
 
 module S = Set.Make (String)
 
+let quoted_name_re = Rx.v {|"([\w+-]+)"|}
+let field_name_re = Rx.v {|([a-z][\w-]*):|}
+let sha256_sha512_md5_re = Rx.v "(sha256|sha512|md5)="
+
 (** What a changed opam line is about: a dependency name or a field name. *)
 let line_tokens line =
   let t = String.trim line in
-  match Rx.match_ {|"([\w+-]+)"|} t with
+  match Rx.match_ quoted_name_re t with
   | Some m -> S.singleton ("dep:" ^ Rx.group m 1)
   | None -> (
-      match Rx.match_ {|([a-z][\w-]*):|} t with
+      match Rx.match_ field_name_re t with
       | Some m -> S.singleton ("field:" ^ Rx.group m 1)
       | None ->
           let toks =
@@ -113,7 +117,7 @@ let line_tokens line =
               S.singleton "field:runtest"
             else S.empty
           in
-          if Rx.test "(sha256|sha512|md5)=" t then S.add "field:checksum" toks
+          if Rx.test sha256_sha512_md5_re t then S.add "field:checksum" toks
           else toks)
 
 (** The files of a PR's merged version (relative to its own base, so not what
@@ -269,6 +273,8 @@ let unified_diff_lines a b =
     b;
   if !changed = [] then [] else "---" :: "+++" :: List.rev !changed
 
+let packages_opam_re = Rx.v "packages/[^/]+/[^/]+/opam$"
+
 (** [package.version -> tokens] changed in the PR's opam files between its
     initial and merged versions. Each file is compared as a whole: a compare of
     the two commits would go through their merge base, which for a PR rebased
@@ -276,9 +282,7 @@ let unified_diff_lines a b =
     the author's. *)
 let actual_fix number initial final =
   let paths =
-    List.filter
-      (fun f -> Rx.test_match "packages/[^/]+/[^/]+/opam$" f)
-      (pr_files number)
+    List.filter (fun f -> Rx.test_match packages_opam_re f) (pr_files number)
   in
   let old = blobs initial paths and new_ = blobs final paths in
   let changed = Odict.create () in
@@ -312,6 +316,7 @@ let new_archive = S.of_list [ "field:checksum"; "field:x-commit-hash" ]
 
 (* The rules that compare with opam-health-check's latest run (see main). *)
 let health_rules = [ "health-check-new" ]
+let error_re = Rx.v {|Error in (\S+?):|}
 
 (** Packages of the PR that failed in that CI run: non-experimental build, test
     or solver failures, or lint errors. *)
@@ -339,14 +344,14 @@ let failing_packages sha =
           (fun j ->
             List.filter_map
               (fun m ->
-                Option.map
-                  (fun mm -> Rx.group mm 1)
-                  (Rx.match_ {|Error in (\S+?):|} m))
+                Option.map (fun mm -> Rx.group mm 1) (Rx.match_ error_re m))
               (Json.to_str_list (j |. "messages")))
           jobs
       in
       S.of_list (failed @ msgs)
   | _ -> S.empty
+
+let package_field_re = Rx.v {|"?([\w+-]+)"?[: ]|}
 
 (** What a suggestion would change: dependency or field tokens. *)
 let suggestion_tokens (s : Suggestion.t) =
@@ -357,7 +362,7 @@ let suggestion_tokens (s : Suggestion.t) =
     (fun (c : Suggestion.Candidate.t) -> add ("dep:" ^ Suggestion.str c.dep))
     (Suggestion.list s.candidates);
   let alternative = Suggestion.str s.alternative in
-  let alt = Rx.match_ {|"?([\w+-]+)"?[: ]|} alternative in
+  let alt = Rx.match_ package_field_re alternative in
   if Util.contains alternative "@runtest" then
     add "field:runtest" (* disable the tests: server-reason-react, #30879 *);
   (match alt with
@@ -371,10 +376,10 @@ let suggestion_tokens (s : Suggestion.t) =
         ^ Rx.group m 1)
   | None -> ());
   let new_ = Suggestion.str_field s.new_ in
-  (match Rx.match_ {|"([\w+-]+)"|} new_ with
+  (match Rx.match_ quoted_name_re new_ with
   | Some m -> add ("dep:" ^ Rx.group m 1)
   | None -> ());
-  (match Rx.match_ {|([a-z][\w-]*):|} new_ with
+  (match Rx.match_ field_name_re new_ with
   | Some m -> add ("field:" ^ Rx.group m 1)
   | None -> ());
   if Util.contains new_ "@runtest" then add "field:runtest";

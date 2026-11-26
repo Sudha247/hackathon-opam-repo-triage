@@ -17,8 +17,8 @@ val is_space : int -> bool
 
 (** A match. *)
 
-val search : ?flags:Rx.flag list -> string -> string -> m option
-val match_ : ?flags:Rx.flag list -> string -> string -> m option
+val search : Rx.t -> string -> m option
+val match_ : Rx.t -> string -> m option
 
 val group_opt : m -> int -> string option
 (** The value of group [i], None if it did not take part in the match. *)
@@ -28,7 +28,7 @@ val group : m -> int -> string
 
 val group0 : m -> string
 
-val sub : ?flags:Rx.flag list -> string -> string -> string -> string
+val sub : Rx.t -> string -> string -> string
 (** The matches replaced with a template where [\1] .. [\9] are groups. *)
 
 val prepare : string -> string * int array
