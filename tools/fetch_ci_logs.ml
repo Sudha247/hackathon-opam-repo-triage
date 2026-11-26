@@ -42,11 +42,11 @@ let fetch ?(retries = 6) ?(backoff = 3.0) ?(timeout = 60.) url =
     if k >= retries then fail last
     else
       let retry last =
-        Py.sleep (backoff *. float_of_int (k + 1));
+        Unix.sleepf (backoff *. float_of_int (k + 1));
         attempt (k + 1) last
       in
       match Http.urlopen ~headers ~timeout url with
-      | body when not (Py.contains body busy_marker) -> body
+      | body when not (Util.contains body busy_marker) -> body
       | _ -> retry "site busy (rate limited)"
       | exception (Http.Http_error { code = 404; _ } as e) ->
           fail (Http.error_text e)
@@ -66,7 +66,7 @@ let html_to_text page =
         Buffer.add_string b (String.sub page pos (String.length page - pos))
     | Some m ->
         let tag = String.lowercase_ascii (Rx.group m 1) in
-        let close = Py.find ~from:(Rx.end_ m) lower ("</" ^ tag ^ ">") in
+        let close = Util.find ~from:(Rx.end_ m) lower ("</" ^ tag ^ ">") in
         if close < 0 then begin
           (* No closing tag: no match here; try after this position. *)
           let a = Rx.start m in
@@ -81,21 +81,21 @@ let html_to_text page =
   go 0;
   let page = Buffer.contents b in
   let page = Rx.sub ~flags:[ Rx.I ] {|<br\s*/?>|} "\n" page in
-  Py.strip (Html.unescape (Rx.sub "<[^>]+>" "" page)) ^ "\n"
+  String.trim (Html.unescape (Rx.sub "<[^>]+>" "" page)) ^ "\n"
 
 let parse_jobs page =
-  let jobs = Py.Odict.create () in
+  let jobs = Odict.create () in
   List.iter
     (fun m ->
       let g k = Option.value ~default:"" (Rx.named m k) in
       let href = Html.unescape (g "href") in
-      let variant = Http.unquote (Py.last (Py.rsplit1 "/variant/" href)) in
+      let variant = Http.unquote (Util.last (Util.rsplit1 "/variant/" href)) in
       let label =
         String.concat " "
-          (Py.split (Html.unescape (Rx.sub "<[^>]+>" "" (g "label"))))
+          (Util.split (Html.unescape (Rx.sub "<[^>]+>" "" (g "label"))))
       in
-      if not (Py.Odict.mem jobs variant) then
-        Py.Odict.set jobs variant
+      if not (Odict.mem jobs variant) then
+        Odict.set jobs variant
           (Dict.of_list
              [
                ("variant", `String variant);
@@ -104,7 +104,7 @@ let parse_jobs page =
                ("url", `String (base ^ href));
              ]))
     (Rx.finditer ~flags:[ Rx.S ] job_re page);
-  Py.Odict.values jobs
+  Odict.values jobs
 
 let safe_name variant = Rx.sub {|[^A-Za-z0-9._,+-]|} "_" variant ^ ".log"
 
@@ -114,18 +114,18 @@ let extract_errors text =
   let keep = ref [] in
   List.iter
     (fun line ->
-      let s = Py.strip line in
+      let s = String.trim line in
       if
         (String.starts_with ~prefix:"[ERROR]" s
         || String.starts_with ~prefix:"#=== ERROR while" s
         || String.starts_with ~prefix:"Error in " s
-        || Py.contains s "Job failed:"
-        || Py.contains s "command not found"
+        || Util.contains s "Job failed:"
+        || Util.contains s "command not found"
         || String.starts_with ~prefix:"[NOTE] Building " s
-        || List.exists (fun p -> Py.contains s p) infra_patterns)
+        || List.exists (fun p -> Util.contains s p) infra_patterns)
         && not (List.mem s !keep)
       then keep := !keep @ [ s ])
-    (Py.splitlines text);
+    (Util.splitlines text);
   !keep
 
 let root_cause job =
@@ -136,7 +136,7 @@ let root_cause job =
     | None -> label
   in
   let default = cause in
-  if Py.contains cause "a dependency failed" then begin
+  if Util.contains cause "a dependency failed" then begin
     let errors = Dict.strs job "errors" in
     match
       List.find_map
@@ -153,19 +153,19 @@ let root_cause job =
     | None ->
         if
           List.exists
-            (fun e -> List.exists (fun p -> Py.contains e p) infra_patterns)
+            (fun e -> List.exists (fun p -> Util.contains e p) infra_patterns)
             errors
         then begin
           let building =
             List.filter_map
               (fun e ->
                 if String.starts_with ~prefix:"[NOTE] Building " e then
-                  Some (Py.last (Py.split e))
+                  Some (Util.last (Util.split e))
                 else None)
               errors
           in
           let where =
-            match Py.last_opt building with
+            match Util.last_opt building with
             | Some b -> " while building " ^ b
             | None -> ""
           in
@@ -183,26 +183,26 @@ let run ~url ~out ~status ~all ~jobs_n ~force () =
   let netloc, path =
     match
       Rx.match_ {|^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]*)([^?#]*)|}
-        (Py.strip arg_url)
+        (String.trim arg_url)
     with
     | Some m -> (Rx.group m 1, Rx.group m 2)
     | None -> ("", "")
   in
   if netloc <> "opam.ci.ocaml.org" || not (Rx.test_match commit_url_re path)
   then
-    Py.die
+    Util.die
       "expected a URL like \
        https://opam.ci.ocaml.org/github/ocaml/opam-repository/commit/<sha>";
-  let path = Py.rstrip ~chars:"/" path in
-  let sha = Py.last (Py.rsplit1 "/" path) in
+  let path = Util.rstrip ~chars:"/" path in
+  let sha = Util.last (Util.rsplit1 "/" path) in
   let out =
     match out with Some o -> o | None -> Filename.concat "ci-logs" sha
   in
   let out =
-    if String.length out > 1 then Py.rstrip ~chars:"/" out else out
+    if String.length out > 1 then Util.rstrip ~chars:"/" out else out
     (* as pathlib prints it *)
   in
-  Py.makedirs out;
+  Util.makedirs out;
   let write name text =
     let oc = open_out_bin (Filename.concat out name) in
     output_string oc text;
@@ -213,10 +213,10 @@ let run ~url ~out ~status ~all ~jobs_n ~force () =
   write "commit.html" page;
   let jobs = parse_jobs page in
   if jobs = [] then
-    Py.die "no jobs found on the page (format changed, or CI hasn't run yet?)";
+    Util.die "no jobs found on the page (format changed, or CI hasn't run yet?)";
   let counts =
     List.sort compare
-      (Py.counter (List.map (fun j -> Dict.str j "status") jobs))
+      (Util.counter (List.map (fun j -> Dict.str j "status") jobs))
   in
   let counts_s =
     String.concat ", "
@@ -234,7 +234,8 @@ let run ~url ~out ~status ~all ~jobs_n ~force () =
     let p = Filename.concat out name in
     Dict.set_str job "log_file" name;
     let text =
-      if Sys.file_exists p && not force then Py.read_file p
+      if Sys.file_exists p && not force then
+        In_channel.with_open_bin p In_channel.input_all
       else begin
         let text = html_to_text (fetch (Dict.str job "url")) in
         write name text;
@@ -264,7 +265,7 @@ let run ~url ~out ~status ~all ~jobs_n ~force () =
             try
               work j;
               None
-            with e -> Some (Py.exn_text e)
+            with e -> Some (Util.exn_text e)
             (* keep going; report at the end *)
           in
           Mutex.lock m;
@@ -286,7 +287,7 @@ let run ~url ~out ~status ~all ~jobs_n ~force () =
   write "jobs.json"
     (Json.dumps ~indent:2 (`List (List.map Dict.to_json jobs)) ^ "\n");
   let groups =
-    Py.group_by root_cause
+    Util.group_by root_cause
       (List.filter (fun j -> Dict.str j "status" = "failed") selected)
     |> List.map (fun (c, js) ->
         (c, List.map (fun j -> Dict.str j "variant") js))
@@ -305,7 +306,7 @@ let run ~url ~out ~status ~all ~jobs_n ~force () =
   write "summary.txt" (String.concat "\n" lines);
   print_endline
     (String.concat "\n"
-       (Py.take 2 lines @ [ "" ]
+       (Util.take 2 lines @ [ "" ]
        @ List.map
            (fun (c, v) -> Printf.sprintf "[%d] %s" (List.length v) c)
            groups));

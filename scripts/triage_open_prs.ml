@@ -50,7 +50,7 @@ let now () =
   Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d+00:00" (t.tm_year + 1900)
     (t.tm_mon + 1) t.tm_mday t.tm_hour t.tm_min t.tm_sec
 
-let sleep_hook = ref Py.sleep
+let sleep_hook = ref Unix.sleepf
 
 exception Graphql_error of string
 
@@ -83,9 +83,9 @@ let graphql query variables token : Json.t =
           raise
             (Graphql_error
                ("GraphQL errors: "
-               ^ Py.prefix (Json.py_repr (Json.member "errors" d)) 500));
+               ^ Util.prefix_chars (Json.py_repr (Json.member "errors" d)) 500));
         Printf.eprintf "GitHub GraphQL errors, using the data returned: %s\n%!"
-          (Py.prefix (Json.py_repr (Json.member "errors" d)) 300)
+          (Util.prefix_chars (Json.py_repr (Json.member "errors" d)) 300)
       end;
       (match data with
       | `Assoc _ -> ()
@@ -236,7 +236,7 @@ let age ?now_ iso =
   match iso with
   | None -> None
   | Some iso -> (
-      match Py.parse_iso iso with
+      match Date.parse_iso iso with
       | Some t -> Some (Option.value ~default:(Unix.gettimeofday ()) now_ -. t)
       | None -> None)
 
@@ -468,10 +468,10 @@ let read_counts path : counts =
     program, else the dune build's ../../bin/opam_repo_ci_triage.exe, else
     opam-ci-triage on the PATH. *)
 let tool_path () =
-  match Py.getenv_nonempty "OPAM_CI_TRIAGE_TOOL" with
+  match Util.getenv_nonempty "OPAM_CI_TRIAGE_TOOL" with
   | Some t -> t
   | None -> (
-      let dir = Filename.dirname (Py.abspath Sys.executable_name) in
+      let dir = Filename.dirname (Util.abspath Sys.executable_name) in
       let candidates =
         [
           Filename.concat dir "opam-ci-triage";
@@ -496,7 +496,7 @@ let run_tool ?tool args timeout : Json.t option * string option * counts =
   let counts = Filename.temp_file "opam-ci-net-" ".json" in
   let tool = match tool with Some t -> t | None -> tool_path () in
   let res =
-    Fun.protect ~finally:(fun () -> Py.remove counts) @@ fun () ->
+    Fun.protect ~finally:(fun () -> Util.remove counts) @@ fun () ->
     match
       Proc.run
         ~env:[ ("OPAM_CI_NET_FILE", counts) ]
@@ -528,15 +528,15 @@ let run_tool ?tool args timeout : Json.t option * string option * counts =
       if p.code <> 0 then begin
         let lines =
           List.filter
-            (fun x -> Py.strip x <> "")
-            (Py.splitlines (Py.strip p.stderr))
+            (fun x -> String.trim x <> "")
+            (Util.splitlines (String.trim p.stderr))
         in
         let last =
-          match Py.last_opt lines with
+          match Util.last_opt lines with
           | Some l -> l
           | None -> Printf.sprintf "exit code %d" p.code
         in
-        (None, Some (Py.prefix last 500), net)
+        (None, Some (Util.prefix_chars last 500), net)
       end
       else
         match Json.parse_opt p.stdout with
@@ -548,8 +548,8 @@ let run_tool_hook = ref (fun args timeout -> run_tool args timeout)
 (** Failed-job counts by category, and the reverse dependencies that failed to
     build or test, from [summary --json] (which reads the cached CI page). *)
 let jobs_overview (summary : Json.t) : Json.t =
-  let failed = Py.Odict.create () in
-  let revdeps = Py.Odict.create () in
+  let failed = Odict.create () in
+  let revdeps = Odict.create () in
   let jobs = Json.list "jobs" summary in
   List.iter
     (fun j ->
@@ -559,8 +559,7 @@ let jobs_overview (summary : Json.t) : Json.t =
           | Some c when c <> "" -> c
           | _ -> "?"
         in
-        Py.Odict.set failed cat
-          (1 + Option.value ~default:0 (Py.Odict.get failed cat));
+        Odict.set failed cat (1 + Option.value ~default:0 (Odict.get failed cat));
         match Json.str_opt "revdep" j with
         | Some rd
           when rd <> ""
@@ -577,8 +576,8 @@ let jobs_overview (summary : Json.t) : Json.t =
                   ("target", Json.member "target" j);
                 ]
             in
-            Py.Odict.set revdeps rd
-              (Option.value ~default:[] (Py.Odict.get revdeps rd) @ [ x ])
+            Odict.set revdeps rd
+              (Option.value ~default:[] (Odict.get revdeps rd) @ [ x ])
         | _ -> ()
       end)
     jobs;
@@ -586,19 +585,18 @@ let jobs_overview (summary : Json.t) : Json.t =
     [
       ("total", `Int (List.length jobs));
       ( "failed",
-        `Assoc (List.map (fun (k, n) -> (k, `Int n)) (Py.Odict.to_list failed))
-      );
+        `Assoc (List.map (fun (k, n) -> (k, `Int n)) (Odict.to_list failed)) );
       ( "failing_revdeps",
         `Assoc
           (List.map
              (fun (k, v) -> (k, `List v))
              (List.sort
                 (fun (a, _) (b, _) -> compare a b)
-                (Py.Odict.to_list revdeps))) );
+                (Odict.to_list revdeps))) );
     ]
 
 let save_state path (prs : (string * Dict.t) list) =
-  Py.makedirs (Filename.dirname (Py.abspath path));
+  Util.makedirs (Filename.dirname (Util.abspath path));
   let oc = open_out_bin (path ^ ".tmp") in
   output_string oc
     (Json.dumps
@@ -788,7 +786,7 @@ let mark_shared_failures (prs : (string * Dict.t) list) =
     they come and go with CI. *)
 let since_last_push (prev : Json.t) (result : Json.t) : Json.t =
   let keys res =
-    let tbl = Py.Odict.create () in
+    let tbl = Odict.create () in
     let ( |? ) a b = match a with Some s when s <> "" -> s | _ -> b in
     List.iter
       (fun s ->
@@ -802,10 +800,10 @@ let since_last_push (prev : Json.t) (result : Json.t) : Json.t =
               Suggestion.get s.Suggestion.failing |? (s.Suggestion.job |? "") )
           in
           let key = Json.dumps (`List [ `String (fst k); `String (snd k) ]) in
-          Py.Odict.set tbl key (k, s.title |? (rule |? ""))
+          Odict.set tbl key (k, s.title |? (rule |? ""))
         end)
       (Json.list "suggestions" res);
-    Py.Odict.values tbl
+    Odict.values tbl
   in
   let before = keys (Json.member "result" prev) and after = keys result in
   let mem k l = List.exists (fun (k', _) -> k' = k) l in
@@ -828,7 +826,7 @@ let since_last_push (prev : Json.t) (result : Json.t) : Json.t =
         `Int (List.length (List.filter (fun (k, _) -> mem k after) before)) );
     ]
 
-let llm_available () = Py.getenv_nonempty "ANTHROPIC_API_KEY" <> None
+let llm_available () = Util.getenv_nonempty "ANTHROPIC_API_KEY" <> None
 let llm_available_hook = ref llm_available
 let tool_version () = Tool_version.digest
 let tool_version_hook = ref tool_version
@@ -1008,7 +1006,7 @@ let main ?(argv = Sys.argv) () =
     match !github_token_hook () with
     | Some t -> t
     | None ->
-        Py.die
+        Util.die
           "a GitHub token is needed (GITHUB_TOKEN, GH_TOKEN or `gh auth \
            login`): the PR listing uses the GraphQL API"
   in
@@ -1031,7 +1029,7 @@ let main ?(argv = Sys.argv) () =
     "%d open PRs, %d with %s = failure, %d running (%d GitHub API call(s))\n%!"
     (List.length prs) (nstate "FAILURE") context (nstate "PENDING") list_calls;
   let failing =
-    match args.limit with Some n -> Py.take n failing | None -> failing
+    match args.limit with Some n -> Util.take n failing | None -> failing
   in
   let llm = !llm_available_hook () in
   let llm_left = ref (if llm then args.llm_budget else 0) in
@@ -1041,18 +1039,18 @@ let main ?(argv = Sys.argv) () =
     if llm then Printf.sprintf "on (at most %d calls)" args.llm_budget
     else "off (no ANTHROPIC_API_KEY)");
   let version = !tool_version_hook () in
-  let new_state : Dict.t Py.Odict.t = Py.Odict.create () in
-  let stats : int Py.Odict.t = Py.Odict.create () in
-  let stat k = Option.value ~default:0 (Py.Odict.get stats k) in
-  let bump k = Py.Odict.set stats k (stat k + 1) in
-  let net_total : int Py.Odict.t = Py.Odict.create () in
+  let new_state : Dict.t Odict.t = Odict.create () in
+  let stats : int Odict.t = Odict.create () in
+  let stat k = Option.value ~default:0 (Odict.get stats k) in
+  let bump k = Odict.set stats k (stat k + 1) in
+  let net_total : int Odict.t = Odict.create () in
   (* Transient LLM failures in a row, across the PRs of this run: after
      llm_breaker (an outage), the LLM is not asked again in this run. *)
   let llm_streak = ref 0 in
   let llm_off = ref None in
   (* why the LLM was turned off in this run: "credentials" or "outage" *)
   let merged_state () =
-    let ns = Py.Odict.to_list new_state in
+    let ns = Odict.to_list new_state in
     List.map
       (fun (k, e) ->
         (k, match List.assoc_opt k ns with Some e' -> e' | None -> e))
@@ -1146,7 +1144,8 @@ let main ?(argv = Sys.argv) () =
          failures are gone, so the result is kept until the next run; a
          failed analysis too, with its attempts. *)
       Printf.eprintf "#%d %s summary failed: %s; the previous %s is kept\n%!"
-        (Dict.int it.p "number") (Py.prefix it.sha 12)
+        (Dict.int it.p "number")
+        (Util.prefix_chars it.sha 12)
         (Option.value ~default:"None" serr)
         (if has_result it.pv then "result" else "analysis");
       Stop Summary_failed
@@ -1210,8 +1209,8 @@ let main ?(argv = Sys.argv) () =
     in
     List.iter
       (fun (k, v) ->
-        Py.Odict.set net_total k
-          (v + Option.value ~default:0 (Py.Odict.get net_total k)))
+        Odict.set net_total k
+          (v + Option.value ~default:0 (Odict.get net_total k)))
       net;
     let refreshed = b.refreshed || count net "refreshed" <> 0 in
     llm_left := !llm_left - count net "llm";
@@ -1261,8 +1260,10 @@ let main ?(argv = Sys.argv) () =
       Dict.remove entry "pending";
       Printf.eprintf
         "#%d %s ERROR: %s; the previous result is kept (%ss; requests: %s)\n%!"
-        (Dict.int p "number") (Py.prefix it.sha 12) err_s
-        (Py.repr_float (seconds ()))
+        (Dict.int p "number")
+        (Util.prefix_chars it.sha 12)
+        err_s
+        (Json.repr_float (seconds ()))
         reqs;
       Kept_after_error
     end
@@ -1347,9 +1348,9 @@ let main ?(argv = Sys.argv) () =
         ];
       List.iter (Dict.remove entry) ("pending" :: last_error);
       Printf.eprintf "#%d %s %s (%ss; requests: %s)\n%!" (Dict.int p "number")
-        (Py.prefix it.sha 12)
+        (Util.prefix_chars it.sha 12)
         (if result <> None then "ok" else "ERROR: " ^ err_s)
-        (Py.repr_float secs) reqs;
+        (Json.repr_float secs) reqs;
       if result <> None then Analysed else Failed
     end
   in
@@ -1403,9 +1404,9 @@ let main ?(argv = Sys.argv) () =
       match outcome with
       | No_failure_yet -> ()
       | Unchanged | Deferred | Summary_failed ->
-          Py.Odict.set new_state it.key it.entry
+          Odict.set new_state it.key it.entry
       | Kept_after_error | Analysed | Failed ->
-          Py.Odict.set new_state it.key it.entry;
+          Odict.set new_state it.key it.entry;
           (* keep the progress if the run is killed *)
           save_state args.state (merged_state ()))
     failing;
@@ -1414,13 +1415,12 @@ let main ?(argv = Sys.argv) () =
   in
   List.iter
     (fun (key, entry) -> note_listed_ci entry (List.assoc key listed))
-    (Py.Odict.to_list new_state);
-  mark_shared_failures (Py.Odict.to_list new_state);
-  Py.Odict.set stats "dropped"
-    (List.length
-       (List.filter (fun (k, _) -> not (Py.Odict.mem new_state k)) old));
-  save_state args.state (Py.Odict.to_list new_state);
-  let entries = Py.Odict.values new_state in
+    (Odict.to_list new_state);
+  mark_shared_failures (Odict.to_list new_state);
+  Odict.set stats "dropped"
+    (List.length (List.filter (fun (k, _) -> not (Odict.mem new_state k)) old));
+  save_state args.state (Odict.to_list new_state);
+  let entries = Odict.values new_state in
   let data =
     `Assoc
       [
@@ -1438,7 +1438,7 @@ let main ?(argv = Sys.argv) () =
             [
               ("enabled", `Bool llm);
               ( "calls",
-                `Int (Option.value ~default:0 (Py.Odict.get net_total "llm")) );
+                `Int (Option.value ~default:0 (Odict.get net_total "llm")) );
               ("off", Json.opt_string !llm_off);
             ] );
         ( "run",
@@ -1449,13 +1449,13 @@ let main ?(argv = Sys.argv) () =
                  `Assoc
                    (List.map
                       (fun (k, v) -> (k, `Int v))
-                      (Py.Odict.to_list net_total)) );
+                      (Odict.to_list net_total)) );
              ]
-            @ List.map (fun (k, v) -> (k, `Int v)) (Py.Odict.to_list stats)) );
+            @ List.map (fun (k, v) -> (k, `Int v)) (Odict.to_list stats)) );
         ( "prs",
           `List
             (List.map Dict.to_json
-               (Py.sort_by ~reverse:true
+               (Util.sort_by ~reverse:true
                   (fun e -> Dict.str e "updated")
                   entries)) );
         (* PRs whose CI passes: nothing to analyse, listed so that the page
@@ -1483,7 +1483,7 @@ let main ?(argv = Sys.argv) () =
                prs) );
       ]
   in
-  Py.makedirs (Filename.dirname (Py.abspath args.out));
+  Util.makedirs (Filename.dirname (Util.abspath args.out));
   let oc = open_out_bin args.out in
   output_string oc (Json.dumps ~indent:1 data);
   close_out oc;
@@ -1494,9 +1494,7 @@ let main ?(argv = Sys.argv) () =
     (stat "analysed") (stat "failed") (stat "unchanged")
     (stat "running, no failure yet")
     (stat "deferred") (stat "dropped")
-    (match counts_text (Py.Odict.to_list net_total) with
-    | "" -> "none"
-    | s -> s)
+    (match counts_text (Odict.to_list net_total) with "" -> "none" | s -> s)
     args.out;
   let append path s =
     let oc = open_out_gen [ Open_append; Open_creat; Open_wronly ] 0o644 path in
@@ -1504,13 +1502,13 @@ let main ?(argv = Sys.argv) () =
     close_out oc
   in
   (* In the run's summary on GitHub, so that an expired key is noticed. *)
-  (match (Py.getenv_nonempty "GITHUB_STEP_SUMMARY", !llm_off) with
+  (match (Util.getenv_nonempty "GITHUB_STEP_SUMMARY", !llm_off) with
   | Some path, Some off ->
       append path
         (Printf.sprintf "**LLM diagnoses were turned off in this run:** %s\n\n"
            (llm_off_text off))
   | _ -> ());
-  match Py.getenv_nonempty "GITHUB_OUTPUT" with
+  match Util.getenv_nonempty "GITHUB_OUTPUT" with
   | Some path ->
       append path
         (Printf.sprintf "changed=%s\n"

@@ -129,7 +129,7 @@ let num (v : Json.t) =
   match v with
   | `Int n -> n
   | `Float f -> int_of_float f
-  | `String s -> int_of_string (Py.strip s)
+  | `String s -> int_of_string (String.trim s)
   | _ -> failwith "not a number"
 
 let sugg_of (v : Json.t) = Suggestion.of_json v
@@ -192,9 +192,9 @@ let day_v ?year (v : Json.t) =
     | v -> if truthy v then Some (str v) else None)
 
 let shorten s n =
-  let s = String.concat " " (Py.split s) in
-  if Py.length s <= n then s
-  else Py.rstrip (Py.prefix s (n - 1)) ^ "\xe2\x80\xa6"
+  let s = String.concat " " (Util.split s) in
+  if Util.char_length s <= n then s
+  else Util.rstrip (Util.prefix_chars s (n - 1)) ^ "\xe2\x80\xa6"
 
 let plural n = if n = 1 then "" else "s"
 
@@ -210,7 +210,7 @@ let suggestions_of (res : Json.t) =
 let groups (pr : Json.t) =
   if truthy (pr |. "pending") then []
   else
-    Py.group_by
+    Util.group_by
       (fun r ->
         match r.class_ with Some c when c <> "" -> c | _ -> "explanation")
       (suggestions_of (pr |. "result"))
@@ -321,7 +321,7 @@ let label_badges labels stale =
         cls (e_s lb)
   in
   String.concat ""
-    (List.map badge (Py.sort_by (fun lb -> lb <> merge_label) labels))
+    (List.map badge (Util.sort_by (fun lb -> lb <> merge_label) labels))
 
 (* --- Near-duplicate suggestions ------------------------------------------- *)
 
@@ -343,7 +343,7 @@ let combine rs =
   | [ r ] -> r
   | [] -> assert false
   | r0 :: _ ->
-      let uniq xs = Py.dedup (List.filter (fun x -> x <> "") xs) in
+      let uniq xs = Util.dedup (List.filter (fun x -> x <> "") xs) in
       let m = Suggestion.copy r0 in
       m.merged <- Some (List.length rs);
       let packages =
@@ -413,7 +413,7 @@ let merge_similar rs =
 (** Package names, versions of one package counted together. *)
 let short_list ?(n = 3) names =
   let by =
-    Py.group_by
+    Util.group_by
       (fun x ->
         if String.contains x ' ' then x
         else List.hd (String.split_on_char '.' x))
@@ -427,7 +427,7 @@ let short_list ?(n = 3) names =
         | _ -> Printf.sprintf "%s (%d versions)" k (List.length vs))
       by
   in
-  String.concat ", " (Py.take n items)
+  String.concat ", " (Util.take n items)
   ^
   if List.length items > n then
     Printf.sprintf " and %d more" (List.length items - n)
@@ -454,7 +454,7 @@ let packages_text ?(n = 2) r =
     (fun x ->
       List.iter
         (fun y ->
-          let y = Py.strip y in
+          let y = String.trim y in
           let y =
             if
               String.ends_with ~suffix:"..." y
@@ -465,12 +465,12 @@ let packages_text ?(n = 2) r =
             else y
           in
           if y <> "" && not (List.mem y !names) then names := !names @ [ y ])
-        (Py.split_on ", " x))
+        (Util.split_on ", " x))
     xs;
   if !names = [] then ""
   else
     let s = short_list ~n !names in
-    if !cut && not (Py.contains s " more") then s ^ " and more" else s
+    if !cut && not (Util.contains s " more") then s ^ " and more" else s
 
 let css =
   {css|
@@ -667,11 +667,11 @@ let unexplained_jobs pr =
 
 let failed_count pr =
   let failed = Json.to_assoc (pr |. "jobs" |. "failed") in
-  ( Py.sum
+  ( List.fold_left ( + ) 0
       (List.filter_map
          (fun (k, v) -> if List.mem k noise then None else Some (Json.to_int v))
          failed),
-    Py.sum (List.map (fun (_, v) -> Json.to_int v) failed) )
+    List.fold_left ( + ) 0 (List.map (fun (_, v) -> Json.to_int v) failed) )
 
 let headline ?v ?(as_html = true) pr =
   let v = match v with Some v -> v | None -> verdict pr in
@@ -714,7 +714,7 @@ let headline ?v ?(as_html = true) pr =
               code
                 (shorten
                    (List.hd
-                      (Py.split_on "   "
+                      (Util.split_on "   "
                          (Suggestion.str_field r.Suggestion.new_)))
                    48)
               ^ if pkgs <> "" then t (" for " ^ pkgs) else ""
@@ -830,7 +830,7 @@ let comment_markdown pr =
       ]
     in
     String.concat "\n"
-      (Py.take (i + 1) lines @ extra @ Py.drop_list (i + 1) lines)
+      (Util.take (i + 1) lines @ extra @ Util.drop (i + 1) lines)
   end
   else md
 
@@ -927,7 +927,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
   in
   List.iter
     (fun err -> add (Printf.sprintf "<pre class=\"err\">%s</pre>" (e_s err)))
-    (Py.take 2 errors);
+    (Util.take 2 errors);
   let ne = List.length errors in
   if ne > 2 then
     add
@@ -1070,7 +1070,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
   in
   List.iter
     (fun note -> add (Printf.sprintf "<p class=\"note\">%s</p>" (e_s note)))
-    (Py.take 1 notes);
+    (Util.take 1 notes);
   let nn = List.length notes in
   if nn > 1 then
     add
@@ -1099,7 +1099,7 @@ let suggestion_body ?sha ?(full = true) ?year r =
                links
                  (Printf.sprintf "%s/pull/%d" repo_url n)
                  (Printf.sprintf "#%d" n))
-             (Py.take 12 prs))
+             (Util.take 12 prs))
       ^ (if k > 12 then Printf.sprintf " and %d more" (k - 12) else "")
       ^ "</p>")
   end;
@@ -1261,11 +1261,11 @@ let ready_section ?(shown = 5) (data : Json.t) =
         (Json.to_list (data |. "prs"))
   in
   (* Those labelled "consider for merge" first, then the most recently updated. *)
-  let rows = Py.sort_by ~reverse:true (fun (p, _) -> sget p "updated") rows in
-  let rows = Py.sort_by (fun (p, _) -> not (is_merge p)) rows in
+  let rows = Util.sort_by ~reverse:true (fun (p, _) -> sget p "updated") rows in
+  let rows = Util.sort_by (fun (p, _) -> not (is_merge p)) rows in
   if rows = [] then ""
   else begin
-    let year = Py.prefix (sget data "generated") 4 in
+    let year = Util.prefix_chars (sget data "generated") 4 in
     let items =
       List.map
         (fun (p, passes) ->
@@ -1303,7 +1303,7 @@ let ready_section ?(shown = 5) (data : Json.t) =
       ^ "<p class=\"sub\">CI passes, or none of the failures is the PR's \
          fault. Reviews and discussions are not checked "
       ^ "(<a href=\"#h-ready\">more</a>).</p><ul class=\"ready\">"
-      ^ String.concat "" (Py.take shown items)
+      ^ String.concat "" (Util.take shown items)
       ^ "</ul>"
     in
     let out =
@@ -1313,7 +1313,7 @@ let ready_section ?(shown = 5) (data : Json.t) =
             "<details class=\"more\"><summary>%d more</summary><ul \
              class=\"ready\">%s</ul></details>"
             (k - shown)
-            (String.concat "" (Py.drop_list shown items))
+            (String.concat "" (Util.drop shown items))
       else out
     in
     out ^ "</section>"
@@ -1325,12 +1325,12 @@ let ready_section ?(shown = 5) (data : Json.t) =
 let failed_lookups pr =
   if truthy (pr |. "pending") || pr |. "result" = `Null then 0
   else
-    Py.sum
+    List.fold_left ( + ) 0
       (List.map
          (fun k -> match pr |. k with v when truthy v -> num v | _ -> 0)
          [ "mcp_errors"; "net_errors"; "git_unreachable" ])
 
-let time16 v = e_s (Py.replace (Py.prefix v 16) "T" " ")
+let time16 v = e_s (Util.replace (Util.prefix_chars v 16) "T" " ")
 
 let render_pr ?year ?max_failures (pr : Json.t) =
   let v = verdict pr in
@@ -1341,7 +1341,7 @@ let render_pr ?year ?max_failures (pr : Json.t) =
   let title = sget pr "title" in
   let pkgs =
     String.concat " "
-      (Py.dedup
+      (Util.dedup
          (List.concat_map
             (fun (_, rs) ->
               List.map (fun r -> Suggestion.str_field r.Suggestion.failing) rs)
@@ -1349,7 +1349,7 @@ let render_pr ?year ?max_failures (pr : Json.t) =
   in
   let search =
     String.concat " "
-      (Py.split
+      (Util.split
          (lower (Printf.sprintf "%d %s %s %s" n title (sget pr "author") pkgs)))
   in
   let line2 =
@@ -1442,7 +1442,7 @@ let render_pr ?year ?max_failures (pr : Json.t) =
     !bar
     @ [
         Printf.sprintf "<span>commit %s \xc2\xb7 analysed %s UTC</span>"
-          (e_s (Py.prefix (Option.value ~default:"" sha) 12))
+          (e_s (Util.prefix_chars (Option.value ~default:"" sha) 12))
           (time16 (match sget pr "analysed_at" with "" -> "never" | s -> s));
       ];
   let lookups = failed_lookups pr in
@@ -1481,7 +1481,7 @@ let render_pr ?year ?max_failures (pr : Json.t) =
   let since = pr |. "since_last_push" in
   if truthy since && (truthy (since |. "fixed") || truthy (since |. "new")) then begin
     let items xs =
-      String.concat ", " (List.map e (Py.take 8 xs))
+      String.concat ", " (List.map e (Util.take 8 xs))
       ^
       if List.length xs > 8 then
         Printf.sprintf " and %d more" (List.length xs - 8)
@@ -1509,7 +1509,7 @@ let render_pr ?year ?max_failures (pr : Json.t) =
     in
     add
       (Printf.sprintf "<p class=\"note since\">Since the previous push (%s): "
-         (e_s (Py.prefix (sget since "previous_sha") 12))
+         (e_s (Util.prefix_chars (sget since "previous_sha") 12))
       ^ String.concat "; " parts ^ ".</p>")
   end;
   let stale = pr |. "result" |. "health_stale" in
@@ -1575,7 +1575,7 @@ let render_pr ?year ?max_failures (pr : Json.t) =
     end;
     let other = merge_similar (group g "explanation") in
     if other <> [] then begin
-      let kinds = String.concat ", " (Py.dedup (List.map title_of other)) in
+      let kinds = String.concat ", " (Util.dedup (List.map title_of other)) in
       let k = List.length other in
       add
         (Printf.sprintf
@@ -1614,13 +1614,13 @@ let table ?(shown = 25) head rows =
       th
     ^ String.concat "" rs ^ "</tbody></table></div>"
   in
-  let out = tab (Py.take shown rows) in
+  let out = tab (Util.take shown rows) in
   if List.length rows > shown then
     out
     ^ Printf.sprintf
         "<details class=\"more\"><summary>%d more</summary>%s</details>"
         (List.length rows - shown)
-        (tab (Py.drop_list shown rows))
+        (tab (Util.drop shown rows))
   else out
 
 let chronic ?(min_prs = 2) prs =
@@ -1643,7 +1643,7 @@ let chronic ?(min_prs = 2) prs =
       let n = num (pr |. "number") in
       List.iter
         (fun (rd, jobs) ->
-          let name, _, version = Py.partition rd "." in
+          let name, _, version = Util.partition rd "." in
           let by_pr = assoc_ref revdeps name (fun () -> ref []) in
           let vs = assoc_ref by_pr n (fun () -> ref []) in
           if List.mem_assoc version !vs then
@@ -1883,7 +1883,7 @@ let render (data : Json.t) =
     Hashtbl.fold (fun _ v acc -> if v = k then acc + 1 else acc) verdict_of 0
   in
   let gen = sget data "generated" in
-  let year = Py.prefix gen 4 in
+  let year = Util.prefix_chars gen 4 in
   let merge = List.length (List.filter is_merge prs) in
   let failing = data |. "failing_prs" and running = data |. "running_prs" in
   let scope =
@@ -1937,7 +1937,7 @@ let render (data : Json.t) =
           "<nav>Updated %s %s UTC \xc2\xb7 <a href=\"feed.xml\">Atom feed</a> \
            \xc2\xb7 "
           (e_s (day ~year (Some gen)))
-          (e_s (Py.sub_chars gen 11 16))
+          (e_s (Util.sub_chars gen 11 16))
       ^ "<a href=\"#help\">How to read this page</a></nav></header>";
       (if scope <> "" then Printf.sprintf "<p class=\"lead\">%s</p>" scope
        else "");
@@ -2045,11 +2045,11 @@ let render_feed (data : Json.t) =
                       if Suggestion.nonempty_field r.Suggestion.new_ then
                         Printf.sprintf " (%s)"
                           (List.hd
-                             (Py.split_on "   "
+                             (Util.split_on "   "
                                 (Suggestion.str_field r.Suggestion.new_)))
                       else "");
                     ])
-              (Py.take 5 (merge_similar (group g k))))
+              (Util.take 5 (merge_similar (group g k))))
           [ "fix"; "workaround"; "elsewhere"; "explanation" ];
         let updated =
           match pr |. "analysed_at" with v when truthy v -> str v | _ -> gen
@@ -2076,10 +2076,12 @@ let render_feed (data : Json.t) =
   String.concat "\n" !out ^ "\n"
 
 let run ~data_path ~out_path () =
-  let data = Json.parse (Py.read_file data_path) in
+  let data =
+    Json.parse (In_channel.with_open_bin data_path In_channel.input_all)
+  in
   let page = render data in
-  let dir = Filename.dirname (Py.abspath out_path) in
-  Py.makedirs dir;
+  let dir = Filename.dirname (Util.abspath out_path) in
+  Util.makedirs dir;
   let write path s =
     let oc = open_out_bin path in
     output_string oc s;

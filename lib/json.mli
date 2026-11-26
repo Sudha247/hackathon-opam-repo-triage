@@ -30,6 +30,11 @@ val utf8_at : string -> int -> int * int
 (** The UTF-8 character at byte [i]: its code point and length in bytes. An
     invalid byte reads as U+FFFD, of length 1. *)
 
+val repr_float : float -> string
+(** The shortest representation of a float that reads back, as Python prints it
+    (the format of the numbers in the outputs and files) (["1.0"], ["0.25"],
+    ["1e-05"]). *)
+
 (** {1 Reading} *)
 
 val member : string -> t -> t

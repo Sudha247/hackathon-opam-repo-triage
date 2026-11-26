@@ -124,24 +124,24 @@ let gitdir src url =
   if not (safe_git_url (Some url)) then
     failwith
       (Printf.sprintf "not a plain https git URL: %s"
-         (Py.repr (Py.prefix url 100)));
+         (Util.repr (Util.prefix_chars url 100)));
   let d =
     Filename.concat (Filename.concat src.cache_dir "git") (short_hash 16 url)
   in
   if not (Hashtbl.mem src.gitdirs d) then begin
     (* A mirror whose files were deleted (cache pruning) is made again. *)
     let valid =
-      Py.is_dir d
+      Util.is_dir d
       && (git ~git_dir:d ~check:false [ "rev-parse"; "--git-dir" ]).code = 0
-      && Py.strip
+      && String.trim
            (git ~git_dir:d ~check:false
               [ "config"; "--get"; "remote.origin.url" ])
              .stdout
          = url
     in
     if (not valid) && not (is_offline ()) then begin
-      Py.rmtree d;
-      Py.makedirs d;
+      Util.rmtree d;
+      Util.makedirs d;
       ignore (git [ "init"; "-q"; "--bare"; d ]);
       ignore (git ~git_dir:d [ "remote"; "add"; "--"; "origin"; url ]);
       ignore (git ~git_dir:d [ "config"; "remote.origin.promisor"; "true" ]);
@@ -178,7 +178,8 @@ let git_down src url =
    offline: write_atomic writes nothing then). *)
 let note_down src url (out : Proc.result) =
   if out.code <> 0 && Rx.test ~flags:[ Rx.I ] git_unreachable out.stderr then begin
-    write_atomic (down_marker src url) (Py.prefix (Py.strip out.stderr) 300);
+    write_atomic (down_marker src url)
+      (Util.prefix_chars (String.trim out.stderr) 300);
     Hashtbl.replace src.down url true
   end
 
@@ -242,10 +243,10 @@ let tags src url =
               let tags =
                 List.filter_map
                   (fun l ->
-                    match Py.partition l "refs/tags/" with
+                    match Util.partition l "refs/tags/" with
                     | _, "refs/tags/", t -> Some t
                     | _ -> None)
-                  (Py.splitlines r.stdout)
+                  (Util.splitlines r.stdout)
               in
               (* A failed listing (network error, offline) is not kept on disk;
              an unreachable host is remembered for a day (git_down). *)
@@ -274,10 +275,10 @@ let tag_for src url name version =
       name ^ "-v" ^ version;
       "release-" ^ version;
       "Release-" ^ version;
-      Py.replace version "~" "-";
-      "v" ^ Py.replace version "~" "-";
-      Py.replace version "~" "_";
-      "v" ^ Py.replace version "~" "_";
+      Util.replace version "~" "-";
+      "v" ^ Util.replace version "~" "-";
+      Util.replace version "~" "_";
+      "v" ^ Util.replace version "~" "_";
     ]
 
 (* Test seam. *)
@@ -291,7 +292,7 @@ let tree ?(is_tag = true) src url ref =
       let paths =
         match ensure src url ref is_tag with
         | Some rev ->
-            Py.splitlines
+            Util.splitlines
               (git ~git_dir:(gitdir src url) ~check:false
                  [ "ls-tree"; "-r"; "--name-only"; rev ])
                 .stdout
@@ -458,7 +459,7 @@ let mcp_call ?max_age src tool args : Json.t * bool =
                           raise
                             (Mcp_failure
                                (Printf.sprintf "no result: %s"
-                                  (Py.prefix (Json.dumps res) 100))));
+                                  (Util.prefix_chars (Json.dumps res) 100))));
                       let first_text () =
                         match Json.member "content" res with
                         | `List (c :: _) -> Json.member "text" c
@@ -517,7 +518,7 @@ let mcp_call ?max_age src tool args : Json.t * bool =
                        %s); not called again in this run\n\
                        %!"
                       !mcp_failures
-                      (Py.prefix (Py.exn_text e) 100);
+                      (Util.prefix_chars (Util.exn_text e) 100);
                   `Return (`Null, false)
                 (* transient: not cached *)
               end
@@ -578,7 +579,8 @@ let versions_git src name ref =
             git ~check:false [ "ls-remote"; opam_repo_url; "refs/heads/master" ]
           in
           src.master_sha <-
-            Some (match Py.split r.stdout with s :: _ -> Some s | [] -> None));
+            Some
+              (match Util.split r.stdout with s :: _ -> Some s | [] -> None));
       Option.join src.master_sha
     end
     else Some ref
@@ -604,7 +606,7 @@ let versions_git src name ref =
                  if String.starts_with ~prefix:(name ^ ".") l then
                    Some (snd (split_pkg l))
                  else None)
-               (Py.splitlines r.stdout)))
+               (Util.splitlines r.stdout)))
 
 let versions ?(ref = "master") src name =
   if ref = "master" then
@@ -659,20 +661,20 @@ let doc_modules src pkg version =
   else
     match Json.member "documentation_status" d with
     | `Null | `String "success" -> (
-        let mods = Py.Odict.create () in
+        let mods = Odict.create () in
         List.iter
           (fun m ->
             match Json.str_opt "path" m with
             | Some p when p <> "" ->
                 ignore
-                  (Py.Odict.setdefault mods (Json.str "name" m)
-                     (Py.removesuffix p "/index.html"))
+                  (Odict.setdefault mods (Json.str "name" m)
+                     (Util.removesuffix p "/index.html"))
             | _ -> ())
           (List.concat_map
              (fun lib -> Json.list "modules" lib)
              (Json.list "libraries" d)
           @ Json.list "modules" d);
-        match Py.Odict.to_list mods with [] -> None | l -> Some l)
+        match Odict.to_list mods with [] -> None | l -> Some l)
     | _ -> None
 
 (* Test seam. *)
@@ -738,7 +740,7 @@ let doc_present src pkg version mods kind ident =
       match doc_modules src pkg version with
       | None -> None
       | Some tops -> (
-          let first3 = List.map snd (Py.take 3 tops) in
+          let first3 = List.map snd (Util.take 3 tops) in
           if kind = "module" && mods = [] then
             if List.mem_assoc ident tops then Some true
             else (* maybe wrapped: Wrapper.ident *)
@@ -864,18 +866,18 @@ let api_history src pkg mods kind ident versions =
                              && not (Json.truthy (Json.member "unchecked" d)))
                       then None
                       else
-                        let statuses = Py.Odict.create () in
+                        let statuses = Odict.create () in
                         List.iter
                           (fun e ->
                             match
                               (Json.member "version" e, Json.member "status" e)
                             with
-                            | `String v, `String s -> Py.Odict.set statuses v s
+                            | `String v, `String s -> Odict.set statuses v s
                             | _ -> ())
                           entries;
                         let hist =
                           {
-                            versions = Py.Odict.to_list statuses;
+                            versions = Odict.to_list statuses;
                             hmodule = Json.str_opt "resolved_module" d;
                             partial = not answered;
                           }
@@ -909,7 +911,7 @@ let module_find_max_packages = 40
 let module_name = {|[A-Z][\w']*|}
 
 let module_providers src name packages =
-  let packages = Py.take module_find_max_packages (Py.dedup packages) in
+  let packages = Util.take module_find_max_packages (Util.dedup packages) in
   if name = "" || packages = [] then None
   else begin
     let key = Json.dumps (Json.strings (name :: packages)) in
@@ -965,14 +967,14 @@ let module_providers src name packages =
                     | _ -> None (* a library, a module type *))
                   (Json.list "matches" d)
               in
-              let checked = Py.Odict.create () in
+              let checked = Odict.create () in
               List.iter
                 (fun c ->
                   match (Json.member "package" c, Json.member "status" c) with
-                  | `String p, `String s -> Py.Odict.set checked p s
+                  | `String p, `String s -> Odict.set checked p s
                   | _ -> ())
                 (Json.list "checked" d);
-              let checked = Py.Odict.to_list checked in
+              let checked = Odict.to_list checked in
               Some
                 {
                   matches;
@@ -1110,7 +1112,7 @@ let module_files paths modname =
   let out =
     List.filter
       (fun p ->
-        let base = Py.last (Py.rsplit1 "/" p) in
+        let base = Util.last (Util.rsplit1 "/" p) in
         let stem =
           String.lowercase_ascii (List.hd (String.split_on_char '.' base))
         in
@@ -1119,10 +1121,10 @@ let module_files paths modname =
            || String.ends_with ~suffix:".ml" base))
       paths
   in
-  Py.sort_by
+  Util.sort_by
     (fun p ->
       ( not (String.ends_with ~suffix:".mli" p),
-        Py.contains p "/test",
+        Util.contains p "/test",
         String.length p ))
     out
 
@@ -1158,7 +1160,7 @@ let present ?(stdlib = false) src repo ref path_mods kind ident =
                    if inner <> [] && not (defines text "module" (List.hd inner))
                    then false
                    else kind = "module" || defines text kind ident)
-                 (Py.take 3 files))
+                 (Util.take 3 files))
       in
       try_k (Array.length mods - 1)
   end
@@ -1192,20 +1194,20 @@ let module_find_source = "ocaml.org module search"
 
 let bisect_presence ?(allowed = fun _ -> true) ?(cap = bisect_cap) check
     versions bad =
-  let evidence = Py.Odict.create () in
+  let evidence = Odict.create () in
   let c v =
-    match Py.Odict.get evidence v with
+    match Odict.get evidence v with
     | Some r -> r
     | None ->
         let r = check v in
-        Py.Odict.set evidence v r;
+        Odict.set evidence v r;
         r
   in
   let newer =
     List.filter (fun v -> opam_vcmp v bad > 0 && allowed v) versions
   in
-  match List.find_opt (fun v -> c v = Some true) (Py.take cap newer) with
-  | Some v -> (Some (">=", v), Py.Odict.to_list evidence)
+  match List.find_opt (fun v -> c v = Some true) (Util.take cap newer) with
+  | Some v -> (Some (">=", v), Odict.to_list evidence)
   | None -> (
       let older =
         List.filter (fun v -> opam_vcmp v bad < 0 && allowed v) versions
@@ -1213,13 +1215,13 @@ let bisect_presence ?(allowed = fun _ -> true) ?(cap = bisect_cap) check
       match
         List.find_opt
           (fun v -> c v = Some true)
-          (List.rev (Py.lslice ~start:(-cap) older))
+          (List.rev (Util.sublist ~start:(-cap) older))
       with
       | Some v ->
           let later = List.filter (fun w -> opam_vcmp w v > 0) versions in
           ( Some ("<", match later with w :: _ -> w | [] -> bad),
-            Py.Odict.to_list evidence )
-      | None -> (None, Py.Odict.to_list evidence))
+            Odict.to_list evidence )
+      | None -> (None, Odict.to_list evidence))
 
 let existing_bounds opam_text dep =
   match
@@ -1259,25 +1261,25 @@ let constraint_edit opam_text dep op version =
   | None -> (None, Printf.sprintf {|"%s" {%s}|} dep new_term)
   | Some m ->
       let old = Rx.group0 m in
-      let filt = Py.strip (Rx.group m 3) in
+      let filt = String.trim (Rx.group m 3) in
       let terms =
         if filt = "" then []
         else if String.contains filt '|' || String.contains filt '(' then
           [ "(" ^ filt ^ ")" ]
         else
-          let terms = List.map Py.strip (String.split_on_char '&' filt) in
+          let terms = List.map String.trim (String.split_on_char '&' filt) in
           let drop =
             if op = ">=" || op = ">" then {|(>=|>)\s*"|} else {|(<=|<)\s*"|}
           in
           List.filter (fun t -> not (Rx.test_match drop t)) terms
       in
-      ( Some (Py.strip old),
+      ( Some (String.trim old),
         Printf.sprintf {|"%s" {%s}|} dep
           (String.concat " & " (terms @ [ new_term ])) )
 
 let license_id text =
   let t = Rx.sub {|\s+|} " " (Option.value ~default:"" text) in
-  let has = Py.contains t in
+  let has = Util.contains t in
   if has "Permission is hereby granted, free of charge" then Some "MIT"
   else if has "Apache License" && has "Version 2.0" then Some "Apache-2.0"
   else if has "Redistribution and use in source and binary forms" then

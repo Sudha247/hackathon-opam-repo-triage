@@ -108,7 +108,7 @@ let rec own_text ~link nodes =
          | None -> Option.value ~default:"" (Soup.leaf_text n))
        nodes)
 
-and collapse_space s = String.concat " " (Py.split s)
+and collapse_space s = String.concat " " (Util.split s)
 
 let is_list n = Option.map Soup.name (Soup.element n) = Some "ul"
 
@@ -132,7 +132,7 @@ let rec list_jobs ~sec ~ancestors ~owner ul =
             match Soup.element n with
             | Some e
               when Soup.name e = "a"
-                   && Py.contains
+                   && Util.contains
                         (Option.value ~default:"" (Soup.attribute "href" e))
                         "/variant/" ->
                 Some e
@@ -140,7 +140,7 @@ let rec list_jobs ~sec ~ancestors ~owner ul =
           content
       in
       let cls = Soup.attribute "class" li in
-      let label = Py.strip (own_text ~link content) in
+      let label = String.trim (own_text ~link content) in
       let job =
         Option.map
           (fun a ->
@@ -189,7 +189,7 @@ let parse_page page =
   let summary =
     Soup.select "h2" soup |> Soup.to_list
     |> List.concat_map (fun h2 ->
-        if Py.strip (String.concat "" (Soup.texts h2)) = "Summary of errors"
+        if String.trim (String.concat "" (Soup.texts h2)) = "Summary of errors"
         then
           Soup.next_siblings h2 |> Soup.elements |> Soup.to_list
           |> List.fold_left
@@ -225,27 +225,27 @@ let label_re = {|^(.*?) \((\w+)(?::\s*(.*))?\)$|}
     - (lint) *)
 let split_variant variant =
   if String.starts_with ~prefix:"(" variant then
-    ([], None, Py.strip ~chars:"()" variant, None)
+    ([], None, Util.strip ~chars:"()" variant, None)
   else
     let parts = String.split_on_char ',' variant in
     let n = List.length parts in
-    match Py.index_of "revdeps" parts with
+    match List.find_index (( = ) "revdeps") parts with
     | Some i ->
         if i = n - 1 then (* the job computing the list of revdeps *)
-          ( Py.take (i - 1) parts,
+          ( Util.take (i - 1) parts,
             List.nth_opt parts (i - 1),
             "revdeps-list",
             None )
         else
-          ( Py.take (i - 1) parts,
+          ( Util.take (i - 1) parts,
             List.nth_opt parts (i - 1),
             "revdeps",
-            Some (String.concat "," (Py.drop_list (i + 1) parts)) )
+            Some (String.concat "," (Util.drop (i + 1) parts)) )
     | None ->
         let last = List.nth parts (n - 1) in
         if (last = "lower-bounds" || last = "tests") && n >= 2 then
-          (Py.take (n - 2) parts, Some (List.nth parts (n - 2)), last, None)
-        else (Py.take (n - 1) parts, Some last, "build", None)
+          (Util.take (n - 2) parts, Some (List.nth parts (n - 2)), last, None)
+        else (Util.take (n - 1) parts, Some last, "build", None)
 
 let categorize status reason =
   let r = Option.value ~default:"" reason in
@@ -255,14 +255,14 @@ let categorize status reason =
     (* x-ci-accept-failures *)
   else if String.starts_with ~prefix:"[SKIP]" r then "not-available"
     (* package not installable on that variant *)
-  else if r = "Cancelled" || Py.contains (Py.prefix r 20) "Cancelled" then
-    "cancelled"
+  else if r = "Cancelled" || Util.contains (Util.prefix_chars r 20) "Cancelled"
+  then "cancelled"
   else if
     Rx.test
       {|curl failed|HTTP error code|Could not resolve|Connection (refused|reset|timed out)|}
       r
   then "network"
-  else if Py.contains r "Failed to get sources" then "sources"
+  else if Util.contains r "Failed to get sources" then "sources"
     (* fetched but could not be extracted/verified (e.g. symlinks on msys2) *)
   else if Rx.test {|\bfailed to build\b|a dependency failed|^\s*\S+ failed:$|} r
   then "dependency"
@@ -284,7 +284,7 @@ let parse_page_uncached page =
         else begin
           let variant =
             Http.unquote
-              (match Py.partition r.href "/variant/" with _, _, v -> v)
+              (match Util.partition r.href "/variant/" with _, _, v -> v)
           in
           let label, status, reason =
             match Rx.match_ ~flags:[ Rx.S ] label_re r.text with
@@ -293,7 +293,7 @@ let parse_page_uncached page =
           in
           let reason =
             match reason with
-            | Some s when s <> "" -> Some (Py.strip s)
+            | Some s when s <> "" -> Some (String.trim s)
             | _ -> None
           in
           let platform, target, kind, revdep = split_variant variant in
@@ -314,7 +314,7 @@ let parse_page_uncached page =
               platform;
               experimental =
                 List.exists
-                  (fun a -> Py.contains a "(experimental)")
+                  (fun a -> Util.contains a "(experimental)")
                   r.ancestors;
               in_summary = Hashtbl.mem summary_hrefs r.href;
               messages = r.msgs;
@@ -361,7 +361,7 @@ let load_commit ?(refresh = false) sha cache_dir =
   let page = fetch ~refresh url cache_dir in
   let data = parse_commit_page page in
   if refresh then begin
-    List.iter (fun j -> Py.remove (cache_path j.url cache_dir)) data.jobs;
+    List.iter (fun j -> Util.remove (cache_path j.url cache_dir)) data.jobs;
     net_set "refreshed" 1
   end;
   let page, data =
@@ -378,7 +378,7 @@ let load_commit ?(refresh = false) sha cache_dir =
   (* A test fixture is a snapshot: keep the page when recording one, even if
      some jobs never finish (stuck experimental jobs on old commits). *)
   if data.unfinished > 0 && Sys.getenv_opt "OPAM_CI_RECORD" <> Some "1" then
-    Py.remove (cache_path url cache_dir);
+    Util.remove (cache_path url cache_dir);
   (page, data)
 
 let resolve_sha target pr =
@@ -406,18 +406,18 @@ let resolve_sha target pr =
                 ]
             with _ -> { Proc.code = 1; stdout = ""; stderr = "git failed" }
           in
-          if Py.strip out.stdout = "" then
-            Py.die
+          if String.trim out.stdout = "" then
+            Util.die
               (Printf.sprintf "cannot resolve PR #%d: %s" pr
-                 (Py.prefix (Py.strip out.stderr) 200));
-          List.hd (Py.split out.stdout))
+                 (Util.prefix_chars (String.trim out.stderr) 200));
+          List.hd (Util.split out.stdout))
   | None -> (
       match Rx.search "([0-9a-f]{40})" (Option.value ~default:"" target) with
       | Some m -> Rx.group m 1
       | None ->
-          Py.die
+          Util.die
             (Printf.sprintf "cannot find a commit sha in %s"
-               (match target with Some t -> Py.repr t | None -> "None")))
+               (match target with Some t -> Util.repr t | None -> "None")))
 
 (* ------------------------------------------------------------------------ *)
 (* Log excerpt extraction *)
@@ -440,7 +440,7 @@ let log_text page =
   in
   let text = Html.unescape (Rx.sub "<[^>]+>" "" raw) in
   if
-    Py.contains text "Building with day10"
+    Util.contains text "Building with day10"
     || Rx.test "(?m)^ {8}#=== ERROR while " text
   then remove_day10_indent text
   else text
@@ -448,9 +448,9 @@ let log_text page =
 let error_line = {|^# ?(Error\b|.*\b(error|Error):)|}
 
 let excerpt ?(max_output_lines = 40) text : (string * string) list =
-  let lines = Array.of_list (Py.splitlines text) in
+  let lines = Array.of_list (Util.splitlines text) in
   let nl = Array.length lines in
-  let out = Py.Odict.create () in
+  let out = Odict.create () in
   (* 1. First "ERROR while compiling" block (opam repeats it in the error report). *)
   (match
      Array.find_index (String.starts_with ~prefix:"#=== ERROR while ") lines
@@ -462,7 +462,7 @@ let excerpt ?(max_output_lines = 40) text : (string * string) list =
         if
           k < nl
           && not
-               (Py.strip lines.(k) = ""
+               (String.trim lines.(k) = ""
                || String.starts_with ~prefix:"<><>" lines.(k))
         then block_end (k + 1)
         else k
@@ -476,19 +476,19 @@ let excerpt ?(max_output_lines = 40) text : (string * string) list =
           block
       in
       let block =
-        match Py.index_of "### output ###" block with
+        match List.find_index (( = ) "### output ###") block with
         | Some k ->
-            let body = Py.drop_list (k + 1) block in
-            let header = Py.take k block in
+            let body = Util.drop (k + 1) block in
+            let header = Util.take k block in
             let nb = List.length body in
             let body =
               if nb > max_output_lines then begin
                 let cut = nb - max_output_lines in
-                let tail = Py.drop_list (nb - max_output_lines) body in
+                let tail = Util.drop (nb - max_output_lines) body in
                 (* Keep the first error too when it is before the tail: dune
                     prints errors first and pages of warnings can follow. *)
                 let first =
-                  List.find_index (Rx.test error_line) (Py.take cut body)
+                  List.find_index (Rx.test error_line) (Util.take cut body)
                 in
                 match first with
                 | None ->
@@ -498,7 +498,7 @@ let excerpt ?(max_output_lines = 40) text : (string * string) list =
                     (if lo > 0 then
                        [ Printf.sprintf "# [... %d lines elided ...]" lo ]
                      else [])
-                    @ Py.lslice ~start:lo ~stop:hi body
+                    @ Util.sublist ~start:lo ~stop:hi body
                     @ (if cut > hi then
                          [
                            Printf.sprintf "# [... %d lines elided ...]"
@@ -512,7 +512,7 @@ let excerpt ?(max_output_lines = 40) text : (string * string) list =
             header @ [ "### output ###" ] @ body
         | None -> header
       in
-      Py.Odict.set out "error_block" (String.concat "\n" block));
+      Odict.set out "error_block" (String.concat "\n" block));
   (* 2. Solver failure. *)
   (match
      Array.find_index
@@ -520,7 +520,7 @@ let excerpt ?(max_output_lines = 40) text : (string * string) list =
        lines
    with
   | Some i ->
-      Py.Odict.set out "solver"
+      Odict.set out "solver"
         (String.concat "\n"
            (Array.to_list (Array.sub lines i (min 30 (nl - i)))))
   | None -> ());
@@ -530,37 +530,37 @@ let excerpt ?(max_output_lines = 40) text : (string * string) list =
       (fun l -> Rx.test_match {|^\d{4}-\d\d-\d\d \d\d:\d\d\.\d\d: |} l)
       (Array.to_list lines)
   in
-  (match Py.last_opt tail with
-  | Some l -> Py.Odict.set out "final" (Rx.sub ~count:1 {|^\S+ \S+ |} "" l)
+  (match Util.last_opt tail with
+  | Some l -> Odict.set out "final" (Rx.sub ~count:1 {|^\S+ \S+ |} "" l)
   | None -> ());
   Array.iter
     (fun l ->
       match
         Rx.match_ {|^\d{4}-\d\d-\d\d \d\d:\d\d\.\d\d: Job failed: (.*)|} l
       with
-      | Some m -> Py.Odict.set out "job_failed" (Rx.group m 1)
+      | Some m -> Odict.set out "job_failed" (Rx.group m 1)
       | None -> ())
     lines;
   (* 4. Builder and base commit info (useful to reproduce and compare). *)
   Array.iter
     (fun l ->
       (match Rx.search "New job: (.*)" l with
-      | Some m when not (Py.Odict.mem out "job") ->
-          Py.Odict.set out "job" (Py.strip (Rx.group m 1))
+      | Some m when not (Odict.mem out "job") ->
+          Odict.set out "job" (String.trim (Rx.group m 1))
       | _ -> ());
       (match
          Rx.search
            "git merge --no-edit ([0-9a-f]{40})|onto master ([0-9a-f]{40})" l
        with
-      | Some m when not (Py.Odict.mem out "base") ->
-          Py.Odict.set out "base"
+      | Some m when not (Odict.mem out "base") ->
+          Odict.set out "base"
             (match Rx.group_opt m 1 with Some g -> g | None -> Rx.group m 2)
       | _ -> ());
-      if Py.contains l "Building with day10" then
-        Py.Odict.set out "builder" "day10")
+      if Util.contains l "Building with day10" then
+        Odict.set out "builder" "day10")
     lines;
-  ignore (Py.Odict.setdefault out "builder" "classic");
-  Py.Odict.to_list out
+  ignore (Odict.setdefault out "builder" "classic");
+  Odict.to_list out
 
 (* ------------------------------------------------------------------------ *)
 (* Rendering *)
@@ -572,7 +572,7 @@ let platform_str job =
 let opam_vcmp a b =
   let order c =
     if c = '~' then -1
-    else if Py.is_alpha c then Char.code c
+    else if Util.is_alpha c then Char.code c
     else Char.code c + 256
   in
   let cmp_nondigit x y =
@@ -596,16 +596,16 @@ let opam_vcmp a b =
   let rec loop a b =
     if a = "" && b = "" then 0
     else
-      let ka = span (fun c -> not (Py.is_digit c)) a
-      and kb = span (fun c -> not (Py.is_digit c)) b in
+      let ka = span (fun c -> not (Util.is_digit c)) a
+      and kb = span (fun c -> not (Util.is_digit c)) b in
       let c = cmp_nondigit (String.sub a 0 ka) (String.sub b 0 kb) in
       if c <> 0 then c
       else
-        let a = Py.drop a ka and b = Py.drop b kb in
-        let da = span Py.is_digit a and db = span Py.is_digit b in
+        let a = Util.drop_chars a ka and b = Util.drop_chars b kb in
+        let da = span Util.is_digit a and db = span Util.is_digit b in
         (* Compare the numbers without overflowing: no leading zeros, then length, then digits. *)
         let strip0 s =
-          let s = Py.lstrip ~chars:"0" s in
+          let s = Util.lstrip ~chars:"0" s in
           s
         in
         let na = strip0 (String.sub a 0 da)
@@ -624,7 +624,7 @@ let opam_vcmp a b =
   loop a b
 
 let split_pkg full =
-  match Py.partition full "." with name, _, version -> (name, version)
+  match Util.partition full "." with name, _, version -> (name, version)
 
 let ocaml_version job =
   match job.platform with
@@ -643,7 +643,7 @@ let failure_key j : failure_key =
     j.kind,
     Rx.sub {|[`"']|-j \d+|} "" (Option.value ~default:"" j.reason) )
 
-let merge_jobs a b = Py.dedup (a @ b)
+let merge_jobs a b = Util.dedup (a @ b)
 
 let arches =
   [
@@ -704,9 +704,9 @@ let describe_job variant =
                       ( Printf.sprintf "%s %s, OCaml %s (day10 builder)"
                           (List.nth parts 1) (List.nth parts 2)
                           (List.nth parts 3),
-                        Py.drop_list 4 parts )
+                        Util.drop 4 parts )
                   else if builder = "compilers" && n >= 3 then
-                    Some ("OCaml " ^ List.nth parts 1, Py.drop_list 2 parts)
+                    Some ("OCaml " ^ List.nth parts 1, Util.drop 2 parts)
                   else if
                     List.mem builder
                       [ "distributions"; "extras"; "freebsd"; "macos" ]
@@ -735,7 +735,7 @@ let describe_job variant =
                               (List.filter
                                  (fun x -> x <> "")
                                  [
-                                   Py.replace
+                                   Util.replace
                                      (Option.value ~default:"" pre)
                                      "opam-" "opam ";
                                    ("OCaml " ^ ver
@@ -746,7 +746,7 @@ let describe_job variant =
                                  ])
                       | None -> p1
                     in
-                    Some (plat, Py.drop_list 2 parts)
+                    Some (plat, Util.drop 2 parts)
                   end
                   else None
                 in
@@ -821,7 +821,8 @@ let vkey v =
     (fun d -> Option.value ~default:max_int (int_of_string_opt d))
     (Rx.findall {|\d+|} v)
 
-let platform_words job = Py.last (Py.rsplit1 " on " (describe_job job.variant))
+let platform_words job =
+  Util.last (Util.rsplit1 " on " (describe_job job.variant))
 
 let failing_dep reason =
   match

@@ -2,18 +2,18 @@ open Suggestion.T
 open Ci
 
 let pad w s =
-  let n = Py.length s in
+  let n = Util.char_length s in
   if n >= w then s else s ^ String.make (w - n) ' '
 
 let render_summary sha (data : data) show_all =
   let jobs = data.jobs in
   Printf.printf "PR #%s  commit %s  %s%s\n"
     (match data.pr with Some n -> string_of_int n | None -> "None")
-    (Py.prefix sha 12) Net.base sha;
+    (Util.prefix_chars sha 12) Net.base sha;
   if data.unfinished > 0 then
     Printf.printf "CI still running: %d of %d jobs not finished\n"
       data.unfinished (List.length jobs);
-  let counts = Py.counter (List.map (fun j -> j.category) jobs) in
+  let counts = Util.counter (List.map (fun j -> j.category) jobs) in
   let counts = List.sort compare counts in
   Printf.printf "jobs: %d %s\n" (List.length jobs)
     (String.concat " "
@@ -62,7 +62,7 @@ let render_summary sha (data : data) show_all =
       end
       else print_endline "  own jobs: all passed (or ignored / not available)";
       if rev <> [] then begin
-        let by_pkg = Py.group_by (fun j -> j.revdep) rev in
+        let by_pkg = Util.group_by (fun j -> j.revdep) rev in
         Printf.printf "  reverse dependencies with problems: %d\n"
           (List.length by_pkg);
         List.iter
@@ -75,7 +75,7 @@ let render_summary sha (data : data) show_all =
                   (Option.value ~default:"" reason);
                 Printf.printf "    %s %s on: %s\n" (pad 32 "") (pad 14 "")
                   (String.concat ", " (List.map platform_str js)))
-              (Py.group_by (fun j -> (j.category, j.reason)) js))
+              (Util.group_by (fun j -> (j.category, j.reason)) js))
           (List.sort (fun (a, _) (b, _) -> compare a b) by_pkg)
       end)
     targets
@@ -172,7 +172,7 @@ let render_compare ?(show_all = false) target (info : Json.t)
     | `Int n -> string_of_int n
     | `String s -> s
     | _ -> "None")
-    (Py.prefix sha 12);
+    (Util.prefix_chars sha 12);
   let order =
     [ "NEW"; "builder-specific"; "no-baseline"; "unknown"; "pre-existing" ]
   in
@@ -189,9 +189,13 @@ let render_compare ?(show_all = false) target (info : Json.t)
   let counts =
     List.map
       (fun (k, l) -> (k, List.length l))
-      (Py.group_by (fun r -> List.hd (Py.split_on " (" (verdict r))) results)
+      (Util.group_by
+         (fun r -> List.hd (Util.split_on " (" (verdict r)))
+         results)
   in
-  let pos k = match Py.index_of k order with Some i -> i | None -> 99 in
+  let pos k =
+    match List.find_index (( = ) k) order with Some i -> i | None -> 99
+  in
   let counts =
     List.stable_sort
       (fun (a, _) (b, _) -> Stdlib.compare (pos a) (pos b))
@@ -203,7 +207,7 @@ let render_compare ?(show_all = false) target (info : Json.t)
         (List.map (fun (k, v) -> Printf.sprintf "%s=%d" k v) counts));
   let compact_header = ref false in
   let sorted =
-    Py.sort_by
+    Util.sort_by
       (fun r -> (rank r, Json.str "revdep" r, Json.str "ocaml" r))
       results
   in
@@ -223,7 +227,7 @@ let render_compare ?(show_all = false) target (info : Json.t)
           match Json.list "new" r with x :: _ -> reason x | [] -> ""
         in
         print_endline
-          (Py.prefix
+          (Util.prefix_chars
              (Printf.sprintf "    %s %s"
                 (pad 36
                    (Json.str "revdep" r ^ " / OCaml " ^ Json.str "ocaml" r))
@@ -268,14 +272,15 @@ let jobs_note r =
     there is one in the second half, else with "…" (by md_text). *)
 let cut s limit =
   let s = Md.flat s in
-  if Py.length s <= limit then s
+  if Util.char_length s <= limit then s
   else
     (* Python: [.!?](?=\s) in s[:limit + 1] *)
-    let p = Py.prefix s (limit + 1) in
+    let p = Util.prefix_chars s (limit + 1) in
     let ends = List.map (fun m -> Rx.end_ m - 1) (Rx.finditer {|[.!?]\s|} p) in
     (* Ends in characters: the byte offset of the end of the punctuation. *)
-    match Py.last_opt ends with
-    | Some e when Py.length (String.sub p 0 e) > limit / 2 -> String.sub p 0 e
+    match Util.last_opt ends with
+    | Some e when Util.char_length (String.sub p 0 e) > limit / 2 ->
+        String.sub p 0 e
     | _ -> s
 
 let release_date = {|release date of (\S+) \((\d{4}-\d\d-\d\d)\)$|}
@@ -323,8 +328,10 @@ let evidence_text (ev : (string * bool option) list) =
       match v with
       | None -> ()
       | Some v ->
-          let k = Py.replace k " (installed in failing job)" " (used by CI)" in
-          let pkg, _, rest = Py.partition k " " in
+          let k =
+            Util.replace k " (installed in failing job)" " (used by CI)"
+          in
+          let pkg, _, rest = Util.partition k " " in
           parts :=
             Printf.sprintf "%s %s"
               (if Some pkg = !name && rest <> "" then rest else k)
@@ -353,7 +360,7 @@ let mentions_day10 results =
   List.exists
     (fun r ->
       List.exists
-        (fun s -> Py.contains s "day10")
+        (fun s -> Util.contains s "day10")
         (List.map Suggestion.str
            [ r.Suggestion.job; r.variant; r.error; r.note; r.title ]
         @ Suggestion.list r.jobs))
@@ -369,7 +376,7 @@ let opam_path pkg =
     Some (Printf.sprintf "packages/%s/%s.%s/opam" name name ver)
   else None
 
-let strip_nl s = Py.strip ~chars:"\n" s
+let strip_nl s = Util.strip ~chars:"\n" s
 
 (** The change of a suggestion as a fenced diff (Markdown). [old] and [new] are
     untrusted (they quote opam files, logs or an LLM answer): only ever shown in
@@ -377,23 +384,23 @@ let strip_nl s = Py.strip ~chars:"\n" s
 let diff_block r =
   let new_ = Suggestion.str_field r.Suggestion.new_ in
   let new_lines, hint =
-    if String.contains (Py.strip new_) '\n' then
-      ( Py.splitlines (strip_nl new_),
+    if String.contains (String.trim new_) '\n' then
+      ( Util.splitlines (strip_nl new_),
         "" (* several lines (an LLM answer): no hint *) )
     else
-      match Py.split_on "   " new_ with
+      match Util.split_on "   " new_ with
       | first :: rest ->
           ( [ first ],
             String.concat " "
               (List.filter_map
-                 (fun x -> match Py.strip x with "" -> None | x -> Some x)
+                 (fun x -> match String.trim x with "" -> None | x -> Some x)
                  rest) )
       | [] -> ([ "" ], "")
   in
   let lines =
     List.map
       (fun l -> "- " ^ l)
-      (Py.splitlines (strip_nl (Suggestion.str_field r.old)))
+      (Util.splitlines (strip_nl (Suggestion.str_field r.old)))
     @ List.map (fun l -> "+ " ^ l) new_lines
   in
   Md.md_fence ~lang:"diff" (String.concat "\n" lines)
@@ -450,7 +457,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
       "";
       (Printf.sprintf "From the %s for commit %s. Nothing was rebuilt: these "
          ci
-         (if sha_ok then Md.md_code (Py.prefix sha 12) else "?")
+         (if sha_ok then Md.md_code (Util.prefix_chars sha 12) else "?")
       ^ "suggestions come from the CI logs, the documentation of each package \
          version on ocaml.org, and "
       ^ "the opam files. Please check them before applying them."
@@ -539,7 +546,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
                         "+ "
                         ^ Md.flat
                             (List.hd
-                               (Py.split_on "   "
+                               (Util.split_on "   "
                                   (Suggestion.str_field
                                      c.Suggestion.Candidate.new_))))
                       cands));
@@ -668,7 +675,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
             | Some url ->
                 Printf.sprintf "[%s](%s)" (Md.md_text (describe_job v)) url
             | None -> Md.md_text (describe_job v))
-          (Py.take n js)
+          (Util.take n js)
       in
       if js = [] then ""
       else
@@ -698,7 +705,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
       [ head r ^ error r ^ note r ]
       @
       if Suggestion.nonempty_field r.Suggestion.new_ then
-        [ "  " ^ Py.replace (diff_block r) "\n" "\n  " ]
+        [ "  " ^ Util.replace (diff_block r) "\n" "\n  " ]
       else []);
   details "Fix goes elsewhere" (by "elsewhere") (fun r ->
       [
@@ -707,7 +714,8 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
              "<br>Suggested change: "
              ^ Md.md_code
                  (List.hd
-                    (Py.split_on "   " (Suggestion.str_field r.Suggestion.new_)))
+                    (Util.split_on "   "
+                       (Suggestion.str_field r.Suggestion.new_)))
            else "")
         ^ note r ^ job_links r;
       ]);
@@ -735,16 +743,16 @@ let commentable_lines patch =
             lines := !nw :: !lines;
             incr nw
           end)
-    (Py.splitlines (Option.value ~default:"" patch));
+    (Util.splitlines (Option.value ~default:"" patch));
   !lines
 
 (** [(line number, replacement)] for a fix on the file [text], or []. *)
 let line_edits r text =
-  let lines = Array.of_list (Py.splitlines (Option.value ~default:"" text)) in
+  let lines = Array.of_list (Util.splitlines (Option.value ~default:"" text)) in
   let nl = Array.length lines in
   let new_ =
-    Py.strip
-      (List.hd (Py.split_on "   " (Suggestion.str_field r.Suggestion.new_)))
+    String.trim
+      (List.hd (Util.split_on "   " (Suggestion.str_field r.Suggestion.new_)))
   in
   let indent l =
     match Rx.match_ {|\s*|} l with Some m -> Rx.group0 m | None -> ""
@@ -760,23 +768,25 @@ let line_edits r text =
     (* warning 41: every %{pkg:...}% *)
     let name = fst (split_pkg (Suggestion.str_field r.Suggestion.failing)) in
     let pat = "%{" ^ name ^ ":" in
-    List.filter_map
-      (fun (i, l) ->
-        if Py.contains l pat then Some (i + 1, Py.replace l pat "%{_:")
-        else None)
-      (Py.enumerate (Array.to_list lines))
+    List.filter_map Fun.id
+      (List.mapi
+         (fun i l ->
+           if Util.contains l pat then Some (i + 1, Util.replace l pat "%{_:")
+           else None)
+         (Array.to_list lines))
   end
   else if
     new_ = ""
-    || Py.contains (List.hd (String.split_on_char '"' new_)) "<"
-    || Py.contains new_ "<hash>" || Py.contains new_ "<URL"
+    || Util.contains (List.hd (String.split_on_char '"' new_)) "<"
+    || Util.contains new_ "<hash>"
+    || Util.contains new_ "<URL"
     || String.starts_with ~prefix:"in " new_
     || String.starts_with ~prefix:"x-ci-" new_
     || String.starts_with ~prefix:"available:" new_
   then []
   else if Suggestion.nonempty_field r.old then begin
-    let old = Py.strip (Suggestion.str_field r.old) in
-    match find_index (fun l -> Py.strip l = old) with
+    let old = String.trim (Suggestion.str_field r.old) in
+    match find_index (fun l -> String.trim l = old) with
     | Some i -> [ (i + 1, indent lines.(i) ^ new_) ]
     | None -> []
   end
@@ -789,7 +799,7 @@ let line_edits r text =
     | Some start -> (
         let rec go i =
           if i >= nl then None
-          else if Py.strip lines.(i) = "]" then Some i
+          else if String.trim lines.(i) = "]" then Some i
           else go (i + 1)
         in
         let last =
@@ -832,7 +842,7 @@ let build_review ~(raw : string -> string option) sha (data : data)
   let head =
     match head with
     | Some (`Assoc _ as h) -> h
-    | _ -> Py.die "cannot build a review: unknown PR (pass --pr N)"
+    | _ -> Util.die "cannot build a review: unknown PR (pass --pr N)"
   in
   let head_sha = Json.str "sha" (Json.member "head" head) in
   if head_sha <> sha then
@@ -840,7 +850,8 @@ let build_review ~(raw : string -> string option) sha (data : data)
       "note: the CI results are for %s but the PR head is %s: line comments \
        are skipped (they would point at the wrong lines)\n\
        %!"
-      (Py.prefix sha 12) (Py.prefix head_sha 12);
+      (Util.prefix_chars sha 12)
+      (Util.prefix_chars head_sha 12);
   let pr = Option.get pr in
   let files =
     match
@@ -965,7 +976,7 @@ let render_suggestions (results : Suggestion.t list) =
         in
         print_endline
           ("  " ^ label
-          ^ String.concat ", " (List.map describe_job (Py.take 5 others))
+          ^ String.concat ", " (List.map describe_job (Util.take 5 others))
           ^
           if List.length others > 5 then
             Printf.sprintf " and %d more" (List.length others - 5)
@@ -1024,7 +1035,7 @@ let render_suggestions (results : Suggestion.t list) =
           Printf.printf "    + %s\n" (Suggestion.str_field c.new_);
           match c.changelog with
           | Some log when not (Suggestion.changelog_is_empty log) ->
-              let lines = Py.splitlines (Suggestion.str log.text) in
+              let lines = Util.splitlines (Suggestion.str log.text) in
               Printf.printf
                 "      changelog (%s, %s), written by its authors:\n"
                 (match Suggestion.get log.file with
@@ -1033,7 +1044,7 @@ let render_suggestions (results : Suggestion.t list) =
                 (String.concat ", " (Suggestion.list log.versions));
               List.iter
                 (fun line -> Printf.printf "        | %s\n" line)
-                (Py.take 12 lines);
+                (Util.take 12 lines);
               if List.length lines > 12 || log.cut = Some true then
                 print_endline "        | …"
           | _ -> ())
@@ -1046,5 +1057,5 @@ let render_suggestions (results : Suggestion.t list) =
       if Suggestion.nonempty r.llm_prompt then
         print_endline
           ("  LLM prompt (dry run):\n    "
-          ^ Py.replace (Suggestion.str r.llm_prompt) "\n" "\n    "))
+          ^ Util.replace (Suggestion.str r.llm_prompt) "\n" "\n    "))
     results

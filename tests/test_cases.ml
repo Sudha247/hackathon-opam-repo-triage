@@ -689,14 +689,14 @@ let matches s exp =
       match k with
       | "candidate" ->
           List.exists
-            (fun c -> Py.contains (Json.str "new" c) v)
+            (fun c -> Util.contains (Json.str "new" c) v)
             (Json.list "candidates" s)
       | "changelog" ->
           List.exists
             (fun c ->
-              Py.contains (Json.str "text" (Json.member "changelog" c)) v)
+              Util.contains (Json.str "text" (Json.member "changelog" c)) v)
             (Json.list "candidates" s)
-      | _ -> Py.contains (field_text (Json.member k s)) v)
+      | _ -> Util.contains (field_text (Json.member k s)) v)
     exp
 
 (** Every suggestion says where its fix goes ([where_kind]), and the same place
@@ -725,15 +725,15 @@ let check_where sugg =
 
 let test_case case () =
   let _, _, _, exps = find_case case in
-  if not (Py.is_dir (Filename.concat fixtures case)) then
+  if not (Util.is_dir (Filename.concat fixtures case)) then
     Alcotest.skip () (* no fixture (run with --record) *);
   let out = run case in
-  let tail n s = Py.suffix s n in
+  let tail n s = Util.suffix_chars s n in
   Alcotest.(check int) ("exit status: " ^ tail 1000 out.stderr) 0 out.code;
   Alcotest.(check bool)
     ("offline cache misses: " ^ tail 1500 out.stderr)
     true
-    (Py.contains out.stderr "offline cache misses: 0");
+    (Util.contains out.stderr "offline cache misses: 0");
   let sugg = Json.list "suggestions" (Json.parse out.stdout) in
   check_where sugg;
   List.iter
@@ -772,25 +772,26 @@ let compress ?(only = fun _ -> true) d =
         || String.ends_with ~suffix:".json" name)
         && only name
       then begin
-        Py.write_gzip (p ^ ".gz") (Py.read_file p);
-        Py.remove p
+        Util.write_gzip (p ^ ".gz")
+          (In_channel.with_open_bin p In_channel.input_all);
+        Util.remove p
       end)
-    (Py.listdir d)
+    (Util.listdir d)
 
 let rec du p =
-  if Py.is_dir p then
-    List.fold_left (fun a n -> a + du (Filename.concat p n)) 0 (Py.listdir p)
+  if Util.is_dir p then
+    List.fold_left (fun a n -> a + du (Filename.concat p n)) 0 (Util.listdir p)
   else try (Unix.lstat p).Unix.st_size with Unix.Unix_error _ -> 0
 
 let record names =
   List.iter
     (fun case ->
       let d = Filename.concat fixtures case in
-      Py.rmtree d;
+      Util.rmtree d;
       let out = run ~offline:false case in
       Printf.printf "%s: rc=%d %s\n%!" case out.code
-        (match Py.last_opt (Py.splitlines (Py.strip out.stderr)) with
-        | Some l -> Py.repr l
+        (match Util.last_opt (Util.splitlines (String.trim out.stderr)) with
+        | Some l -> Util.repr l
         | None -> "");
       compress d;
       Printf.printf "  fixture size: %d KiB\n%!" (du d / 1024))
@@ -815,12 +816,12 @@ let top_up ?(rounds = 4) names =
                (fun l ->
                  String.starts_with ~prefix:"  miss: " l
                  && not (String.starts_with ~prefix:"  miss: mcp " l))
-               (Py.splitlines out.stderr)
+               (Util.splitlines out.stderr)
            in
            if others <> [] then
              Printf.printf "%s: %d other misses, re-record it: %s\n%!" case
                (List.length others)
-               (String.concat ", " (Py.take 2 others));
+               (String.concat ", " (Util.take 2 others));
            if misses = [] then raise Exit;
            let src = Sources.create d in
            List.iter
@@ -830,7 +831,7 @@ let top_up ?(rounds = 4) names =
                    ignore (Sources.mcp src tool args);
                    incr added
                | _ -> ())
-             (Py.dedup misses)
+             (Util.dedup misses)
          done
        with Exit -> ());
       compress ~only:(fun name -> String.starts_with ~prefix:"mcp-" name) d;

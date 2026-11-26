@@ -103,11 +103,13 @@ let test_timeout_keeps_counts () =
   let result, err, net = T.run_tool ~tool [] 3 in
   Alcotest.(check bool) "fast" true (Unix.gettimeofday () -. t0 < 30.);
   Alcotest.(check bool) "no result" true (result = None);
-  Alcotest.(check bool) "timeout" true (Py.contains (Option.get err) "timeout");
+  Alcotest.(check bool)
+    "timeout" true
+    (Util.contains (Option.get err) "timeout");
   Alcotest.(check (list int))
     "counts" [ 1; 2; 1 ]
     [ T.count net "llm"; T.count net "mcp-errors"; T.count net "timeout" ];
-  Py.rmtree dir
+  Util.rmtree dir
 
 let test_graphql_errors () =
   let data =
@@ -254,7 +256,7 @@ let fixtures =
 let test_refresh_drops_logs () =
   let sha = "eafb2a69786279b98b31f3e5cd8a62ce432cf343" in
   let page =
-    Py.read_gzip
+    Util.read_gzip
       (Net.cache_path (Net.base ^ sha)
          (Filename.concat fixtures "goblint-cil-baseline")
       ^ ".gz")
@@ -276,20 +278,20 @@ let test_refresh_drops_logs () =
       ignore (Ci.load_commit sha dir);
       Alcotest.(check bool) "log kept" true (Sys.file_exists log);
       (* no rebuild: the cached log is kept *)
-      Py.Odict.remove Net.net "refreshed";
+      Odict.remove Net.net "refreshed";
       ignore (Ci.load_commit sha dir);
       Alcotest.(check bool)
         "not refreshed" false
-        (Py.Odict.mem Net.net "refreshed");
+        (Odict.mem Net.net "refreshed");
       ignore (Ci.load_commit ~refresh:true sha dir);
       Alcotest.(check bool) "log dropped" false (Sys.file_exists log);
       (* rebuilt: fetched again when needed *)
       Alcotest.(check int) "fetches" 2 (List.length !fetched);
       Alcotest.(check (option int))
         "said" (Some 1)
-        (Py.Odict.get Net.net "refreshed");
-      Py.Odict.remove Net.net "refreshed");
-  Py.rmtree dir;
+        (Odict.get Net.net "refreshed");
+      Odict.remove Net.net "refreshed");
+  Util.rmtree dir;
   (* The page could not be fetched: the logs of the previous build stay, and it is not said. *)
   let dir = tmpdir () in
   (Http.hook := fun _ -> raise (Http.Net_error "503 after the retries"));
@@ -306,8 +308,8 @@ let test_refresh_drops_logs () =
       Alcotest.(check bool)
         "logs stay" true
         (Sys.file_exists (Net.cache_path job.url dir));
-      Alcotest.(check bool) "not said" false (Py.Odict.mem Net.net "refreshed"));
-  Py.rmtree dir
+      Alcotest.(check bool) "not said" false (Odict.mem Net.net "refreshed"));
+  Util.rmtree dir
 
 (* ------------------------------------------------------------------------ *)
 (* PageMainTest: main() on synthetic states and a fake tool. *)
@@ -422,7 +424,9 @@ let run_main ?jobs ?(suggest_ok = true) ?(args = []) ?(llm = false)
               ]
              @ args))
         ());
-  (read_state e, List.rev !calls, Py.strip (Py.read_file gh_out))
+  ( read_state e,
+    List.rev !calls,
+    String.trim (In_channel.with_open_bin gh_out In_channel.input_all) )
 
 let save e prs =
   let oc = open_out e.state in
@@ -796,7 +800,7 @@ let test_llm_off_for_the_run () =
       in
       Alcotest.(check (list int))
         "asked"
-        (Py.take (List.length nets) [ 1; 2; 3 ])
+        (Util.take (List.length nets) [ 1; 2; 3 ])
         asked;
       (* analysed without the LLM *)
       Alcotest.(check bool)
@@ -819,8 +823,10 @@ let test_llm_off_for_the_run () =
     (Json.str_opt "off" (Json.member "llm" data));
   Alcotest.(check bool)
     "summary" true
-    (Py.contains
-       (Py.read_file (Filename.concat e.tmp "summary.md"))
+    (Util.contains
+       (In_channel.with_open_bin
+          (Filename.concat e.tmp "summary.md")
+          In_channel.input_all)
        "ANTHROPIC_API_KEY");
   (* A success between failures: not in a row. *)
   save e [];
@@ -1000,8 +1006,10 @@ let test_pending_summary_failed_keeps_failed_analysis () =
 (** What the last run printed on stderr, with the seconds and the temporary
     directory masked. *)
 let run_err e =
-  Rx.sub {|\(\d+\.\ds;|} "(Ns;" (Py.read_file (err_file e)) |> fun s ->
-  Py.replace s e.tmp "TMP" |> String.split_on_char '\n'
+  Rx.sub {|\(\d+\.\ds;|} "(Ns;"
+    (In_channel.with_open_bin (err_file e) In_channel.input_all)
+  |> fun s ->
+  Util.replace s e.tmp "TMP" |> String.split_on_char '\n'
   |> List.filter (( <> ) "")
 
 (** The counters of the last run (the [run] member of the page's data). *)

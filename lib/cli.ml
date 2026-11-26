@@ -27,7 +27,7 @@ let counts_line () =
   String.concat ", "
     (List.map
        (fun (k, v) -> Printf.sprintf "%s=%d" k v)
-       (Py.Odict.to_list Net.net))
+       (Odict.to_list Net.net))
 
 (** Run jobs on [n] threads, keeping the order of the results. *)
 let parallel_map n f l =
@@ -76,13 +76,13 @@ let logs args sha (data : data) =
       Printf.eprintf
         "note: %d jobs selected, fetching the first %d (use --max)\n%!"
         (List.length sel) args.max;
-      Py.take args.max sel
+      Util.take args.max sel
     end
     else sel
   in
   let work j =
     try (j, `Ok (excerpt (log_text (Net.fetch j.url args.cache_dir))))
-    with e -> (j, `Error (Py.exn_text e))
+    with e -> (j, `Error (Util.exn_text e))
     (* keep going: one unreachable log must not hide the others *)
   in
   let results = parallel_map 2 work sel in
@@ -121,7 +121,7 @@ let logs args sha (data : data) =
         in
         Printf.printf "%s  [%s] builder=%s base=%s\n" j.variant j.category
           builder
-          (Py.prefix (Option.value ~default:"?" (g "base")) 12);
+          (Util.prefix_chars (Option.value ~default:"?" (g "base")) 12);
         print_endline j.url;
         (match g "job" with
         | Some s when s <> "" -> print_endline ("job: " ^ s)
@@ -176,7 +176,9 @@ let compare args sha (data : data) =
             | exception (Http.Http_error _ as e) ->
                 Printf.eprintf
                   "== %s: baseline CI page for %s (%s) unavailable: %s\n%!" t
-                  (Dict.str info "prev") (Py.prefix bsha 12) (Http.error_text e);
+                  (Dict.str info "prev")
+                  (Util.prefix_chars bsha 12)
+                  (Http.error_text e);
                 None
             | base_data ->
                 let results = Render.compare data.jobs base_data.jobs in
@@ -237,7 +239,7 @@ let suggest_command args sha (data : data) =
       (List.length !Net.offline_misses);
     List.iter
       (fun m -> Printf.eprintf "  miss: %s\n%!" m)
-      (Py.take 10 !Net.offline_misses)
+      (Util.take 10 !Net.offline_misses)
   end;
   let pr_num =
     match data.pr with Some n -> string_of_int n | None -> "None"
@@ -261,8 +263,8 @@ let suggest_command args sha (data : data) =
             ]
         in
         print_endline
-          (match Py.prefix (Py.strip out.stdout) 300 with
-          | "" -> Py.strip out.stderr
+          (match Util.prefix_chars (String.trim out.stdout) 300 with
+          | "" -> String.trim out.stderr
           | o -> o)
       end
       else print_json review;
@@ -275,7 +277,7 @@ let suggest_command args sha (data : data) =
       let body = Render.render_comment sha data results in
       if args.post then begin
         if data.pr = None then
-          Py.die "cannot post: the CI page does not name a PR";
+          Util.die "cannot post: the CI page does not name a PR";
         let out =
           Proc.run ~input:body
             [
@@ -283,7 +285,9 @@ let suggest_command args sha (data : data) =
             ]
         in
         print_endline
-          (match Py.strip out.stdout with "" -> Py.strip out.stderr | o -> o)
+          (match String.trim out.stdout with
+          | "" -> String.trim out.stderr
+          | o -> o)
       end
       else print_endline body;
       Printf.eprintf "network requests: %s\n%!" (counts_line ())
@@ -329,7 +333,7 @@ let main args =
   let sha = resolve_sha args.target args.pr in
   let _page, data = load_commit ~refresh:args.refresh sha args.cache_dir in
   if data.jobs = [] then
-    Py.die "no jobs found (CI not started yet, or the page layout changed)";
+    Util.die "no jobs found (CI not started yet, or the page layout changed)";
   if data.unfinished > 0 then
     Printf.eprintf
       "note: CI still running: %d of %d jobs not finished; these are the \

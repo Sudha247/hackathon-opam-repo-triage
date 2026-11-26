@@ -27,7 +27,7 @@ let outside_code md =
       | Some f -> (
           match m with
           | Some m
-            when Py.strip line = Rx.group m 1
+            when String.trim line = Rx.group m 1
                  && String.length (Rx.group m 1) >= String.length f ->
               fence := None
           | _ -> ())
@@ -41,7 +41,7 @@ let outside_code md =
   let res = Buffer.create n in
   let i = ref 0 in
   while !i < n do
-    if text.[!i] = '\\' && !i + 1 < n && not (Py.is_alnum text.[!i + 1]) then
+    if text.[!i] = '\\' && !i + 1 < n && not (Util.is_alnum text.[!i + 1]) then
       i := !i + 2
     else if text.[!i] = '`' then begin
       let k = ref 0 in
@@ -84,7 +84,7 @@ let assert_inert md =
 let contains s sub =
   Alcotest.(check bool)
     (Printf.sprintf "%S in the report" sub)
-    true (Py.contains s sub)
+    true (Util.contains s sub)
 
 let test_llm_digest () =
   let r =
@@ -118,7 +118,7 @@ let test_llm_digest () =
         (Rx.sub {|\[`#\d+`\]\(https://x\.github\.io/triage/#pr-\d+\)|} "" !md);
       Alcotest.(check bool)
         "no PR link" false
-        (Py.contains !md "github.com/ocaml/opam-repository/pull"))
+        (Util.contains !md "github.com/ocaml/opam-repository/pull"))
     [ None; Some "https://x.github.io/triage/" ];
   contains (D.report items 2) "`ocaml/opam-repository#123`";
   contains !md "[`#123`](https://x.github.io/triage/#pr-123)";
@@ -152,7 +152,7 @@ let test_llm_digest_groups () =
     D.report (List.init 5 (fun _ -> (`Int 29110, a ())) @ [ (`Int 1, b) ]) 2
   in
   Alcotest.(check bool)
-    (Py.prefix md 80) true
+    (Util.prefix_chars md 80) true
     (String.starts_with
        ~prefix:"2 LLM answers in 2 PRs (2 medium confidence), in 1 groups" md)
 

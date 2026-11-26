@@ -86,7 +86,7 @@ let unescape s =
     Rx.subf {|&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[A-Za-z][A-Za-z0-9]*;?)|}
       (fun m ->
         let r = Rx.group m 1 in
-        let r' = Py.rstrip ~chars:";" r in
+        let r' = Util.rstrip ~chars:";" r in
         if r.[0] = '#' then begin
           let n =
             if String.length r' > 1 && (r'.[1] = 'x' || r'.[1] = 'X') then

@@ -118,7 +118,7 @@ let apply ?(pr_packages = [ "x.1" ]) ?suggest ?res r =
            (Sources.create !tmp) !tmp pr_packages 5 "m" false));
   r
 
-let contains s sub = Py.contains s sub
+let contains s sub = Util.contains s sub
 
 let check_contains msg s sub =
   Alcotest.(check bool) (msg ^ ": " ^ s) true (contains s sub)
@@ -335,7 +335,7 @@ let message ?(stop = "end_turn") text : Llm.api_result =
        ])
 
 let llm_files () =
-  List.filter (fun f -> String.starts_with ~prefix:"llm-" f) (Py.listdir !tmp)
+  List.filter (fun f -> String.starts_with ~prefix:"llm-" f) (Util.listdir !tmp)
 
 let suggest_once prompt =
   (Llm.llm_prompt_hook := fun _ _ _ _ _ _ -> prompt);
@@ -412,7 +412,7 @@ let sdk_run ?(n = 3) ?(limit = 2) ?(runs = 1) create =
   List.init runs (fun _ ->
       Llm.llm_state.streak <- 0;
       Llm.llm_state.off <- None;
-      Net.net.Py.Odict.kv <- [];
+      Net.net.Odict.kv <- [];
       let before = !calls in
       let rs =
         List.init n (fun i ->
@@ -425,7 +425,7 @@ let sdk_run ?(n = 3) ?(limit = 2) ?(runs = 1) create =
             Llm.apply_llm rs (data jobs) (Sources.create !tmp) !tmp [ "x.1" ]
               limit "m" false)
       in
-      (!calls - before, left, Py.Odict.get Net.net "llm-off"))
+      (!calls - before, left, Odict.get Net.net "llm-off"))
 
 let runs = Alcotest.(list (triple int int (option int)))
 
@@ -554,8 +554,8 @@ let test_key_error_line () =
     "tests"
     (Some {|The compilation of pds.6.55 failed at "pkg-config glib-2.0"|})
     (Llm.key_error_line
-       (Py.replace head "conf-glib-2.1" "pds.6.55"
-       ^ Py.replace block "conf-glib-2.1" "pds.6.55"
+       (Util.replace head "conf-glib-2.1" "pds.6.55"
+       ^ Util.replace block "conf-glib-2.1" "pds.6.55"
        ^ "### output ###\n# Passed tests\n"))
 
 (* The request sent to the Messages API, and the SDK's retry: not in the

@@ -130,14 +130,14 @@ let llm_prompt src (r : Suggestion.t) (job : Ci.job) text (data : Ci.data)
       List.assoc_opt "error_block" (!excerpt_hook ~max_output_lines:80 text)
     with
     | Some b when b <> "" -> b
-    | _ -> String.concat "\n" (Py.lslice ~start:(-80) info.error_lines)
+    | _ -> String.concat "\n" (Util.sublist ~start:(-80) info.error_lines)
   in
   let deps = Loginfo.direct_deps (Some opam) in
-  let installed = Py.Odict.create () in
+  let installed = Odict.create () in
   List.iter
     (fun d ->
       match List.assoc_opt d info.installed with
-      | Some v -> Py.Odict.set installed d v
+      | Some v -> Odict.set installed d v
       | None -> ())
     deps;
   let same =
@@ -150,7 +150,9 @@ let llm_prompt src (r : Suggestion.t) (job : Ci.job) text (data : Ci.data)
   let state (j : Ci.job) =
     if j.category = "passed" then "passed"
     else
-      let why = Py.prefix (Py.strip (Option.value ~default:"" j.reason)) 100 in
+      let why =
+        Util.prefix_chars (String.trim (Option.value ~default:"" j.reason)) 100
+      in
       Printf.sprintf "FAILED (%s%s)" j.category
         (if why <> "" then ": " ^ why else "")
   in
@@ -159,7 +161,7 @@ let llm_prompt src (r : Suggestion.t) (job : Ci.job) text (data : Ci.data)
       (List.map
          (fun (j : Ci.job) ->
            Printf.sprintf "- %s: %s" (String.concat "/" j.platform) (state j))
-         (Py.take 30 same))
+         (Util.take 30 same))
   in
   let dims = Ci.job_dims job in
   (* What opam did with the failing package, in order: the plans (install,
@@ -180,15 +182,15 @@ let llm_prompt src (r : Suggestion.t) (job : Ci.job) text (data : Ci.data)
           || Rx.test_match
                (Printf.sprintf {|^#=== ERROR while \w+ %s\.|} name_rx)
                l
-        then Some (Py.strip l)
+        then Some (String.trim l)
         else None)
-      (Py.splitlines text)
+      (Util.splitlines text)
   in
   let revdep =
     match job.revdep with Some d when d <> "" -> Some d | _ -> None
   in
   let actions_text =
-    match String.concat "\n" (Py.lslice ~start:(-60) actions) with
+    match String.concat "\n" (Util.sublist ~start:(-60) actions) with
     | "" -> "(none found)"
     | s -> s
   in
@@ -241,8 +243,12 @@ Earlier analysis: %s|}
     (if matrix = "" then "(none)" else matrix)
     (Json.dumps
        (`Assoc
-          (List.map (fun (k, v) -> (k, `String v)) (Py.Odict.to_list installed))))
-    pkg (Py.prefix opam 6000) pkg actions_text (Py.prefix block 12000) earlier
+          (List.map (fun (k, v) -> (k, `String v)) (Odict.to_list installed))))
+    pkg
+    (Util.prefix_chars opam 6000)
+    pkg actions_text
+    (Util.prefix_chars block 12000)
+    earlier
 
 let llm_prompt_hook = ref llm_prompt
 
@@ -252,7 +258,7 @@ let name_tokens s =
   let n = String.length s in
   let word_at i =
     let c = s.[i] in
-    if Py.is_alnum c || c = '_' || c = '+' || c = '.' || c = '-' then Some 1
+    if Util.is_alnum c || c = '_' || c = '+' || c = '.' || c = '-' then Some 1
     else if Char.code c < 0x80 then None
     else
       let u, k = Json.utf8_at s i in
@@ -260,7 +266,7 @@ let name_tokens s =
   in
   let rec scan i acc =
     if i >= n then List.rev acc
-    else if Py.is_alnum s.[i] || s.[i] = '_' then begin
+    else if Util.is_alnum s.[i] || s.[i] = '_' then begin
       let j = ref (i + 1) in
       let continue = ref true in
       while !continue && !j < n do
@@ -313,7 +319,8 @@ let llm_answer_error (out : Json.t) =
               if List.mem v enum then None
               else
                 Some
-                  (Printf.sprintf "unknown %s %s" k (Py.repr (Py.prefix v 40))))
+                  (Printf.sprintf "unknown %s %s" k
+                     (Util.repr (Util.prefix_chars v 40))))
             [ ("fix_in", fix_in_enum); ("confidence", confidence_enum) ])
   | _ -> Some "not a JSON object"
 
@@ -328,11 +335,11 @@ type api_result =
 
 let api_url () =
   let base =
-    match Py.getenv_nonempty "ANTHROPIC_BASE_URL" with
+    match Util.getenv_nonempty "ANTHROPIC_BASE_URL" with
     | Some b -> b
     | None -> "https://api.anthropic.com"
   in
-  Py.rstrip ~chars:"/" base ^ "/v1/messages"
+  Util.rstrip ~chars:"/" base ^ "/v1/messages"
 
 (* The API version and headers the SDK (anthropic 2.10) sends. *)
 let api_version = "2026-10-21"
@@ -342,10 +349,10 @@ let fallback_beta = "server-side-fallback-2026-07-01"
     ANTHROPIC_AUTH_TOKEN (both sent as a bearer token), then the active
     [ant auth login] profile (an OAuth access token, with its beta). *)
 let credentials () =
-  match Py.getenv_nonempty "ANTHROPIC_API_KEY" with
+  match Util.getenv_nonempty "ANTHROPIC_API_KEY" with
   | Some k -> Ok ([ ("Authorization", "Bearer " ^ k) ], [])
   | None -> (
-      match Py.getenv_nonempty "ANTHROPIC_AUTH_TOKEN" with
+      match Util.getenv_nonempty "ANTHROPIC_AUTH_TOKEN" with
       | Some t -> Ok ([ ("Authorization", "Bearer " ^ t) ], [])
       | None -> (
           let token =
@@ -355,7 +362,7 @@ let credentials () =
                   [ "ant"; "auth"; "print-credentials"; "--access-token" ]
               in
               if r.code = 0 then
-                match Py.strip r.stdout with "" -> None | t -> Some t
+                match String.trim r.stdout with "" -> None | t -> Some t
               else None
             with _ -> None
           in
@@ -370,7 +377,7 @@ let credentials () =
 
 (* The SDK's message of an HTTP error status. *)
 let status_message status body =
-  let t = Py.strip body in
+  let t = String.trim body in
   match Json.parse_opt t with
   | Some j -> Printf.sprintf "Error code: %d - %s" status (Json.py_repr j)
   | None -> if t <> "" then t else Printf.sprintf "Error code: %d" status
@@ -387,7 +394,7 @@ let should_retry (r : Http.response) =
 let retry_delay (headers : (string * string) list) =
   let parse k scale =
     Option.bind (Http.header headers k) (fun v ->
-        Option.map (fun f -> f *. scale) (float_of_string_opt (Py.strip v)))
+        Option.map (fun f -> f *. scale) (float_of_string_opt (String.trim v)))
   in
   let given =
     match parse "retry-after-ms" 0.001 with
@@ -446,7 +453,7 @@ let messages_create ~model ~prompt =
         with
         | exception Http.Net_error m ->
             if retries_left > 0 then (
-              Py.sleep (retry_delay []);
+              Unix.sleepf (retry_delay []);
               attempt (retries_left - 1))
             else
               Connection_error
@@ -462,7 +469,7 @@ let messages_create ~model ~prompt =
                     "Data returned by API invalid for expected schema." ))
         | r ->
             if retries_left > 0 && should_retry r then (
-              Py.sleep (retry_delay r.resp_headers);
+              Unix.sleepf (retry_delay r.resp_headers);
               attempt (retries_left - 1))
             else Status_error (r.status, status_message r.status r.data)
       in
@@ -525,7 +532,8 @@ let llm_suggest ?(call = true) src r job text data pr_packages cache_dir model
         match !create_hook ~model ~prompt with
         | Status_error (status, message) ->
             let err =
-              Printf.sprintf "API error %d: %s" status (Py.prefix message 200)
+              Printf.sprintf "API error %d: %s" status
+                (Util.prefix_chars message 200)
             in
             if status = 401 || status = 403 then begin
               (* A bad key or no permission: every call would fail the same way.
@@ -553,7 +561,7 @@ let llm_suggest ?(call = true) src r job text data pr_packages cache_dir model
               ]
         | Sdk_error (cls, m) ->
             (* no credentials, another SDK error *)
-            let err = cls ^ ": " ^ Py.prefix m 200 in
+            let err = cls ^ ": " ^ Util.prefix_chars m 200 in
             llm_turn_off err;
             Dict.of_list [ ("llm_error", `String err); ("off", `Bool true) ]
         | Message resp -> (
@@ -625,8 +633,8 @@ let change_key line =
 
 let nonblank_lines s =
   List.filter_map
-    (fun l -> match Py.strip l with "" -> None | l -> Some l)
-    (Py.splitlines s)
+    (fun l -> match String.trim l with "" -> None | l -> Some l)
+    (Util.splitlines s)
 
 let llm_change_as_diff ?names old new_ =
   let old = Option.value ~default:"" old in
@@ -655,13 +663,13 @@ let llm_change_as_diff ?names old new_ =
     None. *)
 let checked_package name (r : Suggestion.t) (job : Ci.job) pr_packages =
   let allowed =
-    Py.dedup
+    Util.dedup
       (pr_packages
       @ List.filter_map
           (function Some x when x <> "" -> Some x | _ -> None)
           [ Suggestion.get r.Suggestion.failing; job.revdep ])
   in
-  let name = Py.strip name in
+  let name = String.trim name in
   if List.mem name allowed then Some name
   else
     match List.filter (fun a -> fst (Ci.split_pkg a) = name) allowed with
@@ -671,7 +679,7 @@ let checked_package name (r : Suggestion.t) (job : Ci.job) pr_packages =
 let key_error_line text =
   let lines =
     List.filter_map
-      (fun l -> match Py.strip l with "" -> None | l -> Some l)
+      (fun l -> match String.trim l with "" -> None | l -> Some l)
       (Loginfo.log_info text).error_lines
   in
   let lines =
@@ -699,7 +707,7 @@ let key_error_line text =
       ]
   in
   match hit with
-  | Some h -> Some (Py.prefix h 300)
+  | Some h -> Some (Util.prefix_chars h 300)
   | None -> (
       (* No error line (a conf package's check prints nothing), or only test
        output ("Passed tests"): opam's line naming the command that failed. *)
@@ -708,10 +716,10 @@ let key_error_line text =
           {|^\[ERROR\] (The (?:compilation|installation) of \S+ failed at "[^"\n]*")|}
           text
       with
-      | Some m -> Some (Py.prefix (Rx.group m 1) 300)
+      | Some m -> Some (Util.prefix_chars (Rx.group m 1) 300)
       | None -> (
-          match Py.last_opt lines with
-          | Some l -> Some (Py.prefix l 300)
+          match Util.last_opt lines with
+          | Some l -> Some (Util.prefix_chars l 300)
           | None -> None))
 
 let key_error_line_hook = ref key_error_line
@@ -742,7 +750,7 @@ let llm_sig (r : Suggestion.t) =
         | Some f when f <> "" -> f
         | _ -> Suggestion.str r.Suggestion.variant)
   in
-  Py.prefix (Rx.sub {|\d+|} "N" s) 120
+  Util.prefix_chars (Rx.sub {|\d+|} "N" s) 120
 
 (* The name of an exception's constructor, without its module path (the
    name of the error's class in the stored answers). *)
@@ -798,8 +806,9 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
               ( Dict.of_list
                   [
                     ( "llm_error",
-                      `String (exn_name e ^ ": " ^ Py.prefix (Py.exn_text e) 200)
-                    );
+                      `String
+                        (exn_name e ^ ": "
+                        ^ Util.prefix_chars (Util.exn_text e) 200) );
                     ("_no_call", `Bool true);
                   ],
                 None )
@@ -854,7 +863,7 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
            PR's, or the failing one. Another name is dropped, with the
            model's claim of where the fix goes, and its change is shown as
            text only. *)
-          let named = Py.strip (Dict.str res "package") in
+          let named = String.trim (Dict.str res "package") in
           let pkg =
             if named <> "" then
               checked_package named r
@@ -906,7 +915,7 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
           in
           let verify =
             Rx.sub ~count:1 {|^(Check|Verify)( that)?:?\s*|} ""
-              (Py.strip (Dict.str res "verify"))
+              (String.trim (Dict.str res "verify"))
           in
           let verify = String.capitalize_ascii verify in
           let diagnosis = Dict.str res "diagnosis" in

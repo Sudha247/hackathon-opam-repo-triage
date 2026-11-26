@@ -2,7 +2,7 @@
    member and printed as JSON that are not suggestions (see dict.mli). In
    the getters, a missing key and a null both read as absent. *)
 
-module O = Py.Odict
+module O = Odict
 
 type t = Json.t O.t
 

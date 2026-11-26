@@ -25,10 +25,10 @@ let check_json msg (a : Json.t) (b : Json.t) =
   check_str msg (Json.dumps a) (Json.dumps b)
 
 let check_in ?(msg = "") sub s =
-  if not (Py.contains s sub) then Alcotest.failf "%s: %S not in %S" msg sub s
+  if not (Util.contains s sub) then Alcotest.failf "%s: %S not in %S" msg sub s
 
 let check_not_in ?(msg = "") sub s =
-  if Py.contains s sub then Alcotest.failf "%s: %S in %S" msg sub s
+  if Util.contains s sub then Alcotest.failf "%s: %S in %S" msg sub s
 
 let check_none msg = function
   | None -> ()
@@ -58,10 +58,10 @@ let age path days =
   Unix.utimes path t t
 
 let age_all dir days =
-  List.iter (fun f -> age (Filename.concat dir f) days) (Py.listdir dir)
+  List.iter (fun f -> age (Filename.concat dir f) days) (Util.listdir dir)
 
 let remove_all dir =
-  List.iter (fun f -> Py.rmtree (Filename.concat dir f)) (Py.listdir dir)
+  List.iter (fun f -> Util.rmtree (Filename.concat dir f)) (Util.listdir dir)
 
 (* ------------------------------------------------------------------------ *)
 (* The process-wide state and the seams, reset around each test. *)
@@ -228,7 +228,7 @@ let job ?(category = "build") ?(reason = "The compilation of x failed")
     ?(experimental = false) variant =
   let parts = String.split_on_char ',' variant in
   let i = if List.hd parts = "day10" then 4 else 2 in
-  let platform = Py.take i parts and rest = Py.drop_list i parts in
+  let platform = Util.take i parts and rest = Util.drop i parts in
   let kind =
     match rest with
     | _ :: "revdeps" :: _ -> "revdeps"
@@ -540,7 +540,7 @@ let test_platforms_of_the_group () =
      os-family "ubuntu"; here os "alpine") is pointed out, a platform with a
      depext is said apart. *)
   let opam =
-    Py.replace conf_opam {|["glib2.0"]|}
+    Util.replace conf_opam {|["glib2.0"]|}
       "[\"glib-dev\"] {os = \"alpine\"}\n  [\"glib2.0\"]"
   in
   let vs =
@@ -782,7 +782,8 @@ let capture f =
       Unix.dup2 se Unix.stderr;
       Unix.close so;
       Unix.close se);
-  let o = Py.read_file out and e = Py.read_file err in
+  let o = In_channel.with_open_bin out In_channel.input_all
+  and e = In_channel.with_open_bin err In_channel.input_all in
   Sys.remove out;
   Sys.remove err;
   (o, e)
@@ -851,7 +852,7 @@ let unexplained_kinetic () =
   Suggest.suggest_for_job_hook :=
     fun src j text pr_packages sha ->
       let r = orig src j text pr_packages sha in
-      if Py.contains j.variant "kinetic-client" then begin
+      if Util.contains j.variant "kinetic-client" then begin
         let r' =
           Suggestion.make
             [
@@ -877,7 +878,7 @@ let test_unreadable_log () =
     run_case "lwt-revdeps" ~before:(fun () ->
         Suggest.fetch_hook :=
           fun url cache_dir ->
-            if not (Py.contains url "kinetic-client") then
+            if not (Util.contains url "kinetic-client") then
               Net.fetch url cache_dir
             else begin
               let h = !Http.hook in
@@ -896,7 +897,7 @@ let test_unreadable_log () =
     (List.exists
        (fun r ->
          Suggestion.str r.rule = "unrecognised"
-         && Py.contains (Json.dumps (get r "jobs")) "kinetic-client")
+         && Util.contains (Json.dumps (get r "jobs")) "kinetic-client")
        (suggestions v));
   check_true "incomplete" (Json.bool "incomplete" v);
   check_json "errors"
@@ -910,7 +911,7 @@ let test_one_job_fails () =
         let orig = !Suggest.suggest_for_job_hook in
         (Suggest.suggest_for_job_hook :=
            fun src j text pr sha ->
-             if Py.contains j.variant "kinetic-client" then
+             if Util.contains j.variant "kinetic-client" then
                failwith ("boom " ^ String.make 1000 'x')
              else orig src j text pr sha);
         Net.net_set "mcp-errors" 2)
@@ -1001,7 +1002,7 @@ let test_failed_call_counted () =
   check_json "none" `Null
     (Sources.mcp src "ocaml_package_versions" [ ("package", s "x") ]);
   check_int "counted" (before + 1) (errors ());
-  check_strs "not cached" [] (Py.listdir tmp);
+  check_strs "not cached" [] (Util.listdir tmp);
   check_true "unknown" (Sources.versions src "x" = None)
 (* unknown, not "not a package" *)
 
@@ -1032,7 +1033,7 @@ let test_malformed_answers () =
       check_json (string_of_int i) `Null
         (Sources.mcp src "ocaml_package_versions" [ ("package", s "x") ]);
       check_int (string_of_int i) (before + 1) (errors ());
-      check_strs "not cached" [] (Py.listdir tmp))
+      check_strs "not cached" [] (Util.listdir tmp))
     answers
 
 let test_circuit_breaker () =
@@ -1455,7 +1456,7 @@ let test_history_partial_is_a_failure () =
     (List.map (pres h) [ "1.0"; "1.1"; "1.2"; "1.3" ]);
   check_true "partial" (Option.get h).partial;
   check_int "counted" (before + 1) (errors ());
-  check_strs "not cached" [] (Py.listdir tmp);
+  check_strs "not cached" [] (Util.listdir tmp);
   check_true "same"
     (Sources.api_history src "foo" [ "M" ] "value" "x" [ "1.0"; "1.3" ] = h);
   check_int "once per process" 1 (List.length !reqs);
@@ -1529,7 +1530,8 @@ let test_errors_are_answers () =
   answers :=
     [
       List.hd !answers;
-      ("exception", tool_error (Py.replace not_found "constructor" "exception"));
+      ( "exception",
+        tool_error (Util.replace not_found "constructor" "exception") );
     ];
   remove_all tmp;
   check_true "none"
@@ -1559,7 +1561,7 @@ let test_history_failures () =
   check_true "none"
     (Sources.api_history src "foo" [ "M" ] "value" "x" [ "1.0" ] = None);
   check_int "counted" (before + 1) (errors ());
-  check_strs "not cached" [] (Py.listdir tmp);
+  check_strs "not cached" [] (Util.listdir tmp);
   (* No module path (an unbound top-level module), no version: no call. *)
   check_true "no path"
     (Sources.api_history src "foo" [] "module" "M" [ "1.0" ] = None);
@@ -1632,10 +1634,10 @@ let stdlib_suggest statuses =
        let rel =
          List.hd
            (String.split_on_char '/'
-              (match Py.partition url "/ocaml/ocaml/" with _, _, r -> r))
+              (match Util.partition url "/ocaml/ocaml/" with _, _, r -> r))
        in
        call ("mli " ^ rel);
-       if not (Py.contains url "stdlib/list.mli") then None
+       if not (Util.contains url "stdlib/list.mli") then None
        else
          Some
            (if rel >= "5.1.0" then "val is_empty : 'a list -> bool\n"
@@ -1880,7 +1882,7 @@ let test_module_through_an_open () =
   (* The module (why's Why.Term, opened) does not name the package: a
      dependency is a candidate only if the version used has the module. *)
   let log =
-    Py.replace (Py.replace lib_log "foo.1.0" "why.1.0") "Foo.bar" "Term.bar"
+    Util.replace (Util.replace lib_log "foo.1.0" "why.1.0") "Foo.bar" "Term.bar"
   in
   let r =
     lib_suggest ~log ~dep:"why"
@@ -1943,7 +1945,8 @@ let find_answer ?(partial = false) ?(extra = []) matches checked : Json.t =
                       s
                         (Printf.sprintf "%s/%s/index.html"
                            (match lib with Some l -> l | None -> "None")
-                           (Py.replace (Option.value ~default:"" m) "." "/")) );
+                           (Util.replace (Option.value ~default:"" m) "." "/"))
+                    );
                   ])
               matches) );
        ("matches_truncated", `Bool false);
@@ -2123,7 +2126,7 @@ let test_find_partial_is_a_failure () =
        (fun (m : Sources.find_match) -> m.package)
        (Option.get f).matches);
   check_int "counted" (before + 1) (errors ());
-  check_strs "not cached" [] (Py.listdir tmp);
+  check_strs "not cached" [] (Util.listdir tmp);
   check_str "same" (find_desc f)
     (find_desc
        (Sources.module_providers src "Term" [ "why3"; "flaky"; "slow" ]));
@@ -2152,7 +2155,7 @@ let test_tool_error_vs_failure () =
     (find_desc
        (Sources.module_providers (Sources.create tmp) "Term" [ "why3" ]));
   check_int "counted" (before + 1) (errors ());
-  check_int "the tool's error only" 1 (List.length (Py.listdir tmp))
+  check_int "the tool's error only" 1 (List.length (Util.listdir tmp))
 
 let test_find_tool_not_deployed () =
   (* A server without the tool: no answer, not a failure, not asked again. *)
@@ -2461,7 +2464,7 @@ let test_module_removed_by_a_recent_release () =
      through another dependency (#31170): the module search finds no
      dependency with it in its newest docs. *)
   let recent =
-    Py.date_of_days (Option.get (Py.days_of_date (Py.today ())) - 3)
+    Date.date_of_days (Option.get (Date.days_of_date (Date.today ())) - 3)
   in
   let installed = [ ("foo", "1.0"); ("matrix", "1.2") ] in
   let published =
@@ -2635,7 +2638,7 @@ let test_raw_and_gh_api () =
           Hashtbl.reset Net.gh_cache;
           check_true e (Net.gh_api ~cache_dir:tmp "repos/x/y/pulls/1" = None);
           check_int e (before + 2) (errors ~k:"net-errors" ()));
-      check_strs e [] (Py.listdir tmp))
+      check_strs e [] (Util.listdir tmp))
     net_errors
 
 let ok_body body = { Http.status = 200; resp_headers = []; data = body }
@@ -2803,8 +2806,8 @@ let test_truncated_cache_is_a_miss () =
   output_string oc {|{"versions": [|};
   close_out oc;
   check_true "truncated" (Net.cached_json p = None);
-  Py.write_gzip (p ^ "x") {|["a", "b"]|};
-  let gz = Py.read_file (p ^ "x") in
+  Util.write_gzip (p ^ "x") {|["a", "b"]|};
+  let gz = In_channel.with_open_bin (p ^ "x") In_channel.input_all in
   let oc = open_out_bin (Filename.concat tmp "b.json.gz") in
   output_string oc (String.sub gz 0 (String.length gz - 6));
   close_out oc;
@@ -2824,7 +2827,7 @@ let test_killed_write_leaves_no_file () =
   (match Sources.tags (Sources.create tmp) "https://example.invalid/repo" with
   | _ -> Alcotest.fail "not killed"
   | exception Killed -> ());
-  check_strs "no file" [] (Py.listdir tmp);
+  check_strs "no file" [] (Util.listdir tmp);
   originals ();
   let p = Filename.concat tmp "c.json" in
   Net.write_atomic p {|"old"|};
@@ -2833,7 +2836,7 @@ let test_killed_write_leaves_no_file () =
   | _ -> Alcotest.fail "not killed"
   | exception Killed -> ());
   check_true "old" (Net.cached_json p = Some (s "old"));
-  check_strs "files" [ "c.json" ] (Py.listdir tmp)
+  check_strs "files" [ "c.json" ] (Util.listdir tmp)
 
 (* ------------------------------------------------------------------------ *)
 (* TagsTest: a failed [git ls-remote] is not cached: the next run asks again. *)
@@ -2856,7 +2859,7 @@ let test_failed_listing_not_cached () =
   check_strs "bad" [] (Sources.tags (Sources.create tmp) url);
   check_strs "bad" [] (Sources.tags (Sources.create tmp) url);
   check_int "asked twice" 2 !n;
-  check_strs "not cached" [] (Py.listdir tmp);
+  check_strs "not cached" [] (Util.listdir tmp);
   set good;
   check_strs "good" [ "v1.0" ] (Sources.tags (Sources.create tmp) url);
   set bad;
@@ -2901,7 +2904,7 @@ let test_unreachable_host_remembered () =
     (fun f ->
       if String.starts_with ~prefix:"gitdown-" f then
         age (Filename.concat tmp f) 2.)
-    (Py.listdir tmp);
+    (Util.listdir tmp);
   calls := [];
   check_strs "tags" [] (Sources.tags (Sources.create tmp) url);
   check_strs "again" [ "ls-remote" ] !calls;
@@ -2923,7 +2926,7 @@ let test_broken_mirror_reinitialised () =
   let cache =
     Filename.concat (Filename.concat tmp "checkout") ".opam-ci-cache"
   in
-  Py.makedirs cache;
+  Util.makedirs cache;
   ignore (Proc.run [ "git"; "init"; "-q"; Filename.concat tmp "checkout" ]);
   let d = Sources.gitdir (Sources.create cache) url in
   check_true "stamp" (Sys.file_exists (Filename.concat d "opam-ci-last-used"));
@@ -2935,7 +2938,7 @@ let test_broken_mirror_reinitialised () =
       ~env:[ ("GIT_DIR", d) ]
       [ "git"; "config"; "--get"; "remote.origin.url" ]
   in
-  check_str "url" url (Py.strip cfg.stdout);
+  check_str "url" url (String.trim cfg.stdout);
   check_true "HEAD" (Sys.file_exists (Filename.concat d "HEAD"))
 
 let rec find_up dir rel n =
@@ -2949,12 +2952,16 @@ let test_prune_step () =
   | None -> Alcotest.skip ()
   | Some wf ->
       (* The "Prune cache" step's script (Python: a regex with a backreference). *)
-      let lines = Array.of_list (String.split_on_char '\n' (Py.read_file wf)) in
+      let lines =
+        Array.of_list
+          (String.split_on_char '\n'
+             (In_channel.with_open_bin wf In_channel.input_all))
+      in
       let n = Array.length lines in
       let start = ref (-1) in
       Array.iteri
         (fun i l ->
-          if !start < 0 && Py.contains l "- name: Prune cache" then start := i)
+          if !start < 0 && Util.contains l "- name: Prune cache" then start := i)
         lines;
       if !start < 0 then Alcotest.fail "no Prune cache step";
       let run_line = lines.(!start + 1) in
@@ -2967,10 +2974,10 @@ let test_prune_step () =
       while
         !i < n
         && (String.starts_with ~prefix:(indent ^ "  ") lines.(!i)
-           || Py.strip lines.(!i) = "")
+           || String.trim lines.(!i) = "")
       do
         body :=
-          !body @ [ Py.slice ~start:(String.length indent + 2) lines.(!i) ];
+          !body @ [ Util.slice ~start:(String.length indent + 2) lines.(!i) ];
         incr i
       done;
       let script = String.concat "\n" !body in
@@ -2990,7 +2997,7 @@ let test_prune_step () =
       List.iter
         (fun (f, days) ->
           let p = Filename.concat c f in
-          Py.makedirs (Filename.dirname p);
+          Util.makedirs (Filename.dirname p);
           close_out (open_out p);
           age p days)
         files;
@@ -2998,10 +3005,10 @@ let test_prune_step () =
       if r.code <> 0 then Alcotest.failf "prune failed: %s" r.stderr;
       let rec walk rel =
         let p = if rel = "" then c else Filename.concat c rel in
-        if Py.is_dir p then
+        if Util.is_dir p then
           List.concat_map
             (fun f -> walk (if rel = "" then f else Filename.concat rel f))
-            (Py.listdir p)
+            (Util.listdir p)
         else [ rel ]
       in
       check_strs "left"
@@ -3042,7 +3049,7 @@ let outside_code md =
       | Some f -> (
           match m with
           | Some m
-            when Py.strip line = Rx.group m 1
+            when String.trim line = Rx.group m 1
                  && String.length (Rx.group m 1) >= String.length f ->
               fence := None
           | _ -> ())
@@ -3056,7 +3063,7 @@ let outside_code md =
   let res = Buffer.create n in
   let i = ref 0 in
   while !i < n do
-    if text.[!i] = '\\' && !i + 1 < n && not (Py.is_alnum text.[!i + 1]) then
+    if text.[!i] = '\\' && !i + 1 < n && not (Util.is_alnum text.[!i + 1]) then
       i := !i + 2
     else if text.[!i] = '`' then begin
       let j = ref !i in

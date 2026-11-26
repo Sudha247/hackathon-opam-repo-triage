@@ -123,18 +123,18 @@ let readable (results : Suggestion.t list) =
         (match pkg with Some pkg when pkg <> "" -> Set pkg | _ -> Absent);
       r.where <- Suggestion.field_of_option (where_text r);
       (* The note and the error as sentences. *)
-      let note = Py.strip (Suggestion.str r.note) in
+      let note = String.trim (Suggestion.str r.note) in
       if note <> "" then
         r.note <-
           Some
             (if String.contains ".)`!?" note.[String.length note - 1] then note
              else note ^ ".");
-      let error = Py.strip (Suggestion.str r.error) in
+      let error = String.trim (Suggestion.str r.error) in
       if error <> "" then
         r.error <-
           Some
             (if String.ends_with ~suffix:":" error then
-               Py.rstrip (Py.rstrip ~chars:":" error)
+               Util.rstrip (Util.rstrip ~chars:":" error)
              else error))
     results;
   results
@@ -161,7 +161,7 @@ let classify r =
   else if not has_change then "explanation"
   else if
     List.mem (Suggestion.str r.rule) workaround_rules
-    || Py.contains
+    || Util.contains
          (Suggestion.str_field r.Suggestion.new_)
          "x-ci-accept-failures"
   then "workaround"
@@ -178,7 +178,7 @@ let rank results =
     match c with "high" -> 0 | "medium" -> 1 | "low" -> 2 | _ -> 3
   in
   List.iter (fun r -> r.class_ <- Some (classify r)) results;
-  Py.sort_by
+  Util.sort_by
     (fun r ->
       ( order (Suggestion.str r.class_),
         r.Suggestion.experimental = Some true,

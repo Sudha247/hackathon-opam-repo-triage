@@ -2,8 +2,8 @@
 
 let base = "https://opam.ci.ocaml.org/github/ocaml/opam-repository/commit/"
 
-let net : int Py.Odict.t =
-  Py.Odict.of_list [ ("http", 0); ("mcp", 0); ("git", 0); ("github-api", 0) ]
+let net : int Odict.t =
+  Odict.of_list [ ("http", 0); ("mcp", 0); ("git", 0); ("github-api", 0) ]
 
 let offline = Sys.getenv_opt "OPAM_CI_OFFLINE" = Some "1"
 let offline_ref = ref offline
@@ -11,17 +11,17 @@ let is_offline () = !offline_ref
 let write_atomic_hook : (string -> string -> unit) ref = ref (fun _ _ -> ())
 
 let counts_json () : Json.t =
-  `Assoc (List.map (fun (k, v) -> (k, `Int v)) (Py.Odict.to_list net))
+  `Assoc (List.map (fun (k, v) -> (k, `Int v)) (Odict.to_list net))
 
 let net_set k v =
-  Py.Odict.set net k v;
-  match Py.getenv_nonempty "OPAM_CI_NET_FILE" with
+  Odict.set net k v;
+  match Util.getenv_nonempty "OPAM_CI_NET_FILE" with
   | Some path -> (
       try !write_atomic_hook path (Json.dumps (counts_json ()))
       with Sys_error _ | Unix.Unix_error _ -> ())
   | None -> ()
 
-let net_get k = Option.value ~default:0 (Py.Odict.get net k)
+let net_get k = Option.value ~default:0 (Odict.get net k)
 let net_incr k = net_set k (net_get k + 1)
 
 (** Count a failed request ("net-errors"): the analysis is incomplete, and the
@@ -37,13 +37,14 @@ let user_agent = "opam-ci-triage"
 
 (* Test seams. *)
 let rename_hook = ref Sys.rename
-let sleep_hook = ref Py.sleep
+let sleep_hook = ref Unix.sleepf
 
 let write_atomic path data =
-  if is_offline () && Some path <> Py.getenv_nonempty "OPAM_CI_NET_FILE" then ()
+  if is_offline () && Some path <> Util.getenv_nonempty "OPAM_CI_NET_FILE" then
+    ()
   else begin
-    let d = Filename.dirname (Py.abspath path) in
-    Py.makedirs d;
+    let d = Filename.dirname (Util.abspath path) in
+    Util.makedirs d;
     let tmp = Filename.temp_file ~temp_dir:d ".tmp-" "" in
     try
       let oc = open_out_bin tmp in
@@ -52,7 +53,7 @@ let write_atomic path data =
         (fun () -> output_string oc data);
       !rename_hook tmp path
     with e ->
-      Py.remove tmp;
+      Util.remove tmp;
       raise e
   end
 
@@ -61,7 +62,7 @@ let () = write_atomic_hook := write_atomic
 let fresh path max_age =
   match max_age with
   | None -> true
-  | Some a -> is_offline () || Unix.gettimeofday () -. Py.getmtime path < a
+  | Some a -> is_offline () || Unix.gettimeofday () -. Util.getmtime path < a
 
 let cached_json ?max_age path : Json.t option =
   let try_one p read =
@@ -69,10 +70,12 @@ let cached_json ?max_age path : Json.t option =
     else if not (fresh p max_age) then Some None
     else Some (try Some (Json.parse (read p)) with _ -> None)
   in
-  match try_one path Py.read_file with
+  match
+    try_one path (fun p -> In_channel.with_open_bin p In_channel.input_all)
+  with
   | Some r -> r
   | None -> (
-      match try_one (path ^ ".gz") Py.read_gzip with
+      match try_one (path ^ ".gz") Util.read_gzip with
       | Some r -> r
       | None -> None)
 
@@ -87,9 +90,9 @@ let not_found_max_age = 24. *. 3600.
 let fetch ?(refresh = false) ?max_age url cache_dir =
   let path = cache_path url cache_dir in
   if (not refresh) && Sys.file_exists path && fresh path max_age then
-    Py.read_file path
+    In_channel.with_open_bin path In_channel.input_all
   else if (not refresh) && Sys.file_exists (path ^ ".gz") then
-    Py.read_gzip (path ^ ".gz")
+    Util.read_gzip (path ^ ".gz")
   else if
     (not refresh)
     && Sys.file_exists (path ^ ".404")
@@ -176,15 +179,15 @@ let fetch ?(refresh = false) ?max_age url cache_dir =
 let repo = "ocaml/opam-repository"
 
 let github_token () =
-  match Py.getenv_nonempty "GITHUB_TOKEN" with
+  match Util.getenv_nonempty "GITHUB_TOKEN" with
   | Some t -> Some t
   | None -> (
-      match Py.getenv_nonempty "GH_TOKEN" with
+      match Util.getenv_nonempty "GH_TOKEN" with
       | Some t -> Some t
       | None -> (
           try
             let out = Proc.run ~timeout:10. [ "gh"; "auth"; "token" ] in
-            match Py.strip out.stdout with "" -> None | t -> Some t
+            match String.trim out.stdout with "" -> None | t -> Some t
           with _ -> None))
 
 let gh_cache : (string, Json.t) Hashtbl.t = Hashtbl.create 16
@@ -290,7 +293,7 @@ let safe_git_url url =
 let git ?cwd ?(check = true) ?git_dir args : Proc.result =
   let cmd = List.hd args in
   if (cmd = "fetch" || cmd = "ls-remote") && is_offline () then begin
-    offline_miss ("git " ^ String.concat " " (Py.take 4 args));
+    offline_miss ("git " ^ String.concat " " (Util.take 4 args));
     { Proc.code = 1; stdout = ""; stderr = "offline" }
   end
   else begin
@@ -320,16 +323,16 @@ let git ?cwd ?(check = true) ?git_dir args : Proc.result =
     if check && out.code <> 0 then
       failwith
         (Printf.sprintf "git %s...: %s"
-           (String.concat " " (Py.take 3 args))
-           (Py.prefix (Py.strip out.stderr) 200));
+           (String.concat " " (Util.take 3 args))
+           (Util.prefix_chars (String.trim out.stderr) 200));
     out
   end
 
 let repo_url dev_repo =
-  let u = Py.removeprefix (Py.strip dev_repo) "git+" in
+  let u = Util.removeprefix (String.trim dev_repo) "git+" in
   let u = Rx.sub "^git://" "https://" u in
   let u = Rx.sub "^git@([^:]+):" {|https://\1/|} u in
-  let u = List.hd (Py.split_on ~maxsplit:1 "#" u) in
+  let u = List.hd (Util.split_on ~maxsplit:1 "#" u) in
   match
     Rx.match_ {|(https://github\.com/[^/]+/[^/]+?)(?:\.git)?(?:/.*)?$|} u
   with
@@ -339,5 +342,5 @@ let repo_url dev_repo =
   | None ->
       let u = Rx.sub "/-/(archive|tags|tree)/.*$" "" u in
       (* GitLab archive URLs (nested groups kept) *)
-      let u = Py.removesuffix u "/" in
+      let u = Util.removesuffix u "/" in
       if safe_git_url (Some u) then Some u else None

@@ -6,10 +6,10 @@ let page_data =
 (* The triage tool: $OPAM_CI_TRIAGE_TOOL, else opam-ci-triage next to this
    executable, else the dune build's, else opam-ci-triage on the PATH. *)
 let tool () =
-  match Py.getenv_nonempty "OPAM_CI_TRIAGE_TOOL" with
+  match Util.getenv_nonempty "OPAM_CI_TRIAGE_TOOL" with
   | Some t -> t
   | None ->
-      let dir = Filename.dirname (Py.abspath Sys.executable_name) in
+      let dir = Filename.dirname (Util.abspath Sys.executable_name) in
       let near = Filename.concat dir "opam-ci-triage" in
       let dune = Filename.concat dir "../../bin/opam_repo_ci_triage.exe" in
       if Sys.file_exists near then near
@@ -25,7 +25,7 @@ let load source : Json.t =
       (Http.urlopen
          ~headers:[ ("User-Agent", "opam-ci-triage") ]
          ~timeout:60. source)
-  else Json.parse (Py.read_file source)
+  else Json.parse (In_channel.with_open_bin source In_channel.input_all)
 
 (** The suggestions of a [suggest --json] result. *)
 let suggestions result =
@@ -52,7 +52,7 @@ let usage result =
   in
   (* Failures sharing one answer carry the same usage: count each answer once. *)
   let uniq =
-    Py.dedup
+    Util.dedup
       (List.map
          (fun u ->
            (Json.member "input" u, Json.member "output" u, Json.member "model" u))
@@ -72,8 +72,10 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
   let prs =
     List.stable_sort (fun a b -> compare (unrecognised b) (unrecognised a)) prs
   in
-  let prs = match first with Some n when n > 0 -> Py.take n prs | _ -> prs in
-  Py.makedirs out;
+  let prs =
+    match first with Some n when n > 0 -> Util.take n prs | _ -> prs
+  in
+  Util.makedirs out;
   let max_logs =
     match max_ with
     | Some n when n > 0 -> string_of_int n
@@ -104,7 +106,9 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
       let outf = Filename.concat out (Printf.sprintf "%d.json" n) in
       let res =
         if Sys.file_exists outf && not dry_run then
-          Some (Json.parse (Py.read_file outf), "already done")
+          Some
+            ( Json.parse (In_channel.with_open_bin outf In_channel.input_all),
+              "already done" )
         else begin
           let cmd =
             [
@@ -139,16 +143,16 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
               let note =
                 if dry_run then "dry run"
                 else
-                  match Py.splitlines (Py.strip proc.stderr) with
+                  match Util.splitlines (String.trim proc.stderr) with
                   | [] -> ""
-                  | l -> Py.last l
+                  | l -> Util.last l
               in
               Some (res, note)
           | _ ->
               let last =
-                match Py.splitlines (Py.strip proc.stderr) with
+                match Util.splitlines (String.trim proc.stderr) with
                 | [] -> string_of_int proc.code
-                | l -> "[" ^ Py.repr (Py.last l) ^ "]"
+                | l -> "[" ^ Util.repr (Util.last l) ^ "]"
               in
               Printf.printf "#%d: failed: %s\n%!" n last;
               None
@@ -164,7 +168,7 @@ let run ~data ~out ~first ~llm_max ~max_ ~dry_run () =
                  (List.filter
                     (fun (r : Suggestion.t) -> Suggestion.nonempty r.llm_prompt)
                     sugg))
-              (Py.prefix (Json.str "title" p) 60)
+              (Util.prefix_chars (Json.str "title" p) 60)
           else begin
             let calls, tin, tout = usage res in
             let a, b, c = !total in

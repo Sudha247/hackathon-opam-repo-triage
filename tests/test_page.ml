@@ -12,7 +12,7 @@ let sugg kv = Suggestion.of_json (`Assoc kv)
 module R = Scripts.Render_page
 
 let base_url = "https://opam.ci.ocaml.org/github/ocaml/opam-repository/commit/"
-let contains s sub = Py.contains s sub
+let contains s sub = Util.contains s sub
 
 let check_in sub s =
   if not (contains s sub) then Alcotest.failf "%S not in:\n%s" sub s
@@ -253,7 +253,7 @@ let test_incomplete_analysis_shown () =
     (R.render_pr
        (pr ~kw:[ ("net_errors", `Int 1); ("pending", `Bool true) ] [ day10 ]))
 
-let index_of s sub = Py.find s sub
+let index_of s sub = Util.find s sub
 
 let test_ready_section_and_labels () =
   let data : Json.t =
@@ -313,7 +313,7 @@ let test_ready_section_and_labels () =
                    [
                      ("number", `Int n); ("title", s "p"); ("labels", `List []);
                    ])
-               (Py.range 10 17)) );
+               (List.init 7 (fun i -> 10 + i))) );
       ]
   in
   check_in "2 more</summary>" (R.ready_section ~shown:5 many);
@@ -633,11 +633,13 @@ let test_verdict_counts_add_up () =
         else Some (int_of_string (Rx.group m 2)))
       (Rx.finditer {|data-f="(\w+)"[^>]*>.*?<b>(\d+)</b>|} page)
   in
-  Alcotest.(check int) "counts" (List.length prs) (Py.sum counts);
+  Alcotest.(check int)
+    "counts" (List.length prs)
+    (List.fold_left ( + ) 0 counts);
   check_in (Printf.sprintf "All<b>%d</b>" (List.length prs)) page;
   Alcotest.(check int)
     "prs" (List.length prs)
-    (List.length (Py.split_on "<details class=\"pr " page) - 1);
+    (List.length (Util.split_on "<details class=\"pr " page) - 1);
   check_in "consider for merge (1)" page;
   check_in "CI running" page;
   check_not_in "class=\"stat" page;
@@ -732,7 +734,7 @@ let test_merge_similar () =
   check_in "Fix goes elsewhere (1)" page;
   Alcotest.(check int)
     "items" 1
-    (List.length (Py.split_on "<details class=\"it\">" page) - 1)
+    (List.length (Util.split_on "<details class=\"it\">" page) - 1)
 
 let test_compact_job_links () =
   let link = R.job_link (Some (String.make 40 'a')) "compilers,5.4,x.1" in
@@ -915,7 +917,9 @@ let test_changelog_in_comment () =
   in
   check_in "````text\n" md (* a fence longer than any backtick run inside *);
   check_true "ends"
-    (String.ends_with ~suffix:(Py.rstrip "````\n\n</details>") (Py.rstrip md));
+    (String.ends_with
+       ~suffix:(Util.rstrip "````\n\n</details>")
+       (Util.rstrip md));
   check_not_in "<img" md (* not a version: left out of the summary *);
   check_in "\n\xe2\x80\xa6\n" md;
   let page =
@@ -952,7 +956,7 @@ let test_comment_markdown () =
   check_in "</textarea>" page;
   Alcotest.(check int)
     "textareas" 1
-    (List.length (Py.split_on "<textarea" page) - 1);
+    (List.length (Util.split_on "<textarea" page) - 1);
   (* Only workarounds: the comment says so, as the verdict does ("Change this PR"). *)
   let workaround =
     upd lint [ ("class", s "workaround"); ("rule", s "platform-matrix") ]
@@ -999,7 +1003,7 @@ let outside_code md =
       | Some f -> (
           match m with
           | Some m
-            when Py.strip line = Rx.group m 1
+            when String.trim line = Rx.group m 1
                  && String.length (Rx.group m 1) >= String.length f ->
               fence := None
           | _ -> ())
@@ -1013,7 +1017,7 @@ let outside_code md =
   let res = Buffer.create n in
   let i = ref 0 in
   while !i < n do
-    if text.[!i] = '\\' && !i + 1 < n && not (Py.is_alnum text.[!i + 1]) then
+    if text.[!i] = '\\' && !i + 1 < n && not (Util.is_alnum text.[!i + 1]) then
       i := !i + 2
     else if text.[!i] = '`' then begin
       let j = ref !i in
@@ -1177,7 +1181,9 @@ let test_render_comment () =
 let test_build_review () =
   let sha = String.make 40 'b' in
   let text = "opam-version: \"2.0\"\ndepends: \"a\" @old\nlicense: \"x\"\n" in
-  let patch = "@@ -0,0 +1,3 @@\n+" ^ String.concat "\n+" (Py.splitlines text) in
+  let patch =
+    "@@ -0,0 +1,3 @@\n+" ^ String.concat "\n+" (Util.splitlines text)
+  in
   (* The GitHub API answers, as Net.gh_api's memory cache holds them. *)
   Hashtbl.replace Net.gh_cache "repos/ocaml/opam-repository/pulls/1"
     (`Assoc [ ("head", `Assoc [ ("sha", s sha) ]) ]);
@@ -1247,7 +1253,7 @@ let test_git_command () =
   Alcotest.(check (list string))
     "protocols"
     [ "git"; "-c"; "protocol.allow=never"; "-c"; "protocol.https.allow=always" ]
-    (Py.take 5 cmd);
+    (Util.take 5 cmd);
   check_true "timeout" (timeout <> None)
 
 let () =

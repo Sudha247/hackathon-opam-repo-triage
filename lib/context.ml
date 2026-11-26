@@ -149,18 +149,18 @@ let bound_only_changes base sha cache_dir =
         else None)
       files
   in
-  let out = Py.Odict.create () in
+  let out = Odict.create () in
   List.iter
     (fun f ->
       match Rx.match_ opam_path_re (Json.str "filename" f) with
       | Some m when Json.str "status" f = "modified" -> (
-          let lines = Py.splitlines (Json.str "patch" f) in
+          let lines = Util.splitlines (Json.str "patch" f) in
           let first c l = String.length l > 0 && l.[0] = c in
           let rem =
             List.filter_map
               (fun l ->
                 if first '-' l && not (String.starts_with ~prefix:"---" l) then
-                  Some (Py.strip (Py.drop l 1))
+                  Some (String.trim (Util.drop_chars l 1))
                 else None)
               lines
           in
@@ -168,7 +168,7 @@ let bound_only_changes base sha cache_dir =
             List.filter_map
               (fun l ->
                 if first '+' l && not (String.starts_with ~prefix:"+++" l) then
-                  Some (Py.strip (Py.drop l 1))
+                  Some (String.trim (Util.drop_chars l 1))
                 else None)
               lines
           in
@@ -177,7 +177,7 @@ let bound_only_changes base sha cache_dir =
             let terms f =
               List.filter
                 (fun t -> t <> "")
-                (List.map Py.strip
+                (List.map String.trim
                    (String.split_on_char '&' (Option.value ~default:"" f)))
             in
             let rec go acc = function
@@ -213,11 +213,11 @@ let bound_only_changes base sha cache_dir =
             in
             match go [] (List.combine rem add) with
             | Some bounds ->
-                Py.Odict.set out (Rx.group m 1) (String.concat ", " bounds)
+                Odict.set out (Rx.group m 1) (String.concat ", " bounds)
             | None -> ())
       | _ -> ())
     files;
-  Py.Odict.to_list out
+  Odict.to_list out
 
 (* opam-health-check's results for one package. *)
 type health = {
@@ -247,10 +247,10 @@ let health_check src name (cache : (string, health option) Hashtbl.t) =
       let h =
         match res with
         | Some (`Assoc (_ :: _) as res) ->
-            let builds = Py.Odict.create () in
+            let builds = Odict.create () in
             List.iter
               (fun b ->
-                Py.Odict.set builds (Json.str "compiler" b)
+                Odict.set builds (Json.str "compiler" b)
                   (Json.str "status" b, Json.str_opt "log_url" b))
               (Json.list "builds" res);
             let run_date =
@@ -260,7 +260,7 @@ let health_check src name (cache : (string, health option) Hashtbl.t) =
             in
             Some
               {
-                builds = Py.Odict.to_list builds;
+                builds = Odict.to_list builds;
                 hversion =
                   Option.map json_text
                     (match Json.member "version" res with
@@ -283,11 +283,11 @@ let health_run_stale ?today date =
   | None | Some "" -> false
   | _ when Net.is_offline () -> false
   | Some d -> (
-      match Py.days_of_date (Py.prefix d 10) with
+      match Date.days_of_date (Util.prefix_chars d 10) with
       | None -> false
       | Some d -> (
-          let today = match today with Some t -> t | None -> Py.today () in
-          match Py.days_of_date today with
+          let today = match today with Some t -> t | None -> Date.today () in
+          match Date.days_of_date today with
           | Some t -> t - d > health_max_age_days
           | None -> false))
 
@@ -340,9 +340,9 @@ let health_summary ?src (notes : notes) =
   let names ?(n = 6) xs =
     let k = List.length xs in
     if k > n then
-      String.concat ", " (Py.take n xs) ^ Printf.sprintf " and %d more" (k - n)
+      String.concat ", " (Util.take n xs) ^ Printf.sprintf " and %d more" (k - n)
     else if k = 1 then List.hd xs
-    else String.concat ", " (Py.take (k - 1) xs) ^ " and " ^ Py.last xs
+    else String.concat ", " (Util.take (k - 1) xs) ^ " and " ^ Util.last xs
   in
   let out = ref [] in
   List.iter
@@ -553,9 +553,9 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
               let name = fst (split_pkg target) in
               (* The reason with the release's version left out, normalised as in failure_key. *)
               let reason job version =
-                Py.strip
+                String.trim
                   (Rx.sub {|[`"']|-j \d+|} ""
-                     (Py.replace
+                     (Util.replace
                         (Option.value ~default:"" job.reason)
                         version name))
               in
@@ -575,7 +575,7 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
                         let pr =
                           if Dict.truthy info "pr" then
                             "#" ^ json_text (Option.get (Dict.get info "pr"))
-                          else Py.prefix info_sha 12
+                          else Util.prefix_chars info_sha 12
                         in
                         let why =
                           Printf.sprintf
@@ -608,7 +608,7 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
                     | _ -> ())
                 failing)
       | _ -> ())
-    (Py.take 3 added);
+    (Util.take 3 added);
   (* opam-health-check: master, newest version of each package, no tests, on
      the classic builder's default platform. *)
   (match (notes, base) with
@@ -759,7 +759,7 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
           (Words.short_date (Some latest))
           health_max_age_days
       end);
-  let out = Py.group_by failure_key failing in
+  let out = Util.group_by failure_key failing in
   List.filter_map
     (fun (k, js) ->
       let whys = List.map (fun j -> Hashtbl.find_opt per_job j.variant) js in
@@ -816,7 +816,8 @@ let sources_rules ?match_ (data : data) cache_dir =
               @ Where.fix_where "upstream" (s_none pkg ^ " (upstream archive)")
               @ [
                   `Experimental j.experimental;
-                  `Error (Py.prefix (Option.value ~default:"" j.reason) 200);
+                  `Error
+                    (Util.prefix_chars (Option.value ~default:"" j.reason) 200);
                   `Confidence "medium";
                 ])
           in
@@ -856,7 +857,7 @@ let routine_abort_re = {|(?:^|[,-])(?:riscv64|s390x)(?:[,-]|$)|}
 let routine_abort j =
   j.status = "aborted" && j.kind <> "analysis"
   && Rx.test routine_abort_re
-       (String.concat "," (Py.take 2 (String.split_on_char ',' j.variant)))
+       (String.concat "," (Util.take 2 (String.split_on_char ',' j.variant)))
 (* the platform, not a package *)
 
 let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
@@ -913,8 +914,8 @@ let rerun_rules ?match_ (data : data) (results : Suggestion.t list) =
                 | [] -> [ Suggestion.str r.Suggestion.variant ]
                 | l -> l) ))
           transient
-      |> Py.group_by fst
-      |> List.map (fun (k, l) -> (k, Py.sum (List.map snd l)))
+      |> Util.group_by fst
+      |> List.map (fun (k, l) -> (k, List.fold_left ( + ) 0 (List.map snd l)))
       |> List.stable_sort (fun (_, a) (_, b) -> compare b a)
     in
     let what (cat, detail) n =
@@ -1008,7 +1009,7 @@ let pr_opam_changes base sha cache_dir =
     (fun out f ->
       match Rx.match_ opam_path_re (Json.str "filename" f) with
       | Some m when Json.str "status" f = "modified" ->
-          let lines = Py.splitlines (Json.str "patch" f) in
+          let lines = Util.splitlines (Json.str "patch" f) in
           (* The [available] field on the lines starting with [sign]: its
            first line, and the indented lines that follow it. *)
           let block sign =
@@ -1016,21 +1017,23 @@ let pr_opam_changes base sha cache_dir =
               List.fold_left
                 (fun (inside, got) l ->
                   let c0 = if l = "" then None else Some l.[0] in
-                  let rest = Py.drop l 1 in
+                  let rest = Util.drop_chars l 1 in
                   if
                     c0 = Some sign
                     && String.starts_with ~prefix:"available:" rest
-                  then (true, Py.strip rest :: got)
+                  then (true, String.trim rest :: got)
                   else if
                     inside && c0 = Some sign
                     && String.length l > 1
                     && (l.[1] = ' ' || l.[1] = '\t')
-                  then (true, Py.strip rest :: got)
+                  then (true, String.trim rest :: got)
                   else (false, got))
                 (false, []) lines
             in
-            Py.strip
-              (Py.removeprefix (String.concat " " (List.rev got)) "available:")
+            String.trim
+              (Util.removeprefix
+                 (String.concat " " (List.rev got))
+                 "available:")
           in
           let old = block '-' and new_ = block '+' in
           if old <> new_ then
@@ -1061,8 +1064,8 @@ let pr_added_bounds base sha cache_dir =
     (fun out f ->
       match Rx.match_ opam_path_re (Json.str "filename" f) with
       | Some m when Json.str "status" f = "modified" ->
-          let old = Py.Odict.create ()
-          and new_ = Py.Odict.create ()
+          let old = Odict.create ()
+          and new_ = Odict.create ()
           and field = ref None in
           List.iter
             (fun l ->
@@ -1078,26 +1081,25 @@ let pr_added_bounds base sha cache_dir =
                 | None -> ());
                 match Rx.match_ {|([-+])\s*"([\w+.-]+)"\s*(\{[^}]*\})?|} l with
                 | Some dm when !field = Some "depends" ->
-                    Py.Odict.set
+                    Odict.set
                       (if Rx.group dm 1 = "-" then old else new_)
                       (Rx.group dm 2)
-                      (Py.strip (Py.drop l 1))
+                      (String.trim (Util.drop_chars l 1))
                 | _ -> ()
               end)
-            (Py.splitlines (Json.str "patch" f));
+            (Util.splitlines (Json.str "patch" f));
           let added =
             List.filter
               (fun (dep, line) ->
                 match upper_bound line with
                 | Some up -> (
                     match
-                      upper_bound
-                        (Option.value ~default:"" (Py.Odict.get old dep))
+                      upper_bound (Option.value ~default:"" (Odict.get old dep))
                     with
                     | None -> true
                     | Some was -> opam_vcmp up was < 0)
                 | None -> false)
-              (Py.Odict.to_list new_)
+              (Odict.to_list new_)
           in
           if added <> [] then
             (Rx.group m 1, added) :: List.remove_assoc (Rx.group m 1) out
@@ -1110,10 +1112,10 @@ let pr_added_bounds base sha cache_dir =
 (* Python's re.search(rf"(?<![\w-]){n}(?![\w-])", f): [n] occurs in [f]
    neither preceded nor followed by a word character or a dash. *)
 let uses_name f n =
-  let is_w c = Py.is_alnum c || c = '_' || c = '-' || Char.code c >= 128 in
+  let is_w c = Util.is_alnum c || c = '_' || c = '-' || Char.code c >= 128 in
   let k = String.length n in
   let rec go from =
-    let i = Py.find ~from f n in
+    let i = Util.find ~from f n in
     if i < 0 then false
     else if
       (i = 0 || not (is_w f.[i - 1]))
@@ -1228,7 +1230,7 @@ let analysis_rules ?match_ (data : data) cache_dir =
           | Some r when r <> "" -> r
           | _ ->
               Option.value ~default:""
-                (List.find_opt (fun m -> Py.strip m <> "") j.messages)
+                (List.find_opt (fun m -> String.trim m <> "") j.messages)
         in
         let why =
           if why <> "" then why
@@ -1240,7 +1242,7 @@ let analysis_rules ?match_ (data : data) cache_dir =
               | _ -> Option.value ~default:"" (List.assoc_opt "final" ex)
             with _ -> ""
         in
-        let err = Py.prefix (String.concat " " (Py.split why)) 300 in
+        let err = Util.prefix_chars (String.concat " " (Util.split why)) 300 in
         let r =
           Suggestion.make
             [
@@ -1336,7 +1338,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
       then begin
         (* No finding: the job failed before linting (the CI could not fetch or check out the PR). *)
         let msg =
-          match List.find_opt (fun m -> Py.strip m <> "") j.messages with
+          match List.find_opt (fun m -> String.trim m <> "") j.messages with
           | Some m when m <> "" -> m
           | _ -> "no message"
         in
@@ -1349,7 +1351,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                 @ Where.fix_where "rerun" "CI (rerun)"
                 @ [
                     `Rule "lint-ci-error";
-                    `Error (Py.prefix msg 220);
+                    `Error (Util.prefix_chars msg 220);
                     `Url j.url;
                     `Note
                       ("The lint job failed before linting anything"
@@ -1376,11 +1378,11 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                     @ Where.fix_where "pr" "this PR"
                     @ [
                         `Rule "lint";
-                        `Error (Py.prefix text 220);
+                        `Error (Util.prefix_chars text 220);
                         `Lint_level (String.lowercase_ascii level);
                       ])
                 in
-                let has = Py.contains text in
+                let has = Util.contains text in
                 let upd kv = Suggestion.update r kv in
                 let note n = `Note n and conf c = `Confidence c in
                 if has "warning 62" then begin
@@ -1412,7 +1414,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                                (Printf.sprintf {|license: "%s"|}
                                   (List.hd (String.split_on_char ' ' lid))));
                           conf
-                            (if Py.contains lid "check" then "medium"
+                            (if Util.contains lid "check" then "medium"
                              else "high");
                           note
                             (Printf.sprintf
@@ -1432,7 +1434,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                    the one of the upstream LICENSE file: (license, origin). *)
                   let from_other_versions () =
                     let others =
-                      Py.take 2
+                      Util.take 2
                         (List.filter
                            (fun v -> v <> ver)
                            (List.rev
@@ -1473,13 +1475,13 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                                 ( List.hd (String.split_on_char ' ' lid),
                                   Printf.sprintf "%s in %s" fn (s_none up)
                                   ^
-                                  if Py.contains lid "check" then " (check)"
+                                  if Util.contains lid "check" then " (check)"
                                   else "" )))
                           [ "LICENSE"; "LICENSE.md"; "LICENSE.txt"; "COPYING" ]
                     | None -> None
                   in
                   match
-                    Py.first_some [ from_other_versions; from_upstream ]
+                    Util.first_some [ from_other_versions; from_upstream ]
                   with
                   | Some (lic, origin) ->
                       upd
@@ -1487,7 +1489,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                           `Old None;
                           `New (Some (Printf.sprintf {|license: "%s"|} lic));
                           conf
-                            (if Py.contains origin "(check)" then "medium"
+                            (if Util.contains origin "(check)" then "medium"
                              else "high");
                           note (Printf.sprintf "Taken from %s." origin);
                         ]
@@ -1503,7 +1505,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                     Sources.opam_field (pr_opam name ver) "synopsis"
                   with
                   | Some syn when syn <> "" ->
-                      let fixed = Py.rstrip ~chars:"." (Py.strip syn) in
+                      let fixed = Util.rstrip ~chars:"." (String.trim syn) in
                       let fixed = String.capitalize_ascii fixed in
                       upd
                         [
@@ -1546,7 +1548,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                 then begin
                   let opam = Option.value ~default:"" (pr_opam name ver) in
                   let section =
-                    match Py.partition opam "extra-files:" with
+                    match Util.partition opam "extra-files:" with
                     | _, "extra-files:", rest -> rest
                     | _ -> ""
                   in
@@ -1714,13 +1716,14 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                     let n = Suggestion.str r.note in
                     r.note <-
                       Some
-                        ((if n <> "" then Py.rstrip ~chars:"." n ^ ". " else "")
+                        ((if n <> "" then Util.rstrip ~chars:"." n ^ ". "
+                          else "")
                         ^ "Already missing on master: this PR, which changes \
                            an existing version, did not remove it.")
                 | _ -> ());
                 (match baseline with
                 | Some (pr, msgs) when List.mem (name, text) msgs ->
-                    let prev = Py.rstrip ~chars:"." (Suggestion.str r.note) in
+                    let prev = Util.rstrip ~chars:"." (Suggestion.str r.note) in
                     r.note <-
                       Some
                         ((if prev <> "" then prev ^ ". " else "")
@@ -1764,7 +1767,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                         prev.error <-
                           Some
                             (Suggestion.str prev.error ^ " | "
-                            ^ Py.prefix (Suggestion.str r.error) 120)
+                            ^ Util.prefix_chars (Suggestion.str r.error) 120)
                     | None -> out := !out @ [ r ])))
           j.messages)
     data.jobs;
@@ -1782,8 +1785,8 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
       then None
       else begin
         let pick =
-          Py.lslice ~start:(-1)
-            (Py.sort_by
+          Util.sublist ~start:(-1)
+            (Util.sort_by
                (fun j ->
                  ( not (String.starts_with ~prefix:"compilers," j.variant),
                    j.variant ))
@@ -1811,8 +1814,8 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
                       | [ chain; why ] ->
                           Some
                             ( chain,
-                              Py.last (Py.split_on " -> " chain),
-                              Py.strip why )
+                              Util.last (Util.split_on " -> " chain),
+                              String.trim why )
                       | _ -> None)
                     (Rx.findall_groups ~flags:[ Rx.M ] pat txt))
             pick
@@ -1845,7 +1848,7 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
             SS.of_list
               (List.filter_map
                  (fun c ->
-                   match Py.split_on " -> " c with
+                   match Util.split_on " -> " c with
                    | _ :: b :: _ -> Some b
                    | _ -> None)
                  chains)
@@ -1859,7 +1862,7 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
                   `Error
                     ("Not installable on any tested platform. Solver: "
                     ^ String.concat "; "
-                        (Py.take 3 (List.sort_uniq compare chains)));
+                        (Util.take 3 (List.sort_uniq compare chains)));
                 ])
           in
           let added = Option.value ~default:[] (List.assoc_opt t bounds) in
@@ -1993,7 +1996,7 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
                  (if one then "it is" else "they are"))
           end
           else if not (SS.is_empty no_version) then begin
-            let dep, _, cstr = Py.partition (SS.min_elt no_version) " " in
+            let dep, _, cstr = Util.partition (SS.min_elt no_version) " " in
             upd "high"
               (Printf.sprintf
                  "No version of `%s` in opam-repository satisfies `%s`. \
@@ -2007,7 +2010,7 @@ let skipped_rules ?src ?(bounds = []) (data : data) cache_dir pr_packages =
               List.sort_uniq compare
                 (List.filter_map
                    (fun c ->
-                     match Py.split_on " -> " c with
+                     match Util.split_on " -> " c with
                      | _ :: _ :: e :: _ -> Some e
                      | _ -> None)
                    chains)
@@ -2041,7 +2044,7 @@ let accepted_elsewhere ?(max_versions = 3) (results : Suggestion.t list) src
           | Some m ->
               Some (SS.of_list (Rx.findall {|"([^"]+)"|} (Rx.group m 1)))
           | None ->
-              if Py.contains new_ {|os != "win32"|} then
+              if Util.contains new_ {|os != "win32"|} then
                 Some (SS.of_list [ "cygwin"; "msys2" ])
               else None
         in
@@ -2053,7 +2056,7 @@ let accepted_elsewhere ?(max_versions = 3) (results : Suggestion.t list) src
               | Some a -> a
               | None ->
                   let others =
-                    Py.take max_versions
+                    Util.take max_versions
                       (List.filter
                          (fun v -> v <> ver)
                          (List.rev
@@ -2092,8 +2095,8 @@ let accepted_elsewhere ?(max_versions = 3) (results : Suggestion.t list) src
               in
               r.note <-
                 Some
-                  (Py.strip
-                     (Py.rstrip (Suggestion.str r.note)
+                  (String.trim
+                     (Util.rstrip (Suggestion.str r.note)
                      ^ Printf.sprintf
                          " Other versions already accept failures there: %s."
                          where));

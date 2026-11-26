@@ -16,7 +16,7 @@ let rule_error (job : job) e jobs =
         `Confidence "low";
         `Error
           (Printf.sprintf "%s: %s" (Printexc.exn_slot_name e)
-             (Py.prefix (Py.exn_text e) 300));
+             (Util.prefix_chars (Util.exn_text e) 300));
         `Note
           "The tool failed while analysing this log, which is a bug in the \
            tool. Read the log.";
@@ -32,7 +32,7 @@ let lint_codes text =
   | None -> None
   | Some _ ->
       let d = Filename.temp_dir "opam-lint" "" in
-      Fun.protect ~finally:(fun () -> Py.rmtree d) @@ fun () ->
+      Fun.protect ~finally:(fun () -> Util.rmtree d) @@ fun () ->
       let path = Filename.concat d "opam" in
       let oc = open_out_bin path in
       output_string oc text;
@@ -49,19 +49,20 @@ let lint_codes text =
                  (p.stdout ^ p.stderr))))
 
 let first_part r =
-  Py.strip
+  String.trim
     (List.hd
-       (Py.split_on ~maxsplit:1 "   " (Suggestion.str_field r.Suggestion.new_)))
+       (Util.split_on ~maxsplit:1 "   "
+          (Suggestion.str_field r.Suggestion.new_)))
 
 let applied text r =
   let new_ = first_part r in
   match Suggestion.get r.old with
-  | Some old when old <> "" && Py.contains text old ->
-      Some (Py.replace ~count:1 text old new_)
+  | Some old when old <> "" && Util.contains text old ->
+      Some (Util.replace ~count:1 text old new_)
   | _ ->
       if
         Rx.test_match {|"[\w+-]+"|} new_
-        && Py.contains
+        && Util.contains
              (Suggestion.str_field r.Suggestion.new_)
              "new line in depends"
       then
@@ -89,7 +90,7 @@ let check_changes results src sha pr_packages =
               match have with
               | Some have
                 when have <> "" && terms <> []
-                     && (not (Py.contains (Rx.group m 2) "with-test"))
+                     && (not (Util.contains (Rx.group m 2) "with-test"))
                      && Constraints.allows have terms
                      && List.mem (Suggestion.str r.rule)
                           [
@@ -148,8 +149,8 @@ let check_changes results src sha pr_packages =
           let change = first_part r in
           r.note <-
             Some
-              (Py.strip
-                 (Py.rstrip (Suggestion.str r.note)
+              (String.trim
+                 (Util.rstrip (Suggestion.str r.note)
                  ^ Printf.sprintf
                      " Possible change, not shown as a diff because %s: `%s`."
                      problem change));
@@ -210,7 +211,7 @@ let merge_versions results =
               if
                 not
                   (List.mem failing
-                     (Py.split_on ", "
+                     (Util.split_on ", "
                         (Suggestion.str_field f.Suggestion.failing)))
               then
                 f.Suggestion.failing <-
@@ -232,7 +233,7 @@ let merge_versions results =
                    | None ->
                        ( note0,
                          List.hd
-                           (Py.split_on ", "
+                           (Util.split_on ", "
                               (Suggestion.str_field f.Suggestion.failing)),
                          [] )
                  in
@@ -249,12 +250,12 @@ let merge_versions results =
       match List.assq_opt r !extra with
       | Some (_, first_pkg, similar) ->
           let similar =
-            List.filter (fun x -> x <> first_pkg) (Py.dedup similar)
+            List.filter (fun x -> x <> first_pkg) (Util.dedup similar)
           in
           if similar <> [] then
             r.note <-
               Some
-                (Py.rstrip (Suggestion.str r.note)
+                (Util.rstrip (Suggestion.str r.note)
                 ^ Printf.sprintf " This note is for %s; it differs for %s."
                     first_pkg
                     (String.concat ", " similar))
@@ -298,7 +299,7 @@ let merge_unrecognised results =
                 (if names = [] then None
                  else
                    Some
-                     (String.concat ", " (Py.take 6 names)
+                     (String.concat ", " (Util.take 6 names)
                      ^ if List.length names > 6 then " ..." else ""));
               `Error (Words.counted n "failed job" ^ " the tool cannot explain");
               `Note (if n = 1 then "Read its log." else "Read their logs.");

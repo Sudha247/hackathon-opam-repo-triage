@@ -18,7 +18,7 @@ val user_agent : string
 
 (** {1 Request counts} *)
 
-val net : int Py.Odict.t
+val net : int Odict.t
 (** Request counts ("http", "mcp", "git", "github-api", then "net-errors",
     "llm", "refreshed", ... in the order they were first set). With
     [OPAM_CI_NET_FILE] set, they are also written to that file (JSON) on every

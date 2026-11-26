@@ -1,6 +1,5 @@
-(* Small helpers with the semantics of the Python built-ins the tool was first
-   written with (string methods, list helpers, files, time). Strings are
-   UTF-8 bytes; the functions that count characters say so. *)
+(* Helpers on strings, lists, files and processes that the standard library
+   lacks; see util.mli. *)
 
 (* ------------------------------------------------------------------------ *)
 (* Strings *)
@@ -35,11 +34,7 @@ let rstrip_with p s =
   String.sub s 0 (!j + 1)
 
 let in_chars chars c = String.contains chars c
-
-let strip ?chars s =
-  match chars with
-  | None -> strip_with is_space s
-  | Some c -> strip_with (in_chars c) s
+let strip ~chars s = strip_with (in_chars chars) s
 
 let lstrip ?chars s =
   match chars with
@@ -68,7 +63,7 @@ let rfind s sub =
 let contains s sub = find s sub >= 0
 
 let split_on ?maxsplit sep s =
-  if sep = "" then invalid_arg "Py.split_on: empty separator";
+  if sep = "" then invalid_arg "Util.split_on: empty separator";
   let k = String.length sep in
   let rec go acc from count =
     match maxsplit with
@@ -196,7 +191,9 @@ let slice ?(start = 0) ?stop s =
 (* UTF-8: Python strings count code points. *)
 
 let is_cont c = Char.code c land 0xC0 = 0x80
-let length s = String.fold_left (fun n c -> if is_cont c then n else n + 1) 0 s
+
+let char_length s =
+  String.fold_left (fun n c -> if is_cont c then n else n + 1) 0 s
 
 let byte_index s k =
   let n = String.length s in
@@ -210,63 +207,19 @@ let byte_index s k =
   done;
   !i
 
-let prefix s k = if k <= 0 then "" else String.sub s 0 (byte_index s k)
+let prefix_chars s k = if k <= 0 then "" else String.sub s 0 (byte_index s k)
 
-let drop s k =
+let drop_chars s k =
   if k <= 0 then s
   else
     let i = byte_index s k in
     String.sub s i (String.length s - i)
 
-let suffix s k =
-  let n = length s in
-  if k >= n then s else drop s (n - k)
+let suffix_chars s k =
+  let n = char_length s in
+  if k >= n then s else drop_chars s (n - k)
 
-let sub_chars s i j = prefix (drop s i) (j - i)
-
-let repr_float f =
-  if Float.is_integer f && Float.abs f < 1e16 then Printf.sprintf "%.1f" f
-  else if Float.is_nan f then "nan"
-  else if f = Float.infinity then "inf"
-  else if f = Float.neg_infinity then "-inf"
-  else begin
-    (* Shortest representation that reads back, in Python's layout. *)
-    let rec digits p =
-      let s = Printf.sprintf "%.*e" p f in
-      if p >= 16 || float_of_string s = f then s else digits (p + 1)
-    in
-    let e = digits 0 in
-    let mant, exp =
-      match String.index_opt e 'e' with
-      | Some i ->
-          ( String.sub e 0 i,
-            int_of_string (String.sub e (i + 1) (String.length e - i - 1)) )
-      | None -> (e, 0)
-    in
-    let neg = mant.[0] = '-' in
-    let mant =
-      if neg then String.sub mant 1 (String.length mant - 1) else mant
-    in
-    let ds = String.concat "" (String.split_on_char '.' mant) in
-    let sign = if neg then "-" else "" in
-    if exp < -4 || exp >= 16 then
-      let m =
-        if String.length ds = 1 then ds
-        else String.sub ds 0 1 ^ "." ^ String.sub ds 1 (String.length ds - 1)
-      in
-      Printf.sprintf "%s%se%s%02d" sign m
-        (if exp < 0 then "-" else "+")
-        (abs exp)
-    else if exp < 0 then sign ^ "0." ^ String.make (-exp - 1) '0' ^ ds
-    else
-      let nd = String.length ds in
-      if nd <= exp + 1 then sign ^ ds ^ String.make (exp + 1 - nd) '0' ^ ".0"
-      else
-        sign
-        ^ String.sub ds 0 (exp + 1)
-        ^ "."
-        ^ String.sub ds (exp + 1) (nd - exp - 1)
-  end
+let sub_chars s i j = prefix_chars (drop_chars s i) (j - i)
 
 let repr s =
   let q =
@@ -311,14 +264,14 @@ let take n l =
   in
   go n [] l
 
-let rec drop_list n l =
-  if n <= 0 then l else match l with [] -> [] | _ :: r -> drop_list (n - 1) r
+let rec drop n l =
+  if n <= 0 then l else match l with [] -> [] | _ :: r -> drop (n - 1) r
 
-let lslice ?(start = 0) ?stop l =
+let sublist ?(start = 0) ?stop l =
   let n = List.length l in
   let norm i = if i < 0 then max 0 (n + i) else min i n in
   let a = norm start and b = match stop with None -> n | Some j -> norm j in
-  if b <= a then [] else take (b - a) (drop_list a l)
+  if b <= a then [] else take (b - a) (drop a l)
 
 let last l = List.nth l (List.length l - 1)
 let last_opt l = match List.rev l with [] -> None | x :: _ -> Some x
@@ -327,17 +280,7 @@ let sort_by ?(reverse = false) f l =
   let c a b = compare (f a) (f b) in
   List.stable_sort (if reverse then fun a b -> c b a else c) l
 
-let sum = List.fold_left ( + ) 0
-let range a b = List.init (max 0 (b - a)) (fun i -> a + i)
-let enumerate l = List.mapi (fun i x -> (i, x)) l
 let first_some fs = List.find_map (fun f -> f ()) fs
-
-let index_of x l =
-  let rec go i = function
-    | [] -> None
-    | y :: r -> if y = x then Some i else go (i + 1) r
-  in
-  go 0 l
 
 let group_by f l =
   let order = ref [] and tbl = Hashtbl.create 16 in
@@ -359,40 +302,7 @@ let counter l =
     (List.map (fun (k, xs) -> (k, List.length xs)) g)
 
 (* ------------------------------------------------------------------------ *)
-(* Ordered string tables (insertion order) *)
-
-module Odict = struct
-  type 'a t = { mutable kv : (string * 'a) list }
-
-  let create () = { kv = [] }
-  let of_list kv = { kv }
-  let get t k = List.assoc_opt k t.kv
-  let mem t k = List.mem_assoc k t.kv
-
-  let set t k v =
-    if List.mem_assoc k t.kv then
-      t.kv <-
-        List.map (fun (k', v') -> if k' = k then (k', v) else (k', v')) t.kv
-    else t.kv <- t.kv @ [ (k, v) ]
-
-  let remove t k = t.kv <- List.remove_assoc k t.kv
-  let keys t = List.map fst t.kv
-  let values t = List.map snd t.kv
-  let to_list t = t.kv
-  let length t = List.length t.kv
-
-  let setdefault t k d =
-    match get t k with
-    | Some v -> v
-    | None ->
-        set t k d;
-        d
-end
-
-(* ------------------------------------------------------------------------ *)
 (* Files *)
-
-let read_file path = In_channel.with_open_bin path In_channel.input_all
 
 let read_gzip path =
   let ic = Gzip.open_in path in
@@ -460,40 +370,3 @@ let die msg =
 
 (* ------------------------------------------------------------------------ *)
 (* Time *)
-
-let sleep s = if s > 0. then Unix.sleepf s
-
-let today () =
-  let t = Unix.localtime (Unix.gettimeofday ()) in
-  Printf.sprintf "%04d-%02d-%02d" (t.tm_year + 1900) (t.tm_mon + 1) t.tm_mday
-
-let days_of_date s =
-  try
-    Scanf.sscanf s "%4d-%2d-%2d%!" (fun y m d ->
-        match Ptime.of_date (y, m, d) with
-        | Some t -> Some (fst (Ptime.Span.to_d_ps (Ptime.to_span t)))
-        | None -> None)
-  with _ -> None
-
-let date_of_days n =
-  match Ptime.of_span (Ptime.Span.of_int_s (n * 86400)) with
-  | Some t ->
-      let y, m, d = Ptime.to_date t in
-      Printf.sprintf "%04d-%02d-%02d" y m d
-  | None -> "1970-01-01"
-
-let parse_iso s =
-  let s = strip s in
-  let s = if String.length s = 10 then s ^ "T00:00:00Z" else s in
-  let s =
-    if
-      String.ends_with ~suffix:"Z" s
-      || String.length s > 19
-         && (String.contains (String.sub s 19 (String.length s - 19)) '+'
-            || String.contains (String.sub s 19 (String.length s - 19)) '-')
-    then s
-    else s ^ "Z"
-  in
-  match Ptime.of_rfc3339 ~strict:false s with
-  | Ok (t, _, _) -> Some (Ptime.to_float_s t)
-  | Error _ -> None

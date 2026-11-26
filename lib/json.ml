@@ -11,6 +11,50 @@ let utf8_at s i =
   let d = String.get_utf_8_uchar s i in
   (Uchar.to_int (Uchar.utf_decode_uchar d), Uchar.utf_decode_length d)
 
+let repr_float f =
+  if Float.is_integer f && Float.abs f < 1e16 then Printf.sprintf "%.1f" f
+  else if Float.is_nan f then "nan"
+  else if f = Float.infinity then "inf"
+  else if f = Float.neg_infinity then "-inf"
+  else begin
+    (* Shortest representation that reads back, in Python's layout. *)
+    let rec digits p =
+      let s = Printf.sprintf "%.*e" p f in
+      if p >= 16 || float_of_string s = f then s else digits (p + 1)
+    in
+    let e = digits 0 in
+    let mant, exp =
+      match String.index_opt e 'e' with
+      | Some i ->
+          ( String.sub e 0 i,
+            int_of_string (String.sub e (i + 1) (String.length e - i - 1)) )
+      | None -> (e, 0)
+    in
+    let neg = mant.[0] = '-' in
+    let mant =
+      if neg then String.sub mant 1 (String.length mant - 1) else mant
+    in
+    let ds = String.concat "" (String.split_on_char '.' mant) in
+    let sign = if neg then "-" else "" in
+    if exp < -4 || exp >= 16 then
+      let m =
+        if String.length ds = 1 then ds
+        else String.sub ds 0 1 ^ "." ^ String.sub ds 1 (String.length ds - 1)
+      in
+      Printf.sprintf "%s%se%s%02d" sign m
+        (if exp < 0 then "-" else "+")
+        (abs exp)
+    else if exp < 0 then sign ^ "0." ^ String.make (-exp - 1) '0' ^ ds
+    else
+      let nd = String.length ds in
+      if nd <= exp + 1 then sign ^ ds ^ String.make (exp + 1 - nd) '0' ^ ".0"
+      else
+        sign
+        ^ String.sub ds 0 (exp + 1)
+        ^ "."
+        ^ String.sub ds (exp + 1) (nd - exp - 1)
+  end
+
 let add_string ?(ensure_ascii = true) b s =
   Buffer.add_char b '"';
   let n = String.length s in
@@ -81,7 +125,7 @@ let dumps ?indent ?(sort_keys = false) ?(ensure_ascii = true) ?(compact = false)
           (if Float.is_nan f then "NaN"
            else if f = Float.infinity then "Infinity"
            else if f = Float.neg_infinity then "-Infinity"
-           else Py.repr_float f)
+           else repr_float f)
     | `String s -> add_string ~ensure_ascii b s
     | `List [] -> Buffer.add_string b "[]"
     | `Assoc [] -> Buffer.add_string b "{}"
@@ -173,12 +217,12 @@ let strings l : t = `List (List.map (fun s -> `String s) l)
 (* Python's repr and str of a value. *)
 let rec py_repr (v : t) =
   match v with
-  | `String s -> Py.repr s
+  | `String s -> Util.repr s
   | `List l -> "[" ^ String.concat ", " (List.map py_repr l) ^ "]"
   | `Assoc kv ->
       "{"
       ^ String.concat ", "
-          (List.map (fun (k, v) -> Py.repr k ^ ": " ^ py_repr v) kv)
+          (List.map (fun (k, v) -> Util.repr k ^ ": " ^ py_repr v) kv)
       ^ "}"
   | v -> py_str v
 
@@ -188,7 +232,9 @@ and py_str (v : t) =
   | `Null -> "None"
   | `Bool b -> if b then "True" else "False"
   | `Int n -> string_of_int n
-  | `Float f -> Py.repr_float f
+  | `Float f -> repr_float f
   | v -> py_repr v
 
-let load path = try Some (parse (Py.read_file path)) with _ -> None
+let load path =
+  try Some (parse (In_channel.with_open_bin path In_channel.input_all))
+  with _ -> None

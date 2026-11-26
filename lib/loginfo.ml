@@ -9,22 +9,21 @@ type info = {
 }
 
 let log_info text =
-  let installed = Py.Odict.create () in
-  let lines = Py.splitlines text in
+  let installed = Odict.create () in
+  let lines = Util.splitlines text in
   List.iter
     (fun line ->
       match Rx.search {|-> installed ([\w+-]+)\.(\S+)|} line with
-      | Some m -> Py.Odict.set installed (Rx.group m 1) (Rx.group m 2)
+      | Some m -> Odict.set installed (Rx.group m 1) (Rx.group m 2)
       | None -> ())
     lines;
   List.iter
-    (fun m ->
-      ignore (Py.Odict.setdefault installed (Rx.group m 1) (Rx.group m 2)))
+    (fun m -> ignore (Odict.setdefault installed (Rx.group m 1) (Rx.group m 2)))
       (* day10 dependency graph *)
     (Rx.finditer {|"([\w+-]+)\.([^"\s]+)"|}
        (String.concat "\n"
           (List.filter
-             (fun l -> Py.contains l "->" && String.contains l '"')
+             (fun l -> Util.contains l "->" && String.contains l '"')
              lines)));
   let action, failing =
     match
@@ -45,7 +44,7 @@ let log_info text =
       (List.assoc_opt "error_block" (Ci.excerpt ~max_output_lines:200 text))
   in
   let error_lines =
-    List.map (fun l -> Rx.sub ~count:1 "^# ?" "" l) (Py.splitlines blk)
+    List.map (fun l -> Rx.sub ~count:1 "^# ?" "" l) (Util.splitlines blk)
   in
   let action, failing, error_lines, blk =
     if blk <> "" then (action, failing, error_lines, blk)
@@ -69,32 +68,35 @@ let log_info text =
             | Some f -> Some f
             | None -> Some (Rx.group m 2, Rx.group m 3)
           in
-          let before = Py.splitlines (String.sub text 0 (Rx.start m)) in
+          let before = Util.splitlines (String.sub text 0 (Rx.start m)) in
           let out =
             List.map
               (fun l ->
-                if String.starts_with ~prefix:"- " l then Py.drop l 2 else l)
-              (Py.lslice ~start:(-80) before)
+                if String.starts_with ~prefix:"- " l then Util.drop_chars l 2
+                else l)
+              (Util.sublist ~start:(-80) before)
           in
+          (* the last note, error or "Processing:" line *)
           let cut =
-            List.fold_left
-              (fun acc (i, l) ->
-                if Rx.test_match {|\[(NOTE|ERROR)\]|Processing:|} l then i
-                else acc)
-              (-1) (Py.enumerate out)
+            List.fold_left max (-1)
+              (List.mapi
+                 (fun i l ->
+                   if Rx.test_match {|\[(NOTE|ERROR)\]|Processing:|} l then i
+                   else -1)
+                 out)
           in
-          let error_lines = Py.drop_list (cut + 1) out in
+          let error_lines = Util.drop (cut + 1) out in
           (action, failing, error_lines, String.concat "\n" error_lines)
       | None -> (action, failing, error_lines, blk)
   in
   {
-    installed = Py.Odict.to_list installed;
+    installed = Odict.to_list installed;
     action;
     failing;
     ocaml;
     error_lines;
     test_diff =
-      Py.contains blk ".corrected" || Py.contains blk "git --no-pager diff";
+      Util.contains blk ".corrected" || Util.contains blk "git --no-pager diff";
     base = List.assoc_opt "base" (Ci.excerpt text);
   }
 
@@ -110,8 +112,8 @@ let dep_names opam_text field =
 
 let depends_block ?(close = "\n]") opam_text =
   List.hd
-    (Py.split_on ~maxsplit:1 close
-       (Py.last (Py.split_on ~maxsplit:1 "depends:" opam_text)))
+    (Util.split_on ~maxsplit:1 close
+       (Util.last (Util.split_on ~maxsplit:1 "depends:" opam_text)))
 
 let direct_deps opam_text =
   Rx.findall ~flags:[ Rx.M ] {|^\s*"([\w+-]+)"|}

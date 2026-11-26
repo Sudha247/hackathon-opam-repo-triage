@@ -5,11 +5,11 @@ let starts_day10 j = match j.platform with "day10" :: _ -> true | _ -> false
 
 (* Python's str() of a (target, revdep, kind) tuple: the groups are sorted by it. *)
 let key_str (target, revdep, kind) =
-  let s = function Some x -> Py.repr x | None -> "None" in
-  Printf.sprintf "(%s, %s, %s)" (s target) (s revdep) (Py.repr kind)
+  let s = function Some x -> Util.repr x | None -> "None" in
+  Printf.sprintf "(%s, %s, %s)" (s target) (s revdep) (Util.repr kind)
 
 let matrix_groups jobs match_ =
-  Py.group_by
+  Util.group_by
     (fun j -> (j.target, j.revdep, j.kind))
     (List.filter
        (fun j ->
@@ -26,7 +26,7 @@ let sorted_strings l = List.sort_uniq compare l
 (** Fails on every job of the older (or newer) OCaml versions, passes on the
     others -> ('>=' | '<', version, failing versions, passing versions). *)
 let compiler_matrix js =
-  let per = Py.Odict.create () in
+  let per = Odict.create () in
   List.iter
     (fun j ->
       if not (j.experimental || List.mem j.category neutral) then begin
@@ -38,12 +38,12 @@ let compiler_matrix js =
         in
         match (v, s) with
         | Some v, Some s when v <> "" ->
-            let cur = Option.value ~default:[] (Py.Odict.get per v) in
-            if not (List.mem s cur) then Py.Odict.set per v (s :: cur)
+            let cur = Option.value ~default:[] (Odict.get per v) in
+            if not (List.mem s cur) then Odict.set per v (s :: cur)
         | _ -> ()
       end)
     js;
-  let kv = Py.Odict.to_list per in
+  let kv = Odict.to_list per in
   if List.length kv < 2 || List.exists (fun (_, s) -> List.length s > 1) kv then
     None
   else begin
@@ -181,7 +181,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
         (* Who has to change: a failing dependency (named by CI, or found in
            the log's ERROR block), or the package itself. *)
         let named =
-          Py.dedup
+          Util.dedup
             (List.map
                (fun j ->
                  let d =
@@ -279,7 +279,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
               ^ (match evidence with Some e when e <> "" -> " " ^ e | _ -> "")
               ^
               if
-                Py.contains
+                Util.contains
                   (Option.value ~default:"" evidence)
                   "Nothing to change"
               then ""
@@ -329,7 +329,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                   Printf.sprintf
                     " OCaml versions between %s and %s were not tested, so the \
                      bound may be lower."
-                    (Py.last fv) v
+                    (Util.last fv) v
                 else ""
               in
               let error =
@@ -455,14 +455,16 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                       (sorted_strings
                          (List.map
                             (fun j ->
-                              Py.prefix (Option.value ~default:"" j.reason) 120)
+                              Util.prefix_chars
+                                (Option.value ~default:"" j.reason)
+                                120)
                             fails))
                   in
                   (* The CI's own reason is a sentence ("The compilation of …"): here it follows a colon. *)
-                  let reason = Py.lstrip ~chars:": " reason in
+                  let reason = Util.lstrip ~chars:": " reason in
                   let reason =
                     if String.starts_with ~prefix:"The " reason then
-                      "t" ^ Py.drop reason 1
+                      "t" ^ Util.drop_chars reason 1
                     else reason
                   in
                   let distros =
@@ -529,13 +531,13 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
     let rule = Suggestion.str r.rule in
     let pattern =
       if rule = "platform-matrix" then
-        List.hd (Py.split_on ~maxsplit:1 ": " (Suggestion.str r.error))
+        List.hd (Util.split_on ~maxsplit:1 ": " (Suggestion.str r.error))
       else Suggestion.str r.error
     in
     ( rule,
       Rx.sub {|the dependency \S+|} "a dependency" pattern,
       if rule = "compiler-matrix" then
-        List.hd (Py.split_on "   " (Suggestion.str_field r.Suggestion.new_))
+        List.hd (Util.split_on "   " (Suggestion.str_field r.Suggestion.new_))
       else "" )
   in
   List.concat_map
@@ -547,12 +549,12 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
             (List.map
                (fun r ->
                  List.hd
-                   (Py.split_on ~maxsplit:1 " ["
+                   (Util.split_on ~maxsplit:1 " ["
                       (Suggestion.str r.Suggestion.variant)))
                rs)
         in
         let culprits =
-          Py.counter
+          Util.counter
             (List.filter
                (fun f -> not (List.mem f names))
                (List.map
@@ -562,14 +564,14 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
         let r0 = List.hd rs in
         let error, note =
           if rule = "builder-specific" then
-            ( List.hd (Py.split_on ~maxsplit:1 ";" pattern) ^ ".",
+            ( List.hd (Util.split_on ~maxsplit:1 ";" pattern) ^ ".",
               r0.Suggestion.note )
           else begin
-            let error = Py.rstrip ~chars:"." pattern ^ "." in
+            let error = Util.rstrip ~chars:"." pattern ^ "." in
             let code, _, hint =
-              Py.partition (Suggestion.str_field r0.Suggestion.new_) "   "
+              Util.partition (Suggestion.str_field r0.Suggestion.new_) "   "
             in
-            let m = Rx.fullmatch {|\(in (\S+)\)|} (Py.strip hint) in
+            let m = Rx.fullmatch {|\(in (\S+)\)|} (String.trim hint) in
             let fix =
               match m with
               | Some m when code <> "" ->
@@ -579,7 +581,7 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
                   if code <> "" then
                     Printf.sprintf "Possible fix for each package: `%s`" code
                     ^
-                    if Py.strip hint <> "" then " " ^ Py.strip hint ^ "."
+                    if String.trim hint <> "" then " " ^ String.trim hint ^ "."
                     else "."
                   else Suggestion.str r0.advice
             in
@@ -592,7 +594,7 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
                     (List.map
                        (fun (d, n) ->
                          Printf.sprintf "%s (%s)" d (Words.counted n "package"))
-                       (Py.take 3 culprits))
+                       (Util.take 3 culprits))
                 ^ ". "
               else ""
             in
@@ -606,7 +608,7 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
                  (Printf.sprintf "%d packages [%s]" (List.length rs) rule);
                `Failing
                  (Some
-                    (String.concat ", " (Py.take 6 names)
+                    (String.concat ", " (Util.take 6 names)
                     ^ if List.length names > 6 then " ..." else ""));
              ]
             @ (if rule = "builder-specific" then
@@ -636,4 +638,4 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
         | _ -> ());
         [ entry ]
       end)
-    (Py.group_by sig_ out)
+    (Util.group_by sig_ out)

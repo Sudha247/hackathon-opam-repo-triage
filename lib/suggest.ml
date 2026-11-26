@@ -26,14 +26,14 @@ let distinct_failures jobs match_ =
       jobs
   in
   let sorted =
-    Py.sort_by
+    Util.sort_by
       (fun j ->
         ( j.experimental,
           (match j.revdep with Some r -> r <> "" | None -> false),
           match j.platform with "day10" :: _ -> true | _ -> false ))
       sel
   in
-  List.map snd (Py.group_by group_key sorted)
+  List.map snd (Util.group_by group_key sorted)
 
 let drop_health_explained_elsewhere (notes : Context.notes) results pr_packages
     =
@@ -92,7 +92,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
       "note: %d distinct failures, analysing the first %d (use --max)\n%!"
       (List.length groups) max_logs;
   (* [merged] keeps every job behind each analysed one, so the report can say how many it stands for. *)
-  let analysed = Py.take max_logs groups in
+  let analysed = Util.take max_logs groups in
   let uniq = List.map List.hd analysed in
   let merged =
     List.map
@@ -100,7 +100,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
       analysed
   in
   let merged_of j = List.assoc (group_key j) merged in
-  let dropped = Py.drop_list max_logs groups in
+  let dropped = Util.drop max_logs groups in
   (* to count the failures no suggestion explains *)
   let results = ref [] and base = ref None in
   let prev_cache = Hashtbl.create 4 in
@@ -115,7 +115,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
             (Suggestion.make
                [
                  `Variant j.variant;
-                 `Note ("Could not read the log: " ^ Py.exn_text e);
+                 `Note ("Could not read the log: " ^ Util.exn_text e);
                  `Jobs (merged_of j);
                ])
       | text -> (
@@ -286,7 +286,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
         is the prompt). Asked once CI has finished. *)
       let n =
         List.length
-          (Py.dedup (List.map Llm.llm_sig (Llm.llm_todo results data)))
+          (Util.dedup (List.map Llm.llm_sig (Llm.llm_todo results data)))
       in
       data.llm_unanswered <- Some n;
       if n > 0 then
@@ -327,7 +327,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
           if name <> "" && ver <> "" then Sources.versions_or_empty src name
           else []
         in
-        match Py.last_opt vs with
+        match Util.last_opt vs with
         | Some latest
           when List.mem ver vs && latest <> ver
                && not (Suggestion.nonempty r.alternative) ->
@@ -363,7 +363,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
                      failing;
                      s
                        (List.hd
-                          (Py.split_on "   "
+                          (Util.split_on "   "
                              (Suggestion.str_field r.Suggestion.new_)));
                    ]),
               None )
@@ -374,7 +374,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
               None )
           else if List.mem (Suggestion.str r.rule) per_package_rules then
             let t =
-              Py.replace (Suggestion.str r.note)
+              Util.replace (Suggestion.str r.note)
                 (match plat with Some p when p <> "" -> p | _ -> "\000")
                 "{P}"
             in
@@ -406,8 +406,8 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
                   plats := !plats @ [ plat ];
                   let rerr = Suggestion.str r.error
                   and ferr = Suggestion.str first.error in
-                  let head, _, tail = Py.partition rerr "; " in
-                  if not (Py.contains ferr rerr) then
+                  let head, _, tail = Util.partition rerr "; " in
+                  if not (Util.contains ferr rerr) then
                     first.error <-
                       Some
                         (ferr
@@ -437,7 +437,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
     (fun r ->
       match List.assq_opt r !plats_of with
       | Some (plats, Some tmpl) when List.length !plats > 1 ->
-          r.note <- Some (Py.replace tmpl "{P}" (String.concat ", " !plats))
+          r.note <- Some (Util.replace tmpl "{P}" (String.concat ", " !plats))
       | _ -> ())
     unique;
   let results = unique in

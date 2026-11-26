@@ -16,7 +16,7 @@ let load source : Json.t =
       (Http.urlopen
          ~headers:[ ("User-Agent", "opam-ci-triage") ]
          ~timeout:60. source)
-  else Json.parse (Py.read_file source)
+  else Json.parse (In_channel.with_open_bin source In_channel.input_all)
 
 (** (PR number, suggestion) for every LLM answer. *)
 let answers sources =
@@ -57,7 +57,7 @@ let exact line =
     U.sub {|\b\d+\b|} "N" s
     (* numbers, not the digits of a name (collect2, msys2) *)
   in
-  Py.strip (U.sub {|\s+|} " " s)
+  String.trim (U.sub {|\s+|} " " s)
 
 (* Python's \s on characters: ASCII whitespace (with the separators
    0x1c-0x1f) and Unicode white space. *)
@@ -143,7 +143,7 @@ let py_str (v : Json.t) =
   match v with
   | `String s -> s
   | `Int n -> string_of_int n
-  | `Float f -> Py.repr_float f
+  | `Float f -> Json.repr_float f
   | `Bool true -> "True"
   | `Bool false -> "False"
   | `Null -> "None"
@@ -154,7 +154,7 @@ let py_str (v : Json.t) =
     the triage page when it is known, else a code span. *)
 let pr_ref ?page (n : Json.t) =
   let n = if Json.truthy n then py_str n else "" in
-  if not (Py.isdigit n) then "?"
+  if not (Util.isdigit n) then "?"
   else
     match page with
     | Some page -> Printf.sprintf "[`#%s`](%s#pr-%s)" n page n
@@ -176,7 +176,7 @@ let page_url sources =
 let first_nonempty values =
   List.find_map (function Some s when s <> "" -> Some s | _ -> None) values
 
-let distinct_prs v = List.length (Py.dedup (List.map (fun (n, _, _) -> n) v))
+let distinct_prs v = List.length (Util.dedup (List.map (fun (n, _, _) -> n) v))
 
 let report ?page items min_prs =
   (* One answer covers the failures that share its error, in several jobs or
@@ -199,7 +199,7 @@ let report ?page items min_prs =
       items
   in
   let groups =
-    Py.group_by
+    Util.group_by
       (fun (_, _, line) -> masked line)
       (List.map
          (fun (n, r) ->
@@ -211,7 +211,7 @@ let report ?page items min_prs =
          items)
   in
   let conf =
-    Py.counter
+    Util.counter
       (List.map
          (fun (_, r) ->
            let c =
@@ -222,7 +222,7 @@ let report ?page items min_prs =
            List.hd (String.split_on_char ' ' c))
          items)
   in
-  let prs = Py.dedup (List.map fst items) in
+  let prs = Util.dedup (List.map fst items) in
   let out = ref [] in
   let add l = out := List.rev_append l !out in
   add
@@ -266,7 +266,7 @@ let report ?page items min_prs =
                | _ -> "?")
              v)
       in
-      let code = Md.md_code (Py.prefix key 200) in
+      let code = Md.md_code (Util.prefix_chars key 200) in
       add
         [
           Printf.sprintf "### %s" (if code = "" then "?" else code);
@@ -274,7 +274,7 @@ let report ?page items min_prs =
           "- PRs: "
           ^ String.concat ", " (List.map (fun n -> pr_ref ?page n) pr_list);
           (Printf.sprintf "- Failing packages: %s"
-             (Md.md_text (String.concat ", " (Py.take 12 pkgs)))
+             (Md.md_text (String.concat ", " (Util.take 12 pkgs)))
           ^ if List.length pkgs > 12 then " \xe2\x80\xa6" else "");
         ];
       let lines =
@@ -285,12 +285,12 @@ let report ?page items min_prs =
           ("- Errors: "
           ^ String.concat "; "
               (List.map
-                 (fun l -> Md.md_code (Py.prefix l 160))
-                 (Py.take 3 lines))
+                 (fun l -> Md.md_code (Util.prefix_chars l 160))
+                 (Util.take 3 lines))
           ^ if List.length lines > 3 then " \xe2\x80\xa6" else "");
         ];
       let diags =
-        Py.counter
+        Util.counter
           (List.map
              (fun (_, r, _) ->
                ( Option.value ~default:""
@@ -312,7 +312,7 @@ let report ?page items min_prs =
                 (if k > 1 then Printf.sprintf ", %d times" k else "")
                 (Md.md_text ~limit:400 dg);
             ])
-        (Py.take 3 diags);
+        (Util.take 3 diags);
       let changes =
         List.sort_uniq compare
           (List.filter_map
@@ -328,11 +328,11 @@ let report ?page items min_prs =
             "- Suggested changes: "
             ^ String.concat "; "
                 (List.map
-                   (fun c -> Md.md_code (Py.prefix c 120))
-                   (Py.take 3 changes));
+                   (fun c -> Md.md_code (Util.prefix_chars c 120))
+                   (Util.take 3 changes));
           ];
       let logs =
-        Py.take 2
+        Util.take 2
           (List.filter_map (fun (_, r, _) -> Md.safe_ci_url r.Suggestion.url) v)
       in
       if logs <> [] then
@@ -360,7 +360,7 @@ let report ?page items min_prs =
     List.iter
       (fun (key, v) ->
         let n, r, _ = List.hd v in
-        let code = Md.md_code (Py.prefix key 160) in
+        let code = Md.md_code (Util.prefix_chars key 160) in
         add
           [
             Printf.sprintf "- %s: %s %s"
@@ -371,7 +371,7 @@ let report ?page items min_prs =
                  | Some f when f <> "" -> f
                  | _ -> ""));
           ])
-      (Py.take 80 single);
+      (Util.take 80 single);
     add [ ""; "</details>" ]
   end;
   add
@@ -383,11 +383,11 @@ let report ?page items min_prs =
        reaches the LLM.";
     ];
   let body = String.concat "\n" (List.rev !out) in
-  if Py.length body <= max_body then body
+  if Util.char_length body <= max_body then body
   else
     (* Cut at a line end: a cut line could leave a code span or a link open. *)
-    let limit = Py.byte_index body max_body in
-    let cut = Py.rfind (String.sub body 0 limit) "\n" in
+    let limit = Util.byte_index body max_body in
+    let cut = Util.rfind (String.sub body 0 limit) "\n" in
     String.sub body 0 (if cut < 0 then String.length body - 1 else cut)
     ^ "\n\n(truncated)"
 
@@ -397,7 +397,7 @@ let update_issue repo title body =
     if p.code <> 0 then
       failwith
         (Printf.sprintf "%s failed (%d): %s" (String.concat " " args) p.code
-           (Py.strip p.stderr));
+           (String.trim p.stderr));
     p
   in
   let q =
@@ -442,7 +442,7 @@ let update_issue repo title body =
   in
   let p = run ~input:body cmd in
   prerr_endline
-    (match Py.strip p.stdout with
+    (match String.trim p.stdout with
     | "" -> (
         "updated issue #"
         ^ match found with Some n -> py_str n | None -> "None")

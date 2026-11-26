@@ -139,7 +139,7 @@ let quote ?(safe = "/") s =
   let b = Buffer.create (String.length s) in
   String.iter
     (fun c ->
-      if Py.is_alnum c || String.contains "_.-~" c || String.contains safe c
+      if Util.is_alnum c || String.contains "_.-~" c || String.contains safe c
       then Buffer.add_char b c
       else Buffer.add_string b (Printf.sprintf "%%%02X" (Char.code c)))
     s;

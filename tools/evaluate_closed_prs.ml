@@ -27,10 +27,10 @@ let repo = "ocaml/opam-repository"
 (* The triage tool: $OPAM_CI_TRIAGE_TOOL, else opam-ci-triage next to this
    executable, else the dune build's, else opam-ci-triage on the PATH. *)
 let tool () =
-  match Py.getenv_nonempty "OPAM_CI_TRIAGE_TOOL" with
+  match Util.getenv_nonempty "OPAM_CI_TRIAGE_TOOL" with
   | Some t -> t
   | None ->
-      let dir = Filename.dirname (Py.abspath Sys.executable_name) in
+      let dir = Filename.dirname (Util.abspath Sys.executable_name) in
       let near = Filename.concat dir "opam-ci-triage" in
       let dune = Filename.concat dir "../bin/opam_repo_ci_triage.exe" in
       if Sys.file_exists near then near
@@ -54,7 +54,8 @@ query($q: String!, $after: String) {
 
 let gh ?input args =
   let out = Proc.run ?input ("gh" :: args) in
-  if out.code <> 0 then failwith (Py.prefix (Py.strip out.stderr) 300);
+  if out.code <> 0 then
+    failwith (Util.prefix_chars (String.trim out.stderr) 300);
   Json.parse out.stdout
 
 let ( |. ) = Json.( |. )
@@ -85,7 +86,7 @@ let merged_prs since limit =
       else go (Json.to_str_opt (d |. "pageInfo" |. "endCursor")) prs
     end
   in
-  Py.take limit (go None [])
+  Util.take limit (go None [])
 
 let initial_commit pr =
   match Json.to_list (pr |. "timelineItems" |. "nodes") with
@@ -100,7 +101,7 @@ module S = Set.Make (String)
 
 (** What a changed opam line is about: a dependency name or a field name. *)
 let line_tokens line =
-  let t = Py.strip line in
+  let t = String.trim line in
   match Rx.match_ {|"([\w+-]+)"|} t with
   | Some m -> S.singleton ("dep:" ^ Rx.group m 1)
   | None -> (
@@ -108,7 +109,7 @@ let line_tokens line =
       | Some m -> S.singleton ("field:" ^ Rx.group m 1)
       | None ->
           let toks =
-            if Py.contains t "@runtest" || Py.contains t "with-test" then
+            if Util.contains t "@runtest" || Util.contains t "with-test" then
               S.singleton "field:runtest"
             else S.empty
           in
@@ -129,14 +130,15 @@ let pr_files number =
         ".[].filename";
       ]
   in
-  if out.code <> 0 then failwith (Py.prefix (Py.strip out.stderr) 300);
-  Py.split out.stdout
+  if out.code <> 0 then
+    failwith (Util.prefix_chars (String.trim out.stderr) 300);
+  Util.split out.stdout
 
 (** [path -> text] of the files that exist at [commit] (GraphQL, 50 paths per
     query). *)
 let blobs commit paths =
   let rec chunks l =
-    if l = [] then [] else Py.take 50 l :: chunks (Py.drop_list 50 l)
+    if l = [] then [] else Util.take 50 l :: chunks (Util.drop 50 l)
   in
   List.concat_map
     (fun chunk ->
@@ -149,7 +151,7 @@ let blobs commit paths =
                  (Json.dumps (`String (commit ^ ":" ^ p))))
              chunk)
       in
-      let owner, _, name = Py.partition repo "/" in
+      let owner, _, name = Util.partition repo "/" in
       let q =
         Printf.sprintf
           "query { repository(owner: \"%s\", name: \"%s\") { %s } }" owner name
@@ -279,7 +281,7 @@ let actual_fix number initial final =
       (pr_files number)
   in
   let old = blobs initial paths and new_ = blobs final paths in
-  let changed = Py.Odict.create () in
+  let changed = Odict.create () in
   List.iter
     (fun path ->
       match (List.assoc_opt path old, List.assoc_opt path new_) with
@@ -293,16 +295,16 @@ let actual_fix number initial final =
                   && not
                        (String.starts_with ~prefix:"+++" line
                        || String.starts_with ~prefix:"---" line)
-                then S.union acc (line_tokens (Py.drop line 1))
+                then S.union acc (line_tokens (Util.drop_chars line 1))
                 else acc)
               S.empty
-              (unified_diff_lines (Py.splitlines o) (Py.splitlines n))
+              (unified_diff_lines (Util.splitlines o) (Util.splitlines n))
           in
-          Py.Odict.set changed (List.nth (String.split_on_char '/' path) 2) toks
+          Odict.set changed (List.nth (String.split_on_char '/' path) 2) toks
       | _ ->
           () (* packages added/removed between the two versions are not fixes *))
     paths;
-  Py.Odict.to_list changed
+  Odict.to_list changed
 
 (* A new upstream archive (a fix made upstream, then released again): not a
    change of the opam file that the tool could suggest, so not in the recall. *)
@@ -356,14 +358,14 @@ let suggestion_tokens (s : Suggestion.t) =
     (Suggestion.list s.candidates);
   let alternative = Suggestion.str s.alternative in
   let alt = Rx.match_ {|"?([\w+-]+)"?[: ]|} alternative in
-  if Py.contains alternative "@runtest" then
+  if Util.contains alternative "@runtest" then
     add "field:runtest" (* disable the tests: server-reason-react, #30879 *);
   (match alt with
   | Some m ->
       add
         ((if
             String.ends_with ~suffix:":"
-              (List.hd (Py.split_on ~maxsplit:1 " " alternative))
+              (List.hd (Util.split_on ~maxsplit:1 " " alternative))
           then "field:"
           else "dep:")
         ^ Rx.group m 1)
@@ -375,12 +377,12 @@ let suggestion_tokens (s : Suggestion.t) =
   (match Rx.match_ {|([a-z][\w-]*):|} new_ with
   | Some m -> add ("field:" ^ Rx.group m 1)
   | None -> ());
-  if Py.contains new_ "@runtest" then add "field:runtest";
+  if Util.contains new_ "@runtest" then add "field:runtest";
   if String.starts_with ~prefix:"checksum" new_ then add "field:checksum";
   if String.starts_with ~prefix:"extra-source" new_ then (
     add "field:extra-source";
     add "field:extra-files");
-  if Py.contains new_ "%{_:" then (
+  if Util.contains new_ "%{_:" then (
     add "field:build";
     add "field:install";
     add "field:remove");
@@ -407,7 +409,7 @@ let run ~since ~limit ~max_ ~json () =
      %!"
     (List.length prs) since (List.length cands);
   let totals =
-    Py.Odict.of_list
+    Odict.of_list
       [
         ("scored", 0);
         ("hit", 0);
@@ -418,9 +420,7 @@ let run ~since ~limit ~max_ ~json () =
         ("health_hit", 0);
       ]
   in
-  let tadd k n =
-    Py.Odict.set totals k (Option.get (Py.Odict.get totals k) + n)
-  in
+  let tadd k n = Odict.set totals k (Option.get (Odict.get totals k) + n) in
   let rows = ref [] in
   List.iter
     (fun (pr, init) ->
@@ -448,7 +448,9 @@ let run ~since ~limit ~max_ ~json () =
                   `Assoc
                     [
                       ("pr", `Int number);
-                      ("error", `String (Py.suffix (Py.strip out.stderr) 200));
+                      ( "error",
+                        `String (Util.suffix_chars (String.trim out.stderr) 200)
+                      );
                     ];
                 ]
         | Some sugg ->
@@ -480,7 +482,9 @@ let run ~since ~limit ~max_ ~json () =
                             ("rule", Json.opt_string s.rule);
                             ( "new",
                               `String
-                                (Py.prefix (Suggestion.str_field s.new_) 90) );
+                                (Util.prefix_chars
+                                   (Suggestion.str_field s.new_)
+                                   90) );
                             ("hit", `Bool hit);
                             ("tokens", strs toks);
                           ],
@@ -592,7 +596,7 @@ let run ~since ~limit ~max_ ~json () =
       else begin
         Printf.printf "\n#%s %s\n"
           (py_str (r |. "pr"))
-          (Py.prefix (Json.str "title" r) 70);
+          (Util.prefix_chars (Json.str "title" r) 70);
         List.iter
           (fun (p, toks) ->
             Printf.printf "  author changed %s: %s\n" p
@@ -622,7 +626,7 @@ let run ~since ~limit ~max_ ~json () =
             (Json.to_int (r |. "explanations"))
       end)
     !rows;
-  let t k = Option.get (Py.Odict.get totals k) in
+  let t k = Option.get (Odict.get totals k) in
   Printf.printf "\nPRs evaluated: %d\n"
     (List.length (List.filter (fun r -> not (Json.mem "error" r)) !rows));
   Printf.printf
@@ -656,7 +660,7 @@ let run ~since ~limit ~max_ ~json () =
                   `Assoc
                     (List.map
                        (fun (k, v) -> (k, `Int v))
-                       (Py.Odict.to_list totals)) );
+                       (Odict.to_list totals)) );
                 ("prs", `List !rows);
               ]));
       close_out oc

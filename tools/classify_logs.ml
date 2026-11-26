@@ -33,7 +33,7 @@ module U = Rx_utf8
 (** Make an error line comparable across jobs: drop versions, paths, numbers,
     hashes. *)
 let normalise s =
-  let s = Py.strip ~chars:"." (Py.strip s) in
+  let s = Util.strip ~chars:"." (String.trim s) in
   let s =
     U.sub {|(?:[A-Za-z]:)?(?:[\\/][\w.@+~-]+){2,}[\\/]?|} "<path>" s
     (* unix + windows paths *)
@@ -47,7 +47,7 @@ let normalise s =
 
 (** Strip the prefixes opam/day10 put in front of build output ('# ', '- ', '# |
     '). *)
-let clean line = U.sub {|^(?:[#\-]\s?)?(?:\s*\|\s?)?|} "" (Py.rstrip line)
+let clean line = U.sub {|^(?:[#\-]\s?)?(?:\s*\|\s?)?|} "" (Util.rstrip line)
 
 (* ------------------------------------------------------------------------ *)
 (* Rules: (category, regex, flags, signature template, generic?). The
@@ -198,12 +198,12 @@ let apply_rules rules lines =
   let cleaned = List.map clean lines in
   List.find_map
     (fun rule ->
-      List.find_map
-        (fun (idx, l) ->
+      List.find_mapi
+        (fun idx l ->
           Option.map
             (fun m -> (rule, m, idx))
             (U.search ~flags:rule.flags rule.pattern l))
-        (Py.enumerate cleaned))
+        cleaned)
     rules
 
 (** Every distinct specific (non-generic) build-rule signature found in these
@@ -239,7 +239,9 @@ let excerpt ?(before = 8) ?(after = 6) ?(width = 300) lines idx =
   let lo = max 0 (idx - before)
   and hi = min (List.length lines) (idx + after + 1) in
   String.concat "\n"
-    (List.map (fun l -> Py.prefix l width) (Py.lslice ~start:lo ~stop:hi lines))
+    (List.map
+       (fun l -> Util.prefix_chars l width)
+       (Util.sublist ~start:lo ~stop:hi lines))
 
 let pkg_name p = U.sub {|\.v?\d[\w.~+-]*$|} "" p
 
@@ -266,21 +268,21 @@ let job_type_hints =
 let parse_variant variant =
   let parts = String.split_on_char ',' variant in
   if List.length parts < 2 then (* (lint), (analysis) *)
-    (variant, Py.strip ~chars:"()" variant, None, None)
+    (variant, Util.strip ~chars:"()" variant, None, None)
   else begin
     let n = List.length parts in
     let job_type, revdep, parts =
       let last = List.nth parts (n - 1) in
       if last = "tests" || last = "lower-bounds" then
-        (last, None, Py.take (n - 1) parts)
+        (last, None, Util.take (n - 1) parts)
       else
-        match Py.index_of "revdeps" parts with
-        | Some i -> ("revdeps", List.nth_opt parts (i + 1), Py.take i parts)
+        match List.find_index (( = ) "revdeps") parts with
+        | Some i -> ("revdeps", List.nth_opt parts (i + 1), Util.take i parts)
         | None -> ("build", None, parts)
     in
     let k = List.length parts in
     let pr_package = List.nth parts (k - 1) in
-    ( String.concat "," (Py.take (k - 1) parts),
+    ( String.concat "," (Util.take (k - 1) parts),
       job_type,
       Some pr_package,
       Some (Option.value ~default:pr_package revdep) )
@@ -289,7 +291,7 @@ let parse_variant variant =
 let opt = Json.opt_string
 
 let classify_job job log_text =
-  let lines = Py.splitlines log_text in
+  let lines = Util.splitlines log_text in
   let variant = Dict.str job "variant" in
   let platform, job_type, pr_package, tested = parse_variant variant in
   let res =
@@ -354,7 +356,7 @@ let classify_job job log_text =
         (String.concat ", "
            (List.sort_uniq compare (List.map (fun m -> U.group m 1) msgs)));
       done_ "lint" sg
-        (String.concat "\n" (List.map U.group0 (Py.take 20 msgs)))
+        (String.concat "\n" (List.map U.group0 (Util.take 20 msgs)))
         ~rule:"lint"
     end
     else
@@ -364,7 +366,7 @@ let classify_job job log_text =
             lines (* lint job that died before linting (e.g. CI fault) *)
       | None ->
           done_ "lint" "lint failed"
-            (String.concat "\n" (Py.lslice ~start:(-30) lines))
+            (String.concat "\n" (Util.sublist ~start:(-30) lines))
             ~rule:"lint" ~generic:true
   end
   else begin
@@ -449,19 +451,22 @@ let classify_job job log_text =
                 in
                 let tail =
                   match !blocks with
-                  | (_, _, _, b) :: _ -> Py.lslice ~start:(-40) b
-                  | [] -> Py.lslice ~start:(-40) lines
+                  | (_, _, _, b) :: _ -> Util.sublist ~start:(-40) b
+                  | [] -> Util.sublist ~start:(-40) lines
                 in
                 done_ "unclassified" reason
                   (String.concat "\n"
-                     (List.map (fun l -> Py.prefix l 300) tail))
+                     (List.map (fun l -> Util.prefix_chars l 300) tail))
                   ~rule:"fallback" ~generic:true))
   end
 
 let classify_run run_dir =
   let jobs =
     Json.to_list
-      (Json.parse (Py.read_file (Filename.concat run_dir "jobs.json")))
+      (Json.parse
+         (In_channel.with_open_bin
+            (Filename.concat run_dir "jobs.json")
+            In_channel.input_all))
   in
   List.filter_map
     (fun job ->
@@ -476,7 +481,9 @@ let classify_run run_dir =
           Printf.eprintf "warning: missing log %s\n%!" log;
           None)
         else begin
-          let r = classify_job job (Py.read_file log) in
+          let r =
+            classify_job job (In_channel.with_open_bin log In_channel.input_all)
+          in
           Dict.set_str r "run" (Filename.basename run_dir);
           Some r
         end
@@ -486,11 +493,13 @@ let classify_run run_dir =
 (* The number of occurrences of each element, in the order of first occurrence. *)
 let counts l : Json.t =
   `Assoc
-    (List.map (fun (k, v) -> (k, `Int (List.length v))) (Py.group_by Fun.id l))
+    (List.map
+       (fun (k, v) -> (k, `Int (List.length v)))
+       (Util.group_by Fun.id l))
 
 let group results =
   let groups =
-    Py.group_by
+    Util.group_by
       (fun r ->
         (Dict.str r "job_type", Dict.str r "category", Dict.str r "signature"))
       results
@@ -569,11 +578,11 @@ let group results =
   List.stable_sort (fun a b -> compare (key a) (key b)) out
 
 let ljust w s =
-  let n = Py.length s in
+  let n = Util.char_length s in
   if n >= w then s else s ^ String.make (w - n) ' '
 
 let rjust w s =
-  let n = Py.length s in
+  let n = Util.char_length s in
   if n >= w then s else String.make (w - n) ' ' ^ s
 
 (* Python's repr() of a dict of counts. *)
@@ -581,7 +590,7 @@ let repr_counts (v : Json.t) =
   "{"
   ^ String.concat ", "
       (List.map
-         (fun (k, n) -> Py.repr k ^ ": " ^ string_of_int (Json.to_int n))
+         (fun (k, n) -> Util.repr k ^ ": " ^ string_of_int (Json.to_int n))
          (Json.to_assoc v))
   ^ "}"
 
@@ -590,10 +599,10 @@ let print_report title results groups verbose =
   if results = [] then print_endline "  no failed jobs"
   else begin
     let by_cat =
-      Py.counter (List.map (fun r -> Dict.str r "category") results)
+      Util.counter (List.map (fun r -> Dict.str r "category") results)
     in
     let by_type =
-      Py.counter (List.map (fun r -> Dict.str r "job_type") results)
+      Util.counter (List.map (fun r -> Dict.str r "job_type") results)
     in
     let rule_hits =
       List.length
@@ -614,14 +623,14 @@ let print_report title results groups verbose =
         let flag = if Json.bool "needs_llm" g then "  [LLM]" else "" in
         let fp = Json.to_str_list (Json.member "failing_packages" g) in
         let pk =
-          String.concat ", " (Py.take 4 fp)
+          String.concat ", " (Util.take 4 fp)
           ^ if List.length fp > 4 then " ..." else ""
         in
         Printf.printf "  [%s] %s %s %s%s\n"
           (rjust 3 (string_of_int (Json.to_int (Json.member "count" g))))
           (ljust 12 (Json.str "job_type" g))
           (ljust 27 (Json.str "category" g))
-          (Py.prefix (Json.str "signature" g) 100)
+          (Util.prefix_chars (Json.str "signature" g) 100)
           flag;
         (match Json.str_opt "hint" g with
         | Some h when h <> "" -> Printf.printf "        hint: %s\n" h
@@ -630,7 +639,7 @@ let print_report title results groups verbose =
         if also <> [] then
           print_endline
             ("        also seen: "
-            ^ Py.prefix
+            ^ Util.prefix_chars
                 (String.concat "; "
                    (List.map
                       (fun (s, n) -> Printf.sprintf "%s (%d)" s (Json.to_int n))
@@ -672,10 +681,10 @@ let run ~runs ~logs_root ~json ~combined ~verbose () =
           let p = Filename.concat (norm_path logs_root) d in
           if Sys.file_exists (Filename.concat p "jobs.json") then Some p
           else None)
-        (Py.listdir logs_root)
+        (Util.listdir logs_root)
   in
   if runs = [] then
-    Py.die
+    Util.die
       (Printf.sprintf
          "no runs found (looked for %s/*/jobs.json); run fetch-ci-logs first"
          logs_root);

@@ -208,7 +208,7 @@ let expand m template =
       match d with
       | '0' .. '9' ->
           let j = ref (!i + 1) in
-          while !j < n && !j < !i + 3 && Py.is_digit template.[!j] do
+          while !j < n && !j < !i + 3 && Util.is_digit template.[!j] do
             incr j
           done;
           Buffer.add_string b
@@ -290,7 +290,8 @@ let escape s =
   let b = Buffer.create (String.length s * 2) in
   String.iter
     (fun c ->
-      if Py.is_alnum c || c = '_' || Char.code c >= 128 then Buffer.add_char b c
+      if Util.is_alnum c || c = '_' || Char.code c >= 128 then
+        Buffer.add_char b c
       else (
         Buffer.add_char b '\\';
         Buffer.add_char b c))

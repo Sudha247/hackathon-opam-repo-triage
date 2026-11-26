@@ -41,17 +41,20 @@ let pct = function None -> "n/a" | Some x -> Printf.sprintf "%.0f%%" x
 let s (v : Json.t) =
   match v with
   | `Int n -> string_of_int n
-  | `Float f -> Py.repr_float f
+  | `Float f -> Json.repr_float f
   | `String s -> s
   | `Null -> "None"
   | v -> Json.dumps v
 
 let run ~current ~history ~commit ~max_drop ~min_scored () =
-  let cur = Json.parse (Py.read_file current) in
-  Py.makedirs history;
+  let cur =
+    Json.parse (In_channel.with_open_bin current In_channel.input_all)
+  in
+  Util.makedirs history;
   let latest = Filename.concat history "latest.json" in
   let prev =
-    if Sys.file_exists latest then Some (Json.parse (Py.read_file latest))
+    if Sys.file_exists latest then
+      Some (Json.parse (In_channel.with_open_bin latest In_channel.input_all))
     else None
   in
   let t = Json.member "totals" cur in
@@ -204,7 +207,7 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
         [
           Printf.sprintf "- #%s: the tool failed: `%s`"
             (s (Json.member "pr" x))
-            (Py.suffix (Json.str "error" x) 150);
+            (Util.suffix_chars (Json.str "error" x) 150);
         ])
     errors;
   if !failed <> [] then
@@ -214,7 +217,7 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
   let record =
     Dict.of_list
       [
-        ("date", `String (Py.today ()));
+        ("date", `String (Date.today ()));
         ("commit", `String commit);
         ("prs", `Int (List.length rows));
         ("errors", `Int (List.length errors));

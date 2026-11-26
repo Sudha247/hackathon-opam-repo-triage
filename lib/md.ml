@@ -19,7 +19,7 @@
 
 let special = {|([\\`*_\[\]<>|&])|}
 let linkish = {|[@#]|://|\bwww\.|\bgh-\d|}
-let flat s = Py.strip (Rx.sub {|\s+|} " " s)
+let flat s = String.trim (Rx.sub {|\s+|} " " s)
 
 let longest_run s =
   List.fold_left (fun a r -> max a (String.length r)) 0 (Rx.findall "`+" s)
@@ -104,8 +104,8 @@ let md_text ?limit s =
   let s = flat s in
   let s =
     match limit with
-    | Some l when l > 0 && Py.length s > l ->
-        Py.rstrip (Py.prefix s l) ^ "\xe2\x80\xa6"
+    | Some l when l > 0 && Util.char_length s > l ->
+        Util.rstrip (Util.prefix_chars s l) ^ "\xe2\x80\xa6"
     | _ -> s
   in
   let pieces = ref [] and pos = ref 0 in

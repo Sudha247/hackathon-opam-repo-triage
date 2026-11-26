@@ -36,12 +36,13 @@ Each command takes a commit sha, an opam.ci.ocaml.org URL, or `--pr N` (the
 PR's current head).
 
 The code is in the `lib/` library (`Triage`), one module per layer, each
-using only the ones before it. First helpers: `Py` (strings, lists, files,
-with the semantics of the Python built-ins the tool was first written with),
-`Rx` (regular expressions with the API and syntax of Python's `re`, on
+using only the ones before it. First helpers: `Util` (strings, lists, files
+and processes the standard library lacks), `Odict` (tables that keep their
+order), `Date`, `Rx` (regular expressions with the API and syntax of Python's `re`, on
 ocaml-re), `Json` (printed exactly as Python's `json` module does, so the
 state, cache and page files keep their format), `Dict` (JSON objects built
-member by member: the page's state of each PR, the LLM's cached answers),
+member by member, on `Odict`: the page's state of each PR, the LLM's cached
+answers),
 `Proc`, `Http` (through libcurl), `Html`, `Words`, `Md`. Then `Net` (HTTP,
 GitHub API, git, caches), `Ci` (CI pages and logs, job names), `Suggestion`
 (one analysed failure: a record the rules fill in, with the reader and

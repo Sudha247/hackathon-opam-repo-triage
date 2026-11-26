@@ -53,14 +53,14 @@ let filter_token =
 exception Bad
 
 let eval_filter text env =
-  let text = Py.strip (Option.value ~default:"" text) in
+  let text = String.trim (Option.value ~default:"" text) in
   let text =
     if String.starts_with ~prefix:"[" text && String.ends_with ~suffix:"]" text
     then String.sub text 1 (String.length text - 2)
     else text
   in
   let rec tokens acc pos =
-    if Py.strip (Py.slice ~start:pos text) = "" then Some (List.rev acc)
+    if String.trim (Util.slice ~start:pos text) = "" then Some (List.rev acc)
     else
       match Rx.match_ ~pos filter_token text with
       | None -> None

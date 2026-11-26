@@ -38,10 +38,12 @@ let recent_release_days = 30
 (** The date of a job (days since the epoch), from the first timestamp of its
     log (today if none). *)
 let job_date text =
-  let today () = Option.get (Py.days_of_date (Py.today ())) in
+  let today () = Option.get (Date.days_of_date (Date.today ())) in
   match Rx.search ~flags:[ Rx.M ] {|^(\d{4}-\d\d-\d\d) \d\d:\d\d|} text with
   | Some m -> (
-      match Py.days_of_date (Rx.group m 1) with Some d -> d | None -> today ())
+      match Date.days_of_date (Rx.group m 1) with
+      | Some d -> d
+      | None -> today ())
   | None -> today ()
 
 (** [(package, previous version, installed version, release date)] of the
@@ -60,7 +62,7 @@ let removed_module src top deps (info : info) when_ =
           let pub = S.published src d v in
           let age =
             match pub with
-            | Some p -> Option.map (fun x -> when_ - x) (Py.days_of_date p)
+            | Some p -> Option.map (fun x -> when_ - x) (Date.days_of_date p)
             | None -> None
           in
           match age with
@@ -70,7 +72,7 @@ let removed_module src top deps (info : info) when_ =
                   (fun x -> opam_vcmp x v < 0)
                   (S.versions_or_empty src d)
               in
-              match Py.last_opt older with
+              match Util.last_opt older with
               | None -> None
               | Some prev -> (
                   let before = S.doc_modules src d prev
@@ -117,7 +119,7 @@ let module_find_note (found : S.module_find option) top (info : info) opam_text
                 | Some v when v <> "" -> p ^ " " ^ v
                 | _ -> p)
               ^ if what <> [] then " (" ^ String.concat ", " what ^ ")" else "")
-            (Py.take 3 f.matches)
+            (Util.take 3 f.matches)
         in
         let more = List.length f.matches - List.length descs in
         Printf.sprintf "ocaml.org's docs have module %s in %s%s." top
@@ -137,7 +139,7 @@ let module_find_note (found : S.module_find option) top (info : info) opam_text
           top
           (if no_docs <> [] then
              Printf.sprintf " (without docs: %s%s)"
-               (String.concat ", " (Py.take 5 no_docs))
+               (String.concat ", " (Util.take 5 no_docs))
                (if List.length no_docs > 5 then ", ..." else "")
            else "")
 
@@ -154,15 +156,16 @@ let find_unbound lines =
           not
             (not_type
             && String.starts_with ~prefix:"type "
-                 (Py.slice ~start:(Rx.start m + String.length prefix) text))
+                 (Util.slice ~start:(Rx.start m + String.length prefix) text))
         in
         match List.find_opt ok (Rx.finditer rx text) with
         | Some m ->
             let parts =
-              String.split_on_char '.' (Py.strip ~chars:"`\"'." (Rx.group m 1))
+              String.split_on_char '.'
+                (Util.strip ~chars:"`\"'." (Rx.group m 1))
             in
             let n = List.length parts in
-            Some (kind, Py.take (n - 1) parts, List.nth parts (n - 1))
+            Some (kind, Util.take (n - 1) parts, List.nth parts (n - 1))
         | None -> None)
       unbound_res
   in
@@ -174,7 +177,7 @@ let find_unbound lines =
       with
       | Some m ->
           let parts = String.split_on_char '.' (Rx.group m 2) in
-          Some ("field", Py.take (List.length parts - 1) parts, Rx.group m 1)
+          Some ("field", Util.take (List.length parts - 1) parts, Rx.group m 1)
       | None -> None)
 
 let toplevel_line =
@@ -246,13 +249,13 @@ let system_package_version text lib =
         (fun pat ->
           match
             Rx.search ~flags:[ Rx.I ]
-              (Py.replace pat "{0}" (Rx.escape name))
+              (Util.replace pat "{0}" (Rx.escape name))
               text
           with
           | Some m -> Some (Rx.group m 1)
           | None -> None)
         pats)
-    (Py.dedup [ lib; Rx.sub {|\d+$|} "" lib ])
+    (Util.dedup [ lib; Rx.sub {|\d+$|} "" lib ])
 
 type ctx = {
   pr_packages : string list;
@@ -264,7 +267,7 @@ type ctx = {
 let known_errors text full fname opam_text (info : info) (ctx : ctx)
     (dims : dims) platform deps =
   let installed = info.installed in
-  Py.first_some
+  Util.first_some
     [
       (fun () ->
         if Rx.test "no such function: unixepoch" text then
@@ -391,7 +394,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
       (fun () ->
         if
           Rx.test "exception Stack overflow" text
-          && Py.contains ctx.job_variant "flambda"
+          && Util.contains ctx.job_variant "flambda"
         then
           Some
             [
@@ -412,7 +415,7 @@ let known_errors text full fname opam_text (info : info) (ctx : ctx)
             let r =
               [
                 `Rule "missing-tool";
-                `Error (Py.prefix (Py.strip (Rx.group0 m)) 200);
+                `Error (Util.prefix_chars (String.trim (Rx.group0 m)) 200);
                 `Confidence "high";
               ]
             in
@@ -638,7 +641,7 @@ let c_compiler_rule text platform =
           let arg = match Rx.groups m with Some g :: _ -> g | _ -> "" in
           let line =
             match
-              List.find_opt (fun l -> Rx.test rx l) (Py.splitlines text)
+              List.find_opt (fun l -> Rx.test rx l) (Util.splitlines text)
             with
             | Some l -> l
             | None -> Rx.group0 m
@@ -646,14 +649,15 @@ let c_compiler_rule text platform =
           Some
             [
               `Rule "newer-c-compiler";
-              `Error (Py.prefix (Py.strip line) 200);
+              `Error (Util.prefix_chars (String.trim line) 200);
               `Confidence "high";
               `Keep;
               `Plat platform;
               `Note
                 (Printf.sprintf "%s (seen on %s). %s"
-                   (Py.replace cause "{0}" arg)
-                   platform (Py.replace fix "{0}" arg));
+                   (Util.replace cause "{0}" arg)
+                   platform
+                   (Util.replace fix "{0}" arg));
             ]
       | None -> None)
     newer_cc
@@ -664,14 +668,14 @@ let depext_entries opam_text =
   | None -> None
   | Some m ->
       let rest =
-        Py.strip
+        String.trim
           (List.hd
              (Rx.split ~maxsplit:1 {|(?m)^[a-z][\w-]*:|}
-                (Py.slice ~start:(Rx.end_ m) t)))
+                (Util.slice ~start:(Rx.end_ m) t)))
       in
       let rest =
         if String.starts_with ~prefix:"[" rest then
-          Py.slice ~start:1 ~stop:(Py.rfind rest "]") rest
+          Util.slice ~start:1 ~stop:(Util.rfind rest "]") rest
         else rest
       in
       Some
@@ -791,7 +795,7 @@ let conf_depext_platforms (r : Suggestion.t) (jobs : (string, job) Hashtbl.t) =
               | Some dist
                 when dist <> ""
                      && List.exists
-                          (fun (_, f) -> Py.contains f ("\"" ^ dist ^ "\""))
+                          (fun (_, f) -> Util.contains f ("\"" ^ dist ^ "\""))
                           entries ->
                   misread :=
                     ( dist,
@@ -850,7 +854,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
     | Some d when d <> "" -> d
     | _ -> if dims.os = "linux" then "debian (classic builder)" else dims.os
   in
-  Py.first_some
+  Util.first_some
     [
       (fun () ->
         (* Python: implicit declaration of function ['‘]?(caml_\w+) *)
@@ -1054,10 +1058,10 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             let family = List.hd (Rx.split {|[-\d]|} distro) in
             let field_text name =
               let t = Option.value ~default:"" opam_text in
-              if not (Py.contains t (name ^ ":")) then ""
+              if not (Util.contains t (name ^ ":")) then ""
               else
                 let rest =
-                  match Py.partition t (name ^ ":") with _, _, r -> r
+                  match Util.partition t (name ^ ":") with _, _, r -> r
                 in
                 List.hd (Rx.split ~maxsplit:1 {|(?m)^[a-z][\w-]*:|} rest)
             in
@@ -1069,8 +1073,8 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
               List.filter_map
                 (function
                   | [ pk; flt ] ->
-                      if family <> "" && Py.contains flt family then
-                        Some (Py.strip pk)
+                      if family <> "" && Util.contains flt family then
+                        Some (String.trim pk)
                       else None
                   | _ -> None)
                 (Rx.findall_groups {|\[([^\]]*)\]\s*\{([^}]*)\}|} depexts_text)
@@ -1391,12 +1395,12 @@ let version_ints r =
    start, a network error. *)
 let ci_failure job text (info : info) pr_packages =
   let owner = match failing_pkg job with Some o -> o | None -> "" in
-  Py.first_some
+  Util.first_some
     [
       (fun () ->
         match Rx.search "These packages are still missing: (.+)" text with
         | Some m when info.failing = None ->
-            let names = Py.split (Rx.group m 1) in
+            let names = Util.split (Rx.group m 1) in
             let dims = job_dims job in
             let plat =
               match dims.distro with
@@ -1496,7 +1500,7 @@ let same_version_reinstall (b : build) =
   let { text; info; fname; fver; opam_text; _ } = b in
   let plan =
     List.find_opt
-      (fun m -> not (Py.contains (Rx.group m 1) "pinned"))
+      (fun m -> not (Util.contains (Rx.group m 1) "pinned"))
       (Rx.finditer ~flags:[ Rx.M ]
          (Printf.sprintf {|^\s*- recompile\s+%s\s+%s\s+(.*)$|} (Rx.escape fname)
             (Rx.escape fver))
@@ -1508,7 +1512,7 @@ let same_version_reinstall (b : build) =
         Rx.test ~flags:[ Rx.M ]
           (Printf.sprintf {|^-> removed\s+%s\.%s\s*$|} (Rx.escape fname)
              (Rx.escape fver))
-          (Py.slice ~start:(Rx.end_ p) text)
+          (Util.slice ~start:(Rx.end_ p) text)
     | None -> false
   in
   if removed && Rx.test {|(?m)^remove:|} (Option.value ~default:"" opam_text)
@@ -1549,18 +1553,18 @@ let install_failure text (info : info) =
   let err = info.error_lines in
   if
     info.action = Some "installing"
-    && List.exists (fun l -> Py.contains l "couldn't be installed") err
+    && List.exists (fun l -> Util.contains l "couldn't be installed") err
   then begin
     let missing =
       List.concat_map (fun l -> Rx.findall {|/([^/\s]+) to /|} l) err
     in
     let exts =
-      Py.counter
+      Util.counter
         (List.map
            (fun f -> match ext_of_path f with "" -> f | e -> e)
            missing)
     in
-    let cut = Py.find text "#=== ERROR while installing" in
+    let cut = Util.find text "#=== ERROR while installing" in
     let earlier =
       List.filter_map
         (fun l ->
@@ -1569,9 +1573,9 @@ let install_failure text (info : info) =
             && not
                  (Rx.test
                     {|Error report|\[ERROR\] The (compilation|installation)|} l)
-          then Some (Py.strip (Rx.sub ~count:1 "^[-#] ?" "" l))
+          then Some (String.trim (Rx.sub ~count:1 "^[-#] ?" "" l))
           else None)
-        (Py.splitlines (Py.slice ~stop:cut text))
+        (Util.splitlines (Util.slice ~stop:cut text))
     in
     let install =
       "Files listed for installation were not built: "
@@ -1579,13 +1583,13 @@ let install_failure text (info : info) =
           (List.map (fun (x, n) -> Printf.sprintf "%d %s" n x) exts)
     in
     if earlier <> [] then
-      let err = Py.lslice ~start:(-15) earlier in
+      let err = Util.sublist ~start:(-15) earlier in
       Some
         (Earlier_error
            ( err,
              install
              ^ Printf.sprintf "; earlier build error: %s"
-                 (Py.prefix (Py.last err) 150) ))
+                 (Util.prefix_chars (Util.last err) 150) ))
     else Some (Not_built install)
   end
   else None
@@ -1625,7 +1629,7 @@ let compiler_errors (info : info) err =
       | Some i -> i
       | None -> List.length err
     in
-    Py.take cut err
+    Util.take cut err
   else err
 
 (* A test output diff (cram/mdx). *)
@@ -1634,7 +1638,9 @@ let test_output (info : info) err opam_text =
   | Some top, Some ocaml when ocaml <> "" ->
       (* Expected toplevel output (types, values, error locations) printed
         by an older compiler: the test depends on the OCaml version. *)
-      let mm = String.concat "." (Py.take 2 (String.split_on_char '.' ocaml)) in
+      let mm =
+        String.concat "." (Util.take 2 (String.split_on_char '.' ocaml))
+      in
       let m =
         Rx.search ~flags:[ Rx.M ]
           {|^[ \t]*"ocaml"[ \t]*(?:\{([^}]*)\})?[^\n]*$|}
@@ -1642,14 +1648,14 @@ let test_output (info : info) err opam_text =
       in
       let term = Printf.sprintf {|< "%s" | !with-test|} mm in
       let filt =
-        match m with Some m -> Py.strip (Rx.group m 1) | None -> ""
+        match m with Some m -> String.trim (Rx.group m 1) | None -> ""
       in
       let new_ =
         match Rx.search {|\(<\s*"[^"]+"\s*\|\s*!with-test\)|} filt with
         | Some prev ->
             (* already disabled from a later version: lower it *)
             Printf.sprintf {|"ocaml" {%s}|}
-              (Py.replace filt (Rx.group0 prev) ("(" ^ term ^ ")"))
+              (Util.replace filt (Rx.group0 prev) ("(" ^ term ^ ")"))
         | None ->
             if filt <> "" then Printf.sprintf {|"ocaml" {%s & (%s)}|} filt term
             else Printf.sprintf {|"ocaml" {%s}|} term
@@ -1661,10 +1667,10 @@ let test_output (info : info) err opam_text =
         `Error
           (Printf.sprintf "Toplevel output in the tests differs on OCaml %s: %s"
              ocaml
-             (Py.prefix (List.hd top) 100));
+             (Util.prefix_chars (List.hd top) 100));
         `Old
           (match m with
-          | Some m -> Some (Py.strip (Rx.group0 m))
+          | Some m -> Some (String.trim (Rx.group0 m))
           | None -> None);
         `New
           (Some
@@ -1696,7 +1702,7 @@ let stdlib_bound (b : build) out kind mods ident top =
   let { src; info; opam_text; _ } = b in
   let rel = S.ocaml_releases src in
   (* [] if the OCaml tags could not be listed *)
-  let latest = Py.last_opt rel and t414 = "4.14.0" in
+  let latest = Util.last_opt rel and t414 = "4.14.0" in
   let top_m =
     match mods with "Stdlib" :: m :: _ when top = "Stdlib" -> m | _ -> top
   in
@@ -1721,7 +1727,7 @@ let stdlib_bound (b : build) out kind mods ident top =
            releases have it."
     else begin
       let inner =
-        if top = "Stdlib" then Py.drop_list 2 mods else Py.drop_list 1 mods
+        if top = "Stdlib" then Util.drop 2 mods else Util.drop 1 mods
       in
       (* ocaml.org documents the standard library with the compiler:
        ocaml-base-compiler up to 5.2, ocaml-compiler from 5.3 (where
@@ -1798,12 +1804,14 @@ let stdlib_bound (b : build) out kind mods ident top =
         Some
           (List.map
              (fun (v, r) -> ("ocaml " ^ v, r))
-             (Py.sort_by (fun (v, _) -> version_ints v) ev));
+             (Util.sort_by (fun (v, _) -> version_ints v) ev));
       if !used <> [] then
         out.source <- Some (String.concat ", " (List.sort compare !used));
       match res with
       | Some (op, v) ->
-          let v = String.concat "." (Py.take 2 (String.split_on_char '.' v)) in
+          let v =
+            String.concat "." (Util.take 2 (String.split_on_char '.' v))
+          in
           let old, new_ = S.constraint_edit opam_text "ocaml" op v in
           Suggestion.update out
             [
@@ -1852,7 +1860,7 @@ let library_bound (b : build) out err_text kind mods ident top =
         && String.length (S.norm p) >= 2)
       installed_names
   in
-  let cands = Py.sort_by (fun p -> -String.length p) cands in
+  let cands = Util.sort_by (fun p -> -String.length p) cands in
   let by_name = cands <> [] in
   let cands =
     match (cands, opam_text) with
@@ -1872,7 +1880,7 @@ let library_bound (b : build) out err_text kind mods ident top =
         let mentioned =
           List.map S.norm (Rx.findall {|\b([A-Z]\w+)\.|} err_text)
         in
-        Py.sort_by
+        Util.sort_by
           (fun d ->
             not
               (List.exists
@@ -1894,23 +1902,22 @@ let library_bound (b : build) out err_text kind mods ident top =
         is_installed info d
         && (not (List.mem d not_searched))
         && not (String.starts_with ~prefix:"conf-" d))
-      (Py.dedup
+      (Util.dedup
          (cands @ dep_names opam_text "depends" @ dep_names opam_text "depopts"))
   in
   let found =
     if searched <> [] then S.module_providers src top searched else None
   in
-  let chosen = Py.Odict.create () in
+  let chosen = Odict.create () in
   (* package -> full path of [top] in it (None: several) *)
   List.iter
     (fun (m : S.find_match) ->
       if is_installed info m.package then
-        Py.Odict.set chosen m.package
-          (if Py.Odict.mem chosen m.package then None else Some m.module_path))
+        Odict.set chosen m.package
+          (if Odict.mem chosen m.package then None else Some m.module_path))
     (match found with Some f -> f.matches | None -> []);
   let cands =
-    Py.Odict.keys chosen
-    @ List.filter (fun p -> not (Py.Odict.mem chosen p)) cands
+    Odict.keys chosen @ List.filter (fun p -> not (Odict.mem chosen p)) cands
   in
   (* A top-level module that no dependency documents in its newest
      version may have been removed by a recent release of one:
@@ -1920,7 +1927,7 @@ let library_bound (b : build) out err_text kind mods ident top =
      through another dependency: matrix, through k7. *)
   let removed =
     kind = "module" && mods = []
-    && Py.Odict.length chosen = 0
+    && Odict.length chosen = 0
     && (not by_name)
     && (match found with Some f -> not f.fpartial | None -> false)
     &&
@@ -1987,7 +1994,7 @@ let library_bound (b : build) out err_text kind mods ident top =
           true
         end)
       (removed_module src top
-         (Py.take 40 (searched @ others))
+         (Util.take 40 (searched @ others))
          info (job_date text))
   in
   if not removed then begin
@@ -1998,13 +2005,13 @@ let library_bound (b : build) out err_text kind mods ident top =
           match installed_of info pkg with
           | None | Some "" -> false
           | Some bad -> (
-              let path = Option.join (Py.Odict.get chosen pkg) in
+              let path = Option.join (Odict.get chosen pkg) in
               let doc_mods =
                 match (path, mods) with
                 | Some p, _ :: rest ->
                     p @ rest (* Term.t_loc in why3: ['Why3', 'Term'] *)
                 | Some p, [] ->
-                    Py.take
+                    Util.take
                       (List.length p - 1)
                       p (* a top-level module found in a wrapper: ['Why3'] *)
                 | None, _ -> mods (* full path, e.g. ['Ortools', 'Sat'] *)
@@ -2019,8 +2026,7 @@ let library_bound (b : build) out err_text kind mods ident top =
               in
               let used =
                 ref
-                  (if Py.Odict.mem chosen pkg then [ S.module_find_source ]
-                   else [])
+                  (if Odict.mem chosen pkg then [ S.module_find_source ] else [])
               in
               let use x = if not (List.mem x !used) then used := x :: !used in
               let bounds = S.existing_bounds opam_text pkg in
@@ -2035,11 +2041,11 @@ let library_bound (b : build) out err_text kind mods ident top =
                   let vs = S.versions_or_empty src pkg in
                   let window =
                     [ bad ]
-                    @ Py.take S.bisect_cap
+                    @ Util.take S.bisect_cap
                         (List.filter
                            (fun v -> opam_vcmp v bad > 0 && allowed v)
                            vs)
-                    @ Py.lslice ~start:(-S.bisect_cap)
+                    @ Util.sublist ~start:(-S.bisect_cap)
                         (List.filter
                            (fun v -> opam_vcmp v bad < 0 && allowed v)
                            vs)
@@ -2095,7 +2101,7 @@ let library_bound (b : build) out err_text kind mods ident top =
                         | _ -> None))
               in
               let skip =
-                if (not by_name) && not (Py.Odict.mem chosen pkg) then begin
+                if (not by_name) && not (Odict.mem chosen pkg) then begin
                   (* Accept a dependency only if it actually provides that
                module. (The history tells about the module path of the
                call: [top] only when that path is [top] alone.) *)
@@ -2185,7 +2191,7 @@ let library_bound (b : build) out err_text kind mods ident top =
                                pkg);
                       true
                   | None -> false)))
-        (Py.take 5 cands)
+        (Util.take 5 cands)
     in
     if not bound_found then begin
       if out.note = None then
@@ -2206,7 +2212,8 @@ let library_bound (b : build) out err_text kind mods ident top =
 let unbound_identifier (b : build) out err_text (kind, mods, ident) =
   out.error <-
     Some
-      (Printf.sprintf "Unbound %s %s" (Py.replace kind "-" " ")
+      (Printf.sprintf "Unbound %s %s"
+         (Util.replace kind "-" " ")
          (String.concat "." (mods @ [ ident ])));
   let top =
     match mods with
@@ -2271,7 +2278,7 @@ let build_failure src job text (info : info) pr_packages pr_sha out (fname, fver
             { pr_packages; full_text = text; job_variant = job.variant }
           in
           match
-            Py.first_some
+            Util.first_some
               [
                 (fun () -> safe_string err_text opam_text);
                 (fun () -> log_rules src err fname opam_text info ctx job);
@@ -2357,12 +2364,13 @@ let changelog_excerpt src dep since until : Suggestion.Changelog.t option =
   match S.changelog ?since ?until src dep with
   | None -> None
   | Some c ->
-      let text = Py.strip (Html.unescape c.text) in
-      let long = Py.length text > changelog_excerpt_max in
+      let text = String.trim (Html.unescape c.text) in
+      let long = Util.char_length text > changelog_excerpt_max in
       let cut = long || c.truncated in
       let text =
         if long then
-          List.hd (Py.rsplit1 "\n" (Py.prefix text changelog_excerpt_max))
+          List.hd
+            (Util.rsplit1 "\n" (Util.prefix_chars text changelog_excerpt_max))
         else text
       in
       Some
@@ -2408,8 +2416,8 @@ let dated_candidates ?(max_lookups = 8) src (r : Suggestion.t) (bad : info)
             else None)
           dep_lines
       in
-      let not_named d = not (Py.contains blob (String.lowercase_ascii d)) in
-      let deps = Py.sort_by not_named deps in
+      let not_named d = not (Util.contains blob (String.lowercase_ascii d)) in
+      let deps = Util.sort_by not_named deps in
       (* mentioned in the output first *)
       let newer =
         List.filter_map
@@ -2418,7 +2426,7 @@ let dated_candidates ?(max_lookups = 8) src (r : Suggestion.t) (bad : info)
             match S.published src d v with
             | Some dv when dv > day -> Some (not_named d, dv, d, v)
             | _ -> None)
-          (Py.take max_lookups deps)
+          (Util.take max_lookups deps)
       in
       let newer = List.sort compare newer in
       let cands =
@@ -2446,9 +2454,9 @@ let dated_candidates ?(max_lookups = 8) src (r : Suggestion.t) (bad : info)
               v,
               (if n > 0 then vs.(!lo) else v),
               if n > 0 && !lo > 0 then Some vs.(!lo - 1) else None ))
-          (Py.take 3 newer)
+          (Util.take 3 newer)
       in
-      let cands = Py.sort_by (fun (a, b, _, _, _, _) -> (a, b)) cands in
+      let cands = Util.sort_by (fun (a, b, _, _, _, _) -> (a, b)) cands in
       r.compared_with <-
         Some (Printf.sprintf "release date of %s.%s (%s)" fname fver day);
       r.Suggestion.candidates <-
@@ -2463,7 +2471,7 @@ let dated_candidates ?(max_lookups = 8) src (r : Suggestion.t) (bad : info)
                     first))
              cands);
       r.also_newer <-
-        Some (List.map (fun (_, _, d, _) -> d) (Py.drop_list 3 newer));
+        Some (List.map (fun (_, _, d, _) -> d) (Util.drop 3 newer));
       r.confidence <-
         Set
           (Printf.sprintf
@@ -2522,9 +2530,9 @@ let complete_test_output ?(fetch = fun url cache_dir -> Net.fetch url cache_dir)
       in
       let blob = String.lowercase_ascii (String.concat "\n" bad.error_lines) in
       let diffs =
-        Py.sort_by
+        Util.sort_by
           (fun (p, _, _) ->
-            (not (Py.contains blob (String.lowercase_ascii p)), p))
+            (not (Util.contains blob (String.lowercase_ascii p)), p))
           diffs
       in
       r.compared_with <- Some (String.concat "/" s0.platform ^ " in " ^ where);
@@ -2549,7 +2557,7 @@ let complete_test_output ?(fetch = fun url cache_dir -> Net.fetch url cache_dir)
                       first))
             end
             else None)
-          (Py.take 4 diffs)
+          (Util.take 4 diffs)
       in
       r.candidates <- Some cands;
       r.confidence <-
@@ -2564,26 +2572,26 @@ let plan_line =
 (** (name -> (from, to) for the downgraded packages, name -> packages requiring
     it). *)
 let opam_plan text =
-  let downgraded = Py.Odict.create () and required_by = Py.Odict.create () in
+  let downgraded = Odict.create () and required_by = Odict.create () in
   List.iter
     (fun m ->
       let action = Rx.group m 1 and name = Rx.group m 2 and v1 = Rx.group m 3 in
       (match Rx.group_opt m 4 with
       | Some v2 when action = "downgrade" && v2 <> "" ->
-          Py.Odict.set downgraded name (v1, v2)
+          Odict.set downgraded name (v1, v2)
       | _ -> ());
       match Rx.group_opt m 5 with
-      | Some by when by <> "" && Py.contains (Rx.group0 m) "required by" ->
-          let cur = Option.value ~default:[] (Py.Odict.get required_by name) in
+      | Some by when by <> "" && Util.contains (Rx.group0 m) "required by" ->
+          let cur = Option.value ~default:[] (Odict.get required_by name) in
           let add =
             List.filter_map
-              (fun p -> match Py.strip p with "" -> None | p -> Some p)
-              (String.split_on_char ',' (Py.replace by "etc." ""))
+              (fun p -> match String.trim p with "" -> None | p -> Some p)
+              (String.split_on_char ',' (Util.replace by "etc." ""))
           in
-          Py.Odict.set required_by name (List.sort_uniq compare (cur @ add))
+          Odict.set required_by name (List.sort_uniq compare (cur @ add))
       | _ -> ())
     (Rx.finditer ~flags:[ Rx.M ] plan_line text);
-  (Py.Odict.to_list downgraded, Py.Odict.to_list required_by)
+  (Odict.to_list downgraded, Odict.to_list required_by)
 
 let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
     Suggestion.t option =
@@ -2669,7 +2677,8 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
               let via =
                 if List.length chain > 2 then
                   Printf.sprintf " (through %s)"
-                    (String.concat " -> " (Py.lslice ~start:1 ~stop:(-1) chain))
+                    (String.concat " -> "
+                       (Util.sublist ~start:1 ~stop:(-1) chain))
                 else ""
               in
               let what =
@@ -2716,7 +2725,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
           (* B: the package itself fails, and no rule explains the error. *)
           let err = String.concat "\n" info.error_lines in
           let mentioned =
-            Py.dedup (List.map S.norm (Rx.findall {|\b([A-Za-z][\w-]+)|} err))
+            Util.dedup (List.map S.norm (Rx.findall {|\b([A-Za-z][\w-]+)|} err))
           in
           let named d =
             let n = S.norm d in
@@ -2729,7 +2738,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
           let cands = List.filter (fun d -> List.mem_assoc d downgraded) deps in
           if cands = [] then None
           else begin
-            let cands = Py.sort_by (fun d -> (not (named d), d)) cands in
+            let cands = Util.sort_by (fun d -> (not (named d), d)) cands in
             let out =
               List.map
                 (fun d ->
@@ -2738,7 +2747,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
                   ( d,
                     Suggestion.candidate ~dep:d ~passing:used ~failing:down ~old
                       new_ ))
-                (Py.take 5 cands)
+                (Util.take 5 cands)
             in
             let names =
               List.filter_map
@@ -2761,7 +2770,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
                     | _ -> (
                         match
                           List.find_opt
-                            (fun l -> Py.contains l "Error")
+                            (fun l -> Util.contains l "Error")
                             info.error_lines
                         with
                         | Some l -> l
@@ -2782,7 +2791,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
     bound (< or <=) in an opam file's depends. *)
 let upper_bounds opam_text =
   let block = depends_block (Option.value ~default:"" opam_text) in
-  let out = Py.Odict.create () in
+  let out = Odict.create () in
   List.iter
     (fun m ->
       let ups =
@@ -2791,10 +2800,10 @@ let upper_bounds opam_text =
           (Rx.findall_groups {|(<=?)\s*"([^"]+)"|} (Rx.group m 2))
       in
       if ups <> [] then
-        Py.Odict.set out (Rx.group m 1) (Py.strip (Rx.group0 m), ups))
+        Odict.set out (Rx.group m 1) (String.trim (Rx.group0 m), ups))
     (Rx.finditer ~flags:[ Rx.M ] {|^[ \t]*"([\w+-]+)"[ \t]*\{([^}]*)\}[^\n]*$|}
        block);
-  Py.Odict.to_list out
+  Odict.to_list out
 
 (** Does the error itself (not the command that failed) name the package [dep],
     or a module of it? *)
@@ -2806,7 +2815,7 @@ let error_mentions (info : info) dep =
            (Rx.test_match
               {|\s*(=== ERROR|context |path |command |exit-code |env-file |output-file |## output|\(cd _build|\[\.\.\.)|}
               l))
-        && not (Py.contains l "dune build"))
+        && not (Util.contains l "dune build"))
       info.error_lines
   in
   let text = String.concat "\n" lines in
@@ -2877,18 +2886,16 @@ let previous_release_bound src job (info : info) pr_packages pr_sha
         | None -> None
         | Some { prev; cur; prev_up; cur_up } ->
             let block = depends_block cur in
-            let cur_lines = Py.Odict.create () in
+            let cur_lines = Odict.create () in
             List.iter
-              (fun m -> Py.Odict.set cur_lines (Rx.group m 1) (Rx.group m 2))
+              (fun m -> Odict.set cur_lines (Rx.group m 1) (Rx.group m 2))
               (Rx.finditer ~flags:[ Rx.M ]
                  {|^[ \t]*"([\w+-]+)"[ \t]*(?:\{([^}]*)\})?|} block);
             List.find_map
               (fun (dep, (line, ups)) ->
                 if List.mem_assoc dep cur_up then None
                 else
-                  let cl =
-                    Option.value ~default:"" (Py.Odict.get cur_lines dep)
-                  in
+                  let cl = Option.value ~default:"" (Odict.get cur_lines dep) in
                   let mentioned = Rx.findall {|"([^"]+)"|} cl in
                   let lowers = Rx.findall {|>=?\s*"([^"]+)"|} cl in
                   if

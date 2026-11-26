@@ -9,10 +9,10 @@ let check_str = Alcotest.(check string)
 let check_bool = Alcotest.(check bool)
 
 let check_in ?(msg = "") sub s =
-  if not (Py.contains s sub) then Alcotest.failf "%s: %S not in %S" msg sub s
+  if not (Util.contains s sub) then Alcotest.failf "%s: %S not in %S" msg sub s
 
 let check_not_in sub s =
-  if Py.contains s sub then Alcotest.failf "%S in %S" sub s
+  if Util.contains s sub then Alcotest.failf "%S in %S" sub s
 
 let one = function
   | [ r ] -> r
@@ -45,7 +45,7 @@ let job ?(category = "build") ?(reason = "The compilation of x failed")
     ?(experimental = false) variant =
   let parts = String.split_on_char ',' variant in
   let i = if List.hd parts = "day10" then 4 else 2 in
-  let platform = Py.take i parts and rest = Py.drop_list i parts in
+  let platform = Util.take i parts and rest = Util.drop i parts in
   let kind =
     match rest with
     | _ :: "revdeps" :: _ -> "revdeps"
@@ -117,7 +117,7 @@ let capture_stderr f =
         Unix.dup2 saved Unix.stderr;
         Unix.close saved)
   in
-  let out = Py.read_file tmp in
+  let out = In_channel.with_open_bin tmp In_channel.input_all in
   Sys.remove tmp;
   (r, out)
 
@@ -480,7 +480,7 @@ let test_old_health_check_run_ignored () =
   let saved = !Net.offline_ref in
   Fun.protect ~finally:(fun () -> Net.offline_ref := saved) @@ fun () ->
   Net.offline_ref := false;
-  let today = Option.get (Py.days_of_date (Py.today ())) in
+  let today = Option.get (Date.days_of_date (Date.today ())) in
   let jobs =
     [
       job "compilers,4.14,x.2,revdeps,r.1"; job "compilers,4.14,x.2,revdeps,g.1";
@@ -490,7 +490,7 @@ let test_old_health_check_run_ignored () =
   (Context.versions_hook := fun _ _ -> Some []);
   List.iter
     (fun (days, used) ->
-      let date = Py.date_of_days (today - days) in
+      let date = Date.date_of_days (today - days) in
       (Context.mcp_hook :=
          fun ?max_age:_ _ _ args ->
            let package = Json.to_str (List.assoc "package" args) in
@@ -528,7 +528,7 @@ let test_old_health_check_run_ignored () =
         (Printf.sprintf "new %d" days)
         used
         (Hashtbl.length notes.new_ > 0);
-      check_bool err (not used) (Py.contains err "not used"))
+      check_bool err (not used) (Util.contains err "not used"))
     [ (2, true); (30, false) ];
   check_bool "undated" false (Context.health_run_stale None);
   check_bool "old" true
