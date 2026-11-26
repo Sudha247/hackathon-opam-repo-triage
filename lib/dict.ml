@@ -38,8 +38,6 @@ let strs_opt d k =
 let dict d k =
   match get d k with Some (`Assoc kv) -> Some (of_list kv) | _ -> None
 
-let truthy d k = match get d k with Some v -> Json.truthy v | None -> false
-
 (* Typed setters. *)
 
 let set_str d k s = set d k (`String s)

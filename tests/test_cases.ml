@@ -681,7 +681,9 @@ let field_text (v : Json.t) =
   match v with
   | `String s -> s
   | `Null -> ""
-  | v -> if Json.truthy v then Json.py_str v else ""
+  | `Bool false | `Int 0 | `List [] | `Assoc [] -> ""
+  | `Float f when f = 0. -> ""
+  | v -> Json.py_str v
 
 let matches s exp =
   List.for_all

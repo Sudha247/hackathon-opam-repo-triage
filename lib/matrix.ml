@@ -159,7 +159,7 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
       (fun r ->
         match r.Suggestion.key with
         | Some k
-          when Suggestion.nonempty_field r.Suggestion.new_
+          when Suggestion.is_set r.Suggestion.new_
                || Suggestion.list r.candidates <> []
                || r.advice <> None ->
             Some k

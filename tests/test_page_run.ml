@@ -121,39 +121,61 @@ let test_graphql_errors () =
     j
       {|{"repository": {"pullRequests": {"pageInfo": {"hasNextPage": false}, "nodes": [null]}}}|}
   in
-  let answers =
-    ref
-      [
-        {|{"errors": [{"message": "Something went wrong"}]}|};
-        {|{"data": {"repository": null}, "errors": [{"message": "timeout"}]}|};
-        Json.dumps
-          (`Assoc
-             [
-               ("data", data); ("errors", j {|[{"message": "one node failed"}]|});
-             ]);
-      ]
-  in
-  let saved_hook = !Http.hook and saved_sleep = !T.sleep_hook in
-  (Http.hook :=
-     fun _ ->
-       match !answers with
-       | a :: rest ->
-           answers := rest;
-           { Http.status = 200; resp_headers = []; data = a }
-       | [] -> assert false);
-  (T.sleep_hook := fun _ -> ());
-  let err = Unix.dup Unix.stderr in
-  let null = Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0 in
-  Unix.dup2 null Unix.stderr;
-  let got =
+  (* T.graphql on these answers, one per attempt; stderr hidden *)
+  let graphql answers =
+    let answers = ref answers in
+    let saved_hook = !Http.hook and saved_sleep = !T.sleep_hook in
+    (Http.hook :=
+       fun _ ->
+         match !answers with
+         | a :: rest ->
+             answers := rest;
+             { Http.status = 200; resp_headers = []; data = a }
+         | [] -> assert false);
+    (T.sleep_hook := fun _ -> ());
+    let err = Unix.dup Unix.stderr in
+    let null = Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0 in
+    Unix.dup2 null Unix.stderr;
     Fun.protect
       ~finally:(fun () ->
         Unix.dup2 err Unix.stderr;
+        Unix.close err;
+        Unix.close null;
         Http.hook := saved_hook;
         T.sleep_hook := saved_sleep)
-      (fun () -> T.graphql "q" (`Assoc []) "tok")
+      (fun () ->
+        match T.graphql "q" (`Assoc []) "tok" with
+        | v -> Ok v
+        | exception T.Graphql_error m -> Error m)
+  in
+  let with_errors e = Json.dumps (`Assoc [ ("data", data); ("errors", j e) ]) in
+  let got =
+    match
+      graphql
+        [
+          {|{"errors": [{"message": "Something went wrong"}]}|};
+          {|{"data": {"repository": null}, "errors": [{"message": "timeout"}]}|};
+          with_errors {|[{"message": "one node failed"}]|};
+        ]
+    with
+    | Ok v -> v
+    | Error m -> Alcotest.fail m
   in
   Alcotest.check json "partial data" data got;
+  (* [errors] is absent, or a non-empty list: any other shape is an error. *)
+  Alcotest.(check bool)
+    "no errors" true
+    (graphql [ Json.dumps (`Assoc [ ("data", data) ]) ] = Ok data);
+  List.iter
+    (fun e ->
+      match graphql (List.init 3 (fun _ -> with_errors e)) with
+      | Error m ->
+          Alcotest.(check string)
+            e
+            ("GraphQL errors that are not a list of errors: " ^ e)
+            m
+      | Ok _ -> Alcotest.fail e)
+    [ "null"; "[]"; {|"oops"|}; {|{"message": "x"}|} ];
   let saved = !T.graphql_hook in
   (T.graphql_hook := fun _ _ _ -> data);
   let prs, calls = T.list_open_prs "tok" in
@@ -456,6 +478,9 @@ let check_kinds msg expected calls =
 let no_calls msg calls = Alcotest.(check int) msg 0 (List.length calls)
 let get e k = Option.value ~default:`Null (Dict.raw e k)
 
+(* A boolean member of an entry: true, or false (or absent). *)
+let flag e k = Dict.get e k = Some (`Bool true)
+
 let test_pending_with_finished_page () =
   (* opam-ci's status stays pending (lint never starts after a failed
      analysis): analysed once, then kept while the job statuses are the same. *)
@@ -539,16 +564,14 @@ let test_deferred_keeps_result_of_the_same_commit () =
   in
   no_calls "deferred" calls;
   Alcotest.(check bool) "result" true (Dict.get (entry state) "result" <> None);
-  Alcotest.(check bool)
-    "not pending" false
-    (Dict.truthy (entry state) "pending");
+  Alcotest.(check bool) "not pending" false (flag (entry state) "pending");
   (* Another commit: the result of the old one is not shown. *)
   let state, _, _ =
     run_main ~args:[ "--time-budget"; "-1" ] ~version:"w" e
       [ pr ~kw:[ ("sha", `String (String.make 40 'b')) ] () ]
   in
   Alcotest.(check bool) "no result" true (Dict.get (entry state) "result" = None);
-  Alcotest.(check bool) "pending" true (Dict.truthy (entry state) "pending")
+  Alcotest.(check bool) "pending" true (flag (entry state) "pending")
 
 let test_failed_redo_keeps_result () =
   let e = setup () in
@@ -639,7 +662,7 @@ let test_deferred_new_commit_drops_old_fields () =
   in
   no_calls "deferred" calls;
   let en = entry state in
-  Alcotest.(check bool) "pending" true (Dict.truthy en "pending");
+  Alcotest.(check bool) "pending" true (flag en "pending");
   Alcotest.(check string) "ci_state" "FAILURE" (Dict.str en "ci_state");
   List.iter
     (fun k -> Alcotest.(check bool) k false (Dict.mem en k))
@@ -690,7 +713,7 @@ let test_llm_flag_needs_every_answer () =
   let state, _, _ = run_main ~llm:true ~suggest_out:llm_out e [ pr () ] in
   Alcotest.(check (pair bool int))
     "left" (false, 1)
-    (Dict.truthy (entry state) "llm", Dict.int (entry state) "llm_unanswered");
+    (flag (entry state) "llm", Dict.int (entry state) "llm_unanswered");
   let state, calls, _ =
     run_main ~llm:true
       ~suggest_out:(set_field llm_out "llm_unanswered" (`Int 0))
@@ -700,7 +723,7 @@ let test_llm_flag_needs_every_answer () =
   check_kinds "again" [ "suggest"; "summary" ] calls;
   Alcotest.(check (pair bool int))
     "done" (true, 0)
-    (Dict.truthy (entry state) "llm", Dict.int (entry state) "llm_unanswered");
+    (flag (entry state) "llm", Dict.int (entry state) "llm_unanswered");
   let _, calls, _ = run_main ~llm:true e [ pr () ] in
   no_calls "kept" calls;
   (* While CI runs, the LLM is not asked (see suggest): no analysis again for it. *)
@@ -709,7 +732,7 @@ let test_llm_flag_needs_every_answer () =
   let state, _, _ = run_main ~llm:true ~suggest_out:running e [ p ] in
   Alcotest.(check (pair bool int))
     "running" (false, 4)
-    (Dict.truthy (entry state) "llm", Dict.int (entry state) "ci_unfinished");
+    (flag (entry state) "llm", Dict.int (entry state) "ci_unfinished");
   let _, calls, _ = run_main ~llm:true ~suggest_out:running e [ p ] in
   check_kinds "summary only" [ "summary" ] calls
 
@@ -756,7 +779,7 @@ let test_llm_retries_limited () =
       Alcotest.(check (pair int bool))
         "attempts, llm"
         (1, left = 0)
-        (Dict.int (entry state) "attempts", Dict.truthy (entry state) "llm"))
+        (Dict.int (entry state) "attempts", flag (entry state) "llm"))
     [ 2; 1; 0 ];
   let _, calls, _ = run_main ~llm:true e [ pr () ] in
   no_calls "done" calls
@@ -876,12 +899,12 @@ let test_refresh_not_done () =
   check_kinds "down" [ "suggest --refresh" ] calls;
   Alcotest.(check bool)
     "not refreshed" false
-    (Dict.truthy (entry state) "last_error_refreshed");
+    (flag (entry state) "last_error_refreshed");
   let state, calls, _ = run_main ~tool:refreshed_down e [ rebuilt ] in
   check_kinds "again" [ "suggest --refresh" ] calls;
   Alcotest.(check bool)
     "refreshed" true
-    (Dict.truthy (entry state) "last_error_refreshed");
+    (flag (entry state) "last_error_refreshed");
   let _, calls, _ = run_main e [ rebuilt ] in
   check_kinds "from the cache" [ "suggest"; "summary" ] calls;
   (* No previous entry (dropped when its CI passed): the failed attempt
@@ -890,7 +913,7 @@ let test_refresh_not_done () =
   let state, _, _ = run_main ~tool:down e [ rebuilt ] in
   Alcotest.(check bool)
     "refresh_pending" true
-    (Dict.truthy (entry state) "refresh_pending");
+    (flag (entry state) "refresh_pending");
   let state, calls, _ = run_main ~tool:down e [ rebuilt ] in
   check_kinds "pending" [ "suggest --refresh"; "summary" ] calls;
   Alcotest.(check int) "attempts" 2 (Dict.int (entry state) "attempts");
@@ -1091,7 +1114,7 @@ let test_deferred_new_pr () =
   no_calls "deferred" calls;
   Alcotest.(check string) "changed" "changed=false" changed;
   let en = entry state in
-  Alcotest.(check bool) "pending" true (Dict.truthy en "pending");
+  Alcotest.(check bool) "pending" true (flag en "pending");
   Alcotest.(check (list string))
     "fields"
     [
@@ -1128,7 +1151,7 @@ let test_deferred_new_pr () =
   in
   no_calls "deferred" calls;
   let en = entry state in
-  Alcotest.(check bool) "pending" true (Dict.truthy en "pending");
+  Alcotest.(check bool) "pending" true (flag en "pending");
   List.iter
     (fun k -> Alcotest.(check bool) k false (Dict.mem en k))
     [ "error"; "attempts"; "since_base" ]

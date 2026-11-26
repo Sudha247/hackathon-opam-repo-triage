@@ -204,13 +204,6 @@ let bool k v = to_bool (member k v)
 let list k v = to_list (member k v)
 let assoc k v = to_assoc (member k v)
 let mem k (v : t) = match v with `Assoc kv -> List.mem_assoc k kv | _ -> false
-
-let truthy (v : t) =
-  match v with
-  | `Null | `Bool false | `Int 0 | `String "" | `List [] | `Assoc [] -> false
-  | `Float f -> f <> 0.
-  | _ -> true
-
 let opt_string = function Some s -> `String s | None -> `Null
 let strings l : t = `List (List.map (fun s -> `String s) l)
 

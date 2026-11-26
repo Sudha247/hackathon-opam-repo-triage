@@ -632,7 +632,7 @@ let preexisting_failures ?src ?notes (data : data) sha base cache_dir :
           (Printf.sprintf "repos/%s/compare/%s...%s" Net.repo b sha)
           cache_dir
       with
-      | Some d when Json.truthy d ->
+      | Some (`Assoc kv as d) when List.mem_assoc "files" kv ->
           n.added <-
             Some
               (SS.of_list
@@ -1766,8 +1766,8 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                 let same =
                   List.find_opt
                     (fun o ->
-                      (not (Suggestion.nonempty_field r.Suggestion.new_))
-                      && (not (Suggestion.nonempty_field o.Suggestion.new_))
+                      (not (Suggestion.is_set r.Suggestion.new_))
+                      && (not (Suggestion.is_set o.Suggestion.new_))
                       && Suggestion.str o.error = Suggestion.str r.error
                       && o.note = r.note)
                     !out
@@ -1782,7 +1782,7 @@ let lint_rules ?src ?sha ?(cache_dir = ".opam-ci-cache") (data : data) =
                 | None -> (
                     (* one entry per (package, fix): several lint messages often share a fix *)
                     let prev =
-                      if Suggestion.nonempty_field r.Suggestion.new_ then
+                      if Suggestion.is_set r.Suggestion.new_ then
                         List.find_opt
                           (fun o ->
                             Suggestion.str_field o.Suggestion.failing

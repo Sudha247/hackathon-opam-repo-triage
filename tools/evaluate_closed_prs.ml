@@ -463,8 +463,7 @@ let run ~since ~limit ~max_ ~json () =
         | Some sugg ->
             let sugg = List.map Suggestion.of_json sugg in
             let has_change (s : Suggestion.t) =
-              Suggestion.nonempty_field s.new_
-              || Suggestion.list s.candidates <> []
+              Suggestion.is_set s.new_ || Suggestion.list s.candidates <> []
             in
             let scored =
               List.filter_map

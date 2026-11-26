@@ -2796,7 +2796,7 @@ let lower_bounds_rule src job text (r : Suggestion.t) pr_packages pr_sha :
         end
         else if
           r.rule <> None
-          || Suggestion.nonempty_field r.Suggestion.new_
+          || Suggestion.is_set r.Suggestion.new_
           || Suggestion.list r.candidates <> []
         then None
         else begin

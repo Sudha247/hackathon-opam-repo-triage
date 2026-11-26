@@ -21,10 +21,15 @@ val main : ?argv:string array -> unit -> unit
 
 (** {1 Listing the open PRs} *)
 
+exception Graphql_error of string
+(** An answer with errors and without the data, without data, or with [errors]
+    of another shape than a non-empty list. *)
+
 val graphql : string -> Triage.Json.t -> string -> Triage.Json.t
 (** [graphql query variables token]: the data of a query of GitHub's GraphQL API
     (partial errors are fine when every top-level field is there). Tried three
-    times; then the last error is raised. *)
+    times; then the last error is raised ({!Graphql_error}, or an HTTP or
+    network error). *)
 
 val list_open_prs : string -> Page_data.Entry.t list * int
 (** [list_open_prs token]: all open PRs with the opam-ci state of their head

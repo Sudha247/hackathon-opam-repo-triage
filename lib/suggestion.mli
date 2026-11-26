@@ -172,18 +172,31 @@ val str : string option -> string
 (** The string, or [""]. *)
 
 val nonempty : string option -> bool
-(** Whether the string is set and not [""]. Only for the members that can be set
-    to [""]: the texts the rules compute ([error], [note], [source], from lists
-    that may be empty), and [confidence] (stored as [""] by older versions). The
-    other string members are never [""] (the rules set them to names, variants
-    and fixed words, and no stored suggestion has one): an option match says
-    whether they are set. *)
+(** Whether the string is set and not [""]. Only for the members that can be
+    [""]:
+    - [error]: the LLM's diagnosis when the rules found no error ({!Llm}: the
+      schema allows [""]);
+    - [note]: the note of a pattern over several packages
+      ({!Matrix.collapse_systemic}) when the rule gives no change and no
+      dependency is to blame;
+    - [source]: from a list of lookups that may be empty;
+    - [confidence]: stored as [""] by older versions.
+
+    The other string members are never [""] (the rules set them to names,
+    variants, fixed words and texts that start or end with fixed words, and no
+    stored suggestion has one): an option match says whether they are set. *)
 
 val str_field : string field -> string
 
 val nonempty_field : string field -> bool
-(** The same, for [new], [old] and [failing] (computed opam text and package
-    lists). *)
+(** The same, for [failing]: a job's package, from its variant on the CI page
+    ({!Ci.failing_pkg}), is [""] for a variant that ends with a comma. *)
+
+val is_set : 'a field -> bool
+(** Whether the member is set (not absent, not [null]). For [new] and [old],
+    never [""]: the rules write opam lines (with the package's name, a field
+    name or a fixed text), the LLM's change only when it is not [""], and no
+    stored suggestion has an empty one. *)
 
 val list : 'a list option -> 'a list
 (** The list, or [[]]. *)

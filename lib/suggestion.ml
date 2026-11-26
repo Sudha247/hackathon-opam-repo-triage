@@ -97,6 +97,7 @@ let str = Option.value ~default:""
 let nonempty = function Some s -> s <> "" | None -> false
 let str_field f = str (get f)
 let nonempty_field f = nonempty (get f)
+let is_set = function Set _ -> true | Absent | Null -> false
 let list = function Some l -> l | None -> []
 
 let changelog_is_empty (c : Changelog.t) =

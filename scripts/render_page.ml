@@ -701,7 +701,7 @@ let headline ?v ?(as_html = true) pr =
           let pkgs = packages_text r in
           let s =
             if
-              Suggestion.nonempty_field r.Suggestion.new_
+              Suggestion.is_set r.Suggestion.new_
               && Rx.match_ opam_line (Suggestion.str_field r.Suggestion.new_)
                  <> None
             then
@@ -923,9 +923,9 @@ let suggestion_body ?sha ?(full = true) ?year r =
          "<div class=\"meta\">and %d other error message%s (see the jobs)</div>"
          (ne - 2)
          (plural (ne - 2)));
-  if Suggestion.nonempty_field r.Suggestion.new_ then begin
+  if Suggestion.is_set r.Suggestion.new_ then begin
     let diff =
-      (if Suggestion.nonempty_field r.old then
+      (if Suggestion.is_set r.old then
          [
            Printf.sprintf "<span class=\"del\">- %s</span>"
              (e_s (Suggestion.str_field r.old));
@@ -2031,7 +2031,7 @@ let render_feed (data : Page_data.t) =
                              | Some j when j <> "" -> j
                              | _ -> ""))
                       ^
-                      if Suggestion.nonempty_field r.Suggestion.new_ then
+                      if Suggestion.is_set r.Suggestion.new_ then
                         Printf.sprintf " (%s)"
                           (List.hd
                              (Util.split_on "   "

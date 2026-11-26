@@ -200,7 +200,7 @@ let merge_versions results =
         let name = fst (split_pkg failing) in
         if
           (not (Titles.has_rule merge_versions_rules r))
-          || Suggestion.nonempty_field r.Suggestion.new_
+          || Suggestion.is_set r.Suggestion.new_
           || name = ""
           || String.contains failing ' '
         then true
@@ -272,7 +272,7 @@ let merge_unrecognised results =
       (fun r ->
         not
           (r.rule <> None
-          || Suggestion.nonempty_field r.Suggestion.new_
+          || Suggestion.is_set r.Suggestion.new_
           || Suggestion.list r.candidates <> []
           || Suggestion.nonempty r.error
           || r.llm_prompt <> None))

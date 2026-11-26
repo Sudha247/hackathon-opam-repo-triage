@@ -73,20 +73,31 @@ let graphql query variables token : Json.t =
              "https://api.github.com/graphql")
       in
       let data = Json.member "data" d in
-      if Json.truthy (Json.member "errors" d) then begin
-        (* Partial errors (a node GitHub could not resolve): the data is used
-           when every top-level field is there. *)
-        if
-          (not (Json.truthy data))
-          || List.exists (fun (_, v) -> v = `Null) (Json.to_assoc data)
-        then
-          raise
-            (Graphql_error
-               ("GraphQL errors: "
-               ^ Util.prefix_chars (Json.dumps (Json.member "errors" d)) 500));
-        Printf.eprintf "GitHub GraphQL errors, using the data returned: %s\n%!"
-          (Util.prefix_chars (Json.dumps (Json.member "errors" d)) 300)
-      end;
+      (* [errors] is absent or a non-empty list (the GraphQL spec). *)
+      (match d with
+      | `Assoc kv -> (
+          match List.assoc_opt "errors" kv with
+          | None -> ()
+          | Some (`List (_ :: _) as errors) -> (
+              (* Partial errors (a node GitHub could not resolve): the data is
+                 used when every top-level field is there. *)
+              match data with
+              | `Assoc (_ :: _ as fields)
+                when not (List.exists (fun (_, v) -> v = `Null) fields) ->
+                  Printf.eprintf
+                    "GitHub GraphQL errors, using the data returned: %s\n%!"
+                    (Util.prefix_chars (Json.dumps errors) 300)
+              | _ ->
+                  raise
+                    (Graphql_error
+                       ("GraphQL errors: "
+                       ^ Util.prefix_chars (Json.dumps errors) 500)))
+          | Some v ->
+              raise
+                (Graphql_error
+                   ("GraphQL errors that are not a list of errors: "
+                   ^ Util.prefix_chars (Json.dumps v) 500)))
+      | _ -> ());
       (match data with
       | `Assoc _ -> ()
       | _ -> raise (Graphql_error "GraphQL answer without data"));
@@ -1351,9 +1362,8 @@ let main ?(argv = Sys.argv) () =
       entry.seconds <- Some secs;
       entry.jobs <-
         (match summary with
-        | Some s when Json.truthy s ->
-            Set (jobs_overview (summary_jobs (Some s)))
-        | _ -> Null);
+        | Some (`Assoc _ as s) -> Set (jobs_overview (summary_jobs (Some s)))
+        | Some _ | None -> Null);
       E.remove entry ("pending" :: last_error);
       Printf.eprintf "#%d %s %s (%ss; requests: %s)\n%!" (number_or_0 p)
         (Util.prefix_chars it.sha 12)

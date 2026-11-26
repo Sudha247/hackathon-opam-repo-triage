@@ -75,7 +75,7 @@ let tied_to_pr r =
   || (match r.rule with
     | Some rule -> List.mem rule pr_evidence_rules
     | None -> false)
-  || Suggestion.nonempty_field r.Suggestion.new_
+  || Suggestion.is_set r.Suggestion.new_
 
 let where_pkg r =
   match r.where_kind with

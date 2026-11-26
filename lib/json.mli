@@ -68,9 +68,6 @@ val bool : string -> t -> bool
 val list : string -> t -> t list
 val assoc : string -> t -> (string * t) list
 
-val truthy : t -> bool
-(** False for null, false, 0, 0.0, [""], [[]] and [{}]; true otherwise. *)
-
 (** {1 Printing as Python does}
 
     For the messages and fields printed as the tool has always printed them (in

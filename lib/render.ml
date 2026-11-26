@@ -584,8 +584,7 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
             cands
         end
         else begin
-          if Suggestion.nonempty_field r.Suggestion.new_ then
-            add [ diff_block r ];
+          if Suggestion.is_set r.Suggestion.new_ then add [ diff_block r ];
           if r.alternative <> None then begin
             (* also without [new]: a change described in the note. Python: \s{2,}(?=\() *)
             let a = Suggestion.str r.alternative in
@@ -724,13 +723,13 @@ let render_comment_counts ?(placed = 0) ?(placed_lines = 0) ~unfinished ~njobs
     (fun r ->
       [ head r ^ error r ^ note r ]
       @
-      if Suggestion.nonempty_field r.Suggestion.new_ then
+      if Suggestion.is_set r.Suggestion.new_ then
         [ "  " ^ Util.replace (diff_block r) "\n" "\n  " ]
       else []);
   details "Fix goes elsewhere" (by "elsewhere") (fun r ->
       [
         head ~where:true r ^ error r
-        ^ (if Suggestion.nonempty_field r.Suggestion.new_ then
+        ^ (if Suggestion.is_set r.Suggestion.new_ then
              "<br>Suggested change: "
              ^ Md.md_code
                  (List.hd
@@ -808,7 +807,7 @@ let line_edits r text =
     || String.starts_with ~prefix:"x-ci-" new_
     || String.starts_with ~prefix:"available:" new_
   then []
-  else if Suggestion.nonempty_field r.old then begin
+  else if Suggestion.is_set r.old then begin
     let old = String.trim (Suggestion.str_field r.old) in
     match find_index (fun l -> String.trim l = old) with
     | Some i -> [ (i + 1, indent lines.(i) ^ new_) ]
@@ -1028,7 +1027,7 @@ let render_suggestions (results : Suggestion.t list) =
       List.iter
         (fun t -> Printf.printf "  tried           : %s\n" t)
         (Suggestion.list r.tried);
-      if Suggestion.nonempty_field r.Suggestion.new_ then begin
+      if Suggestion.is_set r.Suggestion.new_ then begin
         let label =
           match Suggestion.str r.class_ with
           | "workaround" -> "workaround"
@@ -1036,7 +1035,7 @@ let render_suggestions (results : Suggestion.t list) =
           | _ -> "suggested change"
         in
         Printf.printf "  %s (%s confidence):\n" label (conf_word r);
-        if Suggestion.nonempty_field r.old then
+        if Suggestion.is_set r.old then
           Printf.printf "    - %s\n" (Suggestion.str_field r.old);
         Printf.printf "    + %s\n" (Suggestion.str_field r.Suggestion.new_);
         if r.alternative <> None then

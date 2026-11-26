@@ -466,8 +466,18 @@ let mcp_call ?max_age src tool args : Json.t * bool =
                         | `List (c :: _) -> Json.member "text" c
                         | _ -> raise (Mcp_failure "no content")
                       in
+                      let is_error =
+                        match Json.member "isError" res with
+                        | `Bool b -> b
+                        | `Null -> false (* absent *)
+                        | v ->
+                            raise
+                              (Mcp_failure
+                                 ("isError is not a boolean: "
+                                 ^ Util.prefix_chars (Json.dumps v) 50))
+                      in
                       let v =
-                        if Json.member "isError" res = `Bool true then begin
+                        if is_error then begin
                           let t = first_text () in
                           if strict then
                             `Assoc
@@ -658,25 +668,26 @@ let doc_modules src pkg version =
     mcp src "ocaml_package_documentation"
       [ ("package", `String pkg); ("version", `String version) ]
   in
-  if not (Json.truthy d) then None
-  else
-    match Json.member "documentation_status" d with
-    | `Null | `String "success" -> (
-        let mods = Odict.create () in
-        List.iter
-          (fun m ->
-            match Json.str_opt "path" m with
-            | Some p when p <> "" ->
-                ignore
-                  (Odict.setdefault mods (Json.str "name" m)
-                     (Util.removesuffix p "/index.html"))
-            | _ -> ())
-          (List.concat_map
-             (fun lib -> Json.list "modules" lib)
-             (Json.list "libraries" d)
-          @ Json.list "modules" d);
-        match Odict.to_list mods with [] -> None | l -> Some l)
-    | _ -> None
+  match d with
+  | `Assoc _ -> (
+      match Json.member "documentation_status" d with
+      | `Null | `String "success" -> (
+          let mods = Odict.create () in
+          List.iter
+            (fun m ->
+              match Json.str_opt "path" m with
+              | Some p when p <> "" ->
+                  ignore
+                    (Odict.setdefault mods (Json.str "name" m)
+                       (Util.removesuffix p "/index.html"))
+              | _ -> ())
+            (List.concat_map
+               (fun lib -> Json.list "modules" lib)
+               (Json.list "libraries" d)
+            @ Json.list "modules" d);
+          match Odict.to_list mods with [] -> None | l -> Some l)
+      | _ -> None)
+  | _ -> None (* no answer ([null]), or not an object *)
 
 (* Test seam. *)
 let doc_modules_hook = ref doc_modules
@@ -692,7 +703,9 @@ let doc_page src pkg version path =
         ("path", `String (path ^ "/index.html"));
       ]
   in
-  if Json.truthy d then Json.str_opt "content" d else None
+  match d with
+  | `Assoc _ -> Json.str_opt "content" d
+  | _ -> None (* no answer ([null]), or not an object *)
 
 let defines text kind ident =
   (* the identifier between [before] and [after] *)
@@ -858,8 +871,14 @@ let api_history src pkg mods kind ident versions =
                     version by version, through the module path as written.
                     Unless the tool checked them all and only one has the
                     item: that one is the code's. *)
+                      let ambiguous =
+                        match Json.member "ambiguous_with" d with
+                        | `Null | `List [] -> false
+                        | `List (_ :: _) -> true
+                        | _ -> true (* another shape: not known to be one *)
+                      in
                       if
-                        Json.truthy (Json.member "ambiguous_with" d)
+                        ambiguous
                         && Json.member "resolved_module" d <> `String path
                         && not
                              (Json.member "resolved_by" d = `String "identifier"

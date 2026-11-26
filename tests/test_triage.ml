@@ -1141,6 +1141,21 @@ let test_malformed_answers () =
            ]);
       Some { Http.status = 0; resp_headers = []; data = "HELLO" } (* not HTTP *);
       None (* connection closed *);
+      http_json
+        (`Assoc
+           [
+             ("jsonrpc", s "2.0");
+             ("id", `Int 1);
+             ( "result",
+               `Assoc
+                 [
+                   ("isError", s "false");
+                   ( "content",
+                     `List [ `Assoc [ ("type", s "text"); ("text", s "[]") ] ]
+                   );
+                 ] );
+           ]);
+      (* isError not a boolean *)
     ]
   in
   List.iteri

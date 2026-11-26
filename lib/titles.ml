@@ -150,7 +150,7 @@ let has_rule rules (r : Suggestion.t) =
 
 let classify r =
   let has_change =
-    Suggestion.nonempty_field r.Suggestion.new_
+    Suggestion.is_set r.Suggestion.new_
     || Suggestion.list r.candidates <> []
     || r.advice <> None
   in

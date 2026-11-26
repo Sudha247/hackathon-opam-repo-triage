@@ -39,10 +39,6 @@ val str : t -> string -> string
 val int : t -> string -> int
 (** The integer (a float truncated), or 0. *)
 
-val truthy : t -> string -> bool
-(** Whether the member is set to a value other than null, false, 0, [""], [[]]
-    or [{}]. *)
-
 val list : t -> string -> Json.t list
 (** The list, or [[]]. *)
 

@@ -40,8 +40,7 @@ let unrecognised (pr : E.t) =
        (fun (r : Suggestion.t) ->
          r.rule = Some Unrecognised
          || not
-              (r.rule <> None
-              || Suggestion.nonempty_field r.new_
+              (r.rule <> None || Suggestion.is_set r.new_
               || Suggestion.list r.candidates <> []))
        (E.suggestions pr))
 
@@ -49,7 +48,9 @@ let usage result =
   let calls =
     List.filter_map
       (fun (r : Suggestion.t) ->
-        match r.llm_usage with Some u when Json.truthy u -> Some u | _ -> None)
+        match r.llm_usage with
+        | Some (`Assoc _ as u) -> Some u
+        | Some _ | None -> None (* null: a cached answer without it *))
       (suggestions result)
   in
   (* Failures sharing one answer carry the same usage: count each answer once. *)

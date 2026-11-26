@@ -827,7 +827,7 @@ let llm_todo (results : Suggestion.t list) (data : Ci.data) =
   let unexplained r =
     r.Suggestion.unexplained
     && (not (r.rule <> None))
-    && (not (Suggestion.nonempty_field r.Suggestion.new_))
+    && (not (Suggestion.is_set r.Suggestion.new_))
     && Suggestion.list r.candidates = []
   in
   List.filter

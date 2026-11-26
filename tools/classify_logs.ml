@@ -481,7 +481,7 @@ let classify_run run_dir =
       let job = Dict.of_json job in
       if
         Dict.str_opt job "status" <> Some "failed"
-        || not (Dict.truthy job "log_file")
+        || Dict.str_opt job "log_file" = None
       then None
       else begin
         let log = Filename.concat run_dir (Dict.str job "log_file") in

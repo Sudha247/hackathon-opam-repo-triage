@@ -44,7 +44,7 @@ let drop_health_explained_elsewhere (notes : Context.notes) results pr_packages
     List.filter
       (fun r ->
         r.rule = Some Library_api
-        && Suggestion.nonempty_field r.Suggestion.new_
+        && Suggestion.is_set r.Suggestion.new_
         && r.dep <> None
         && not (List.mem (Suggestion.str r.dep) names))
       results
@@ -207,7 +207,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
              ((match r.key with
                 | Some k -> List.mem k explained
                 | None -> false)
-             && (not (Suggestion.nonempty_field r.Suggestion.new_))
+             && (not (Suggestion.is_set r.Suggestion.new_))
              && Suggestion.list r.candidates = []))
       results
   in
@@ -358,7 +358,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
         r.unexplained <- false (* set by the rules, read by apply_llm *);
         let failing = Json.opt_string (Suggestion.get r.Suggestion.failing) in
         let k, tmpl =
-          if Suggestion.nonempty_field r.Suggestion.new_ then
+          if Suggestion.is_set r.Suggestion.new_ then
             ( Some
                 (`List
                    [
