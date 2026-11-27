@@ -370,10 +370,12 @@ let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?(unsure = []) ?run jobs
                 (platform_words (List.hd tj))
               ^ (match evidence with Some e when e <> "" -> " " ^ e | _ -> "")
               ^
+              (* Not after a depext to add (conf-bison's {os-family =
+                 "centos"}, which opam never matches: the main builder's
+                 image has bison anyway). *)
+              let e = Option.value ~default:"" evidence in
               if
-                Util.contains
-                  (Option.value ~default:"" evidence)
-                  "Nothing to change"
+                Util.contains e "Nothing to change" || Util.contains e "Add one"
               then ""
               else " Nothing to change in the package metadata."
             in

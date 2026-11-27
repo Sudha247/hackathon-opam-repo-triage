@@ -1246,15 +1246,40 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
             let accepted =
               Rx.findall quoted_re (field_text "x-ci-accept-failures")
             in
+            (* The depexts whose filter holds on the job's platform, as opam
+               evaluates it: on Cygwin, os-distribution is "cygwin", never
+               "cygwinports" (#31054: conf-glib-2's "glib2.0" {os =
+               "win32" & os-distribution = "cygwinports"}). When a variable
+               of the filter is not known here (os-version, a distribution
+               not in Filter's tables), its text names the distribution. *)
+            let env = Filter.platform_vars job in
+            let filters = Rx.findall_groups filtered_list_re depexts_text in
             let declared =
               List.filter_map
                 (function
-                  | [ pk; flt ] ->
-                      if family <> "" && Util.contains flt family then
-                        Some (String.trim pk)
-                      else None
+                  | [ pk; flt ] -> (
+                      match Filter.eval_filter (Some flt) env with
+                      | Some true -> Some (String.trim pk)
+                      | Some false -> None
+                      | None ->
+                          if family <> "" && Util.contains flt family then
+                            Some (String.trim pk)
+                          else None)
                   | _ -> None)
-                (Rx.findall_groups filtered_list_re depexts_text)
+                filters
+            in
+            let cygwinports_note =
+              if
+                distro = "cygwin"
+                && List.exists
+                     (function
+                       | [ _; flt ] -> Util.contains flt {|"cygwinports"|}
+                       | _ -> false)
+                     filters
+              then
+                " Its depexts for os-distribution \"cygwinports\" do not \
+                 apply: opam's os-distribution on Cygwin is \"cygwin\"."
+              else ""
             in
             let is_conf = String.starts_with ~prefix:"conf-" fname in
             Some
@@ -1269,6 +1294,22 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
                            packages that depend on it."
                           fname distro);
                      `Confidence "high";
+                   ]
+               else if is_conf && tool = "pkg-config" && distro = "cygwin" then
+                 (* #31054: conf-pkg-config.5 is installed on cygwin, and
+                    conf-glib-2's check finds no `pkg-config` (see
+                    Matrix.matrix_rules). *)
+                 r
+                 @ [
+                     `Note
+                       (Printf.sprintf
+                          "On Windows, conf-pkg-config provides `pkgconf`, and \
+                           no `pkg-config` on %s (a depext does not change \
+                           that): %s should run `pkgconf` on Windows, as \
+                           conf-zstd does, or exclude %s \
+                           (`x-ci-accept-failures` or `available`).%s"
+                          platform fname platform cygwinports_note);
+                     `Confidence "medium";
                    ]
                else if is_conf && declared <> [] then
                  r
@@ -1291,8 +1332,8 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
                        (Printf.sprintf
                           "%s does not provide `%s` on %s: its depexts have no \
                            entry for that platform. Add one, unless the CI \
-                           image should already have it."
-                          fname tool platform);
+                           image should already have it.%s"
+                          fname tool platform cygwinports_note);
                      `Confidence "medium";
                    ]
                else if List.mem conf deps then

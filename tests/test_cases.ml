@@ -200,10 +200,14 @@ let cases =
             ({|rule|}, {|pr-relaxed-available|});
             ({|new|}, {|os = "linux"|});
           ];
+        (* conf-bison.2's centos depext was {os-family = "centos"} then
+           (now "rhel"): opam says "rhel" on CentOS, so none applies. *)
         Has
           [
             ({|rule|}, {|builder-specific|});
-            ({|note|}, {|conf-bison declares a depext for centos|});
+            ( {|note|},
+              {|conf-bison does not provide `bison` on centos-10: its depexts have no entry|}
+            );
           ];
         Has
           [
@@ -986,6 +990,49 @@ let cases =
             ({|failing|}, {|llvm.16.0.6+nnp+fix-homebrew|});
             ({|new|}, {|"conf-zstd"|});
           ];
+      ] );
+    (* conf-glib-2.1's cygwin depext is for os-distribution "cygwinports",
+       which opam never reports (on Cygwin it says "cygwin"): nothing was
+       installed for it on cygwin, and `pkg-config` is missing there anyway,
+       as conf-pkg-config provides `pkgconf` on Windows (PR 31054). *)
+    ( {|conf-glib-cygwinports|},
+      {|13119b5623ed55644cd0cc789165cb294e987db2|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^day10,cygwin,x86_64,4\.14,ocgio\.0\.1~preview3$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|missing-tool|});
+            ({|failing|}, {|conf-glib-2.1|});
+            ({|where|}, {|conf-glib-2.1 (another package)|});
+            ({|note|}, {|should run `pkgconf` on Windows|});
+            ({|note|}, {|"cygwinports" do not apply|});
+          ];
+        Not [ ({|note|}, {|the CI did not install it|}) ];
+      ] );
+    (* conf-gcc.1.0's cygwin depext ("gcc-core") is for "cygwinports" too: it
+       has no depext for cygwin (PR 31316). *)
+    ( {|conf-gcc-cygwinports|},
+      {|fc0b8a64a3c315acd53c31cd5fe7b12cd1edd379|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^day10,cygwin,x86_64,5\.5,veins\.0\.3\.1,tests$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|missing-tool|});
+            ({|failing|}, {|conf-gcc.1.0|});
+            ({|note|}, {|its depexts have no entry for that platform|});
+            ({|note|}, {|"cygwinports" do not apply|});
+          ];
+        Not [ ({|note|}, {|the CI did not install it|}) ];
       ] );
   ]
 
