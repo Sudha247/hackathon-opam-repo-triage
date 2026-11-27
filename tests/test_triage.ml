@@ -902,6 +902,30 @@ let test_windows_pattern () =
     (errors
        [ msys2; linux; job ~category:"passed" "day10,cygwin,x86_64,5.3,x.1" ])
 
+let test_unknown_outcome () =
+  (* A job the CI failed is neither a pass nor a failure: "fails only on
+     Windows" needs a real pass on its platform (#28291: fedora-45's image
+     could not start a container). *)
+  let rules ?unknown js =
+    List.map
+      (fun r -> Option.fold ~none:"" ~some:Rule.to_string r.rule)
+      (Matrix.matrix_rules ?unknown js [] None [])
+  in
+  let jobs =
+    [
+      job "day10,cygwin,x86_64,5.5,x.1";
+      job ~category:"passed" "day10,debian-13,x86_64,5.5,x.1";
+    ]
+  in
+  let fedora = job "day10,fedora-45,x86_64,5.5,x.1" in
+  check_strs "no unknown" [ "platform-matrix" ] (rules jobs);
+  check_strs "unknown platform" [] (rules ~unknown:[ fedora ] jobs);
+  check_strs "a real pass there" [ "platform-matrix" ]
+    (rules ~unknown:[ fedora ]
+       (job ~category:"passed" "day10,fedora-45,x86_64,4.14,x.1" :: jobs));
+  check_strs "on Windows" [ "platform-matrix" ]
+    (rules ~unknown:[ job "day10,msys2,x86_64,5.5,x.1" ] jobs)
+
 let test_pattern_after_a_change_from_the_log () =
   (* liquidsoap 2.4.6 (#30906): its tests fail on OCaml 5 with [Library
      "bytes" not found]; the log gives base-bytes, so no workaround from the
@@ -3662,6 +3686,7 @@ let () =
           p "builder_specific_same_arch" test_builder_specific_same_arch;
           p "builder_specific_twin_age" test_builder_specific_twin_age;
           p "windows_pattern" test_windows_pattern;
+          p "unknown_outcome" test_unknown_outcome;
           p "pattern_after_a_change_from_the_log"
             test_pattern_after_a_change_from_the_log;
           p "unanalysed_count" test_unanalysed_count;

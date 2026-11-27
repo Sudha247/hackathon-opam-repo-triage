@@ -222,18 +222,17 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
      packages, on that distribution: the fedora-45 image of day10 without
      /usr/bin/env made them a pattern of their own) *)
   let ci_jobs = List.concat_map Checks.jobs_or_variant ci in
-  let jobs =
-    List.filter
+  let unknown, jobs =
+    List.partition
       (fun j ->
-        not
-          (j.status = Failed
-          && (List.mem (failure_key j) transient || List.mem j.variant ci_jobs)
-          ))
+        j.status = Failed
+        && (List.mem (failure_key j) transient || List.mem j.variant ci_jobs))
       data.jobs
   in
   let matrix =
     Matrix.collapse_systemic
-      (Matrix.matrix_rules ~failing_in_log ~run jobs results match_ pr_packages)
+      (Matrix.matrix_rules ~failing_in_log ~unknown ~run jobs results match_
+         pr_packages)
   in
   (* A matrix suggestion explains the per-job failures that had no rule. *)
   let explained = List.concat_map (fun m -> m.Suggestion.keys) matrix in

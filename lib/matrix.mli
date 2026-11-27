@@ -40,6 +40,7 @@ val stale_twins :
 
 val matrix_rules :
   ?failing_in_log:(Ci.failure_key * string) list ->
+  ?unknown:Ci.job list ->
   ?run:(Ci.job -> run) ->
   Ci.job list ->
   Suggestion.t list ->
@@ -51,10 +52,12 @@ val matrix_rules :
     expression the jobs were selected with). [earlier]: the suggestions from the
     logs (their [key] is the failure they come from): next to a change from a
     log, the pattern adds only a workaround. [failing_in_log]: the package whose
-    step failed in the log of each failure. [run]: when and on what a job ran
-    (read from its log, once per builder and distribution: see {!per_builder});
-    without it, the pattern trusts any passing main-builder job (see
-    {!twin_confidence}). *)
+    step failed in the log of each failure. [unknown]: the failed jobs left out
+    of [jobs] (failures of the CI, whose outcome is not known): a platform
+    pattern holds only if each of them is on the failing platforms or on a
+    platform with a real pass. [run]: when and on what a job ran (read from its
+    log, once per builder and distribution: see {!per_builder}); without it, the
+    pattern trusts any passing main-builder job (see {!twin_confidence}). *)
 
 val collapse_systemic : ?threshold:int -> Suggestion.t list -> Suggestion.t list
 (** The same matrix pattern on many packages (at least [threshold], 5 by

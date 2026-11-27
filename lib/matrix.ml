@@ -230,9 +230,36 @@ let stale_twins ~run ~among jobs match_ =
         (real_fails js))
     (matrix_groups jobs match_)
 
-let matrix_rules ?(failing_in_log = []) ?run jobs (earlier : Suggestion.t list)
-    match_ pr_packages =
+(* A job the CI failed (a broken image, a crashed worker: see
+   Rules.ci_failure) neither passes nor fails: it is left out of the
+   patterns. But the platform it ran on is not known to pass either: a
+   pattern "fails only on [vals]" holds only if each such job of the group,
+   outside [vals], has a real pass on its platform (distribution and
+   architecture). #28291: archive fails on cygwin and msys2, passes on the
+   other distributions but fedora-45, whose image could not start a
+   container: nothing says it does not fail there, and the log of the
+   Windows jobs (archive.h missing) says more than the pattern. *)
+let unknown_covered (dim, vals) passes unknown =
+  let plat j =
+    let d = job_dims j in
+    (d.os, d.distro, job_arch j)
+  in
+  List.for_all
+    (fun u ->
+      let d = job_dims u in
+      u.experimental
+      || (match dim with
+        | "os" -> d.os = "win32"
+        | "arch" -> List.mem d.arch vals
+        | _ -> (
+            match d.distro with Some x -> List.mem x vals | None -> false))
+      || List.exists (fun p -> plat p = plat u) passes)
+    unknown
+
+let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?run jobs
+    (earlier : Suggestion.t list) match_ pr_packages =
   let fin j = List.assoc_opt (failure_key j) failing_in_log in
+  let unknown = matrix_groups unknown match_ in
   let done_ =
     List.map (fun r -> (Suggestion.get r.Suggestion.failing, r.dep)) earlier
   in
@@ -258,8 +285,8 @@ let matrix_rules ?(failing_in_log = []) ?run jobs (earlier : Suggestion.t list)
       (matrix_groups jobs match_)
   in
   List.iter
-    (fun ((target, revdep, kind), js) ->
-      let target = Option.value ~default:"" target in
+    (fun ((target', revdep, kind), js) ->
+      let target = Option.value ~default:"" target' in
       let pkg = match revdep with Some r when r <> "" -> r | _ -> target in
       let fails =
         List.filter
@@ -434,6 +461,13 @@ let matrix_rules ?(failing_in_log = []) ?run jobs (earlier : Suggestion.t list)
           | _ -> (
               match platform_matrix js with
               | None -> ()
+              | Some p
+                when not
+                       (unknown_covered p passes
+                          (Option.value ~default:[]
+                             (List.assoc_opt (target', revdep, kind) unknown)))
+                ->
+                  ()
               | Some (dim, vals) ->
                   let cond, what =
                     if dim = "os" then

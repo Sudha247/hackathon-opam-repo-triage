@@ -946,6 +946,28 @@ let cases =
             ({|jobs|}, {|day10,fedora-45,x86_64,4.14,conf-gtk4.3|});
           ];
       ] );
+    (* archive 3.7.2+6 (#28291) fails on cygwin (archive.h missing) and passes
+       on debian-13; on fedora-45, day10's image could not start a container (a
+       CI failure, left out of the patterns). That platform is not known to
+       pass: no "fails only on Windows" pattern, whose `available` would
+       replace the log's explanation. *)
+    ( {|archive-unknown-fedora45|},
+      {|3e46e7fdc64d91bd792acd6d282116b1fe84d312|},
+      [
+        {|--max|};
+        {|2|};
+        {|--match|};
+        {|^day10,(cygwin|fedora-45|debian-13),x86_64,4\.14,archive\.3\.7\.2\+6$|};
+      ],
+      [
+        Has [ ({|rule|}, {|missing-header|}); ({|error|}, {|archive.h|}) ];
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|error|}, {|its image has no /usr/bin/env|});
+          ];
+        Not [ ({|rule|}, {|platform-matrix|}) ];
+      ] );
   ]
 
 let fixtures =
