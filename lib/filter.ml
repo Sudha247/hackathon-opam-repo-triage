@@ -17,6 +17,12 @@ let os_distribution =
     ("freebsd", "freebsd");
   ]
 
+(* opam's os-family (OpamSysPoll.poll_os_family): on Linux the first word of
+   ID_LIKE in /etc/os-release, else the distribution's ID; "bsd" and
+   "windows"; elsewhere the os-distribution. CentOS Stream 9 and 10 have
+   ID_LIKE="rhel fedora" (centos-stream-release.spec, branches c9s and c10s
+   on gitlab.com/redhat/centos-stream/rpms). openSUSE is left out: Leap 15
+   says "suse opensuse", but Leap 16.0's and Tumbleweed's were not checked. *)
 let os_family =
   [
     ("debian", "debian");
@@ -27,6 +33,8 @@ let os_family =
     ("msys2", "windows");
     ("freebsd", "bsd");
     ("fedora", "fedora");
+    ("centos", "rhel");
+    ("macos-homebrew", "homebrew");
   ]
 
 let unstable_testing_re = Rx.v {|-[\d.]+$|-(unstable|testing)$|}

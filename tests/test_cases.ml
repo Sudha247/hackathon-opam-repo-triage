@@ -846,6 +846,26 @@ let cases =
             ({|advice|}, {|"runtest" "-p" name "-j" jobs "DIR"|});
           ];
       ] );
+    (* conf-rocksdb.1's depexts are for os-family "fedora" only; opam says
+       "rhel" on CentOS (ID_LIKE="rhel fedora"), so nothing was installed
+       there (PR 27360). *)
+    ( {|conf-rocksdb-centos-family|},
+      {|879cce6341a5b8d26f5989e5001751782571cb8b|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^distributions,centos-10-ocaml-4\.14,conf-rocksdb-ge-5-17-2|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|conf-no-depext|});
+            ({|failing|}, {|conf-rocksdb.1|});
+            ({|error|}, {|`cc -lrocksdb main.c` on centos-10|});
+            ({|advice|}, {|Add depexts for centos-10 to conf-rocksdb|});
+          ];
+      ] );
   ]
 
 let fixtures =
