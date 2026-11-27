@@ -54,6 +54,9 @@ type t =
   | Ocaml_runtime_api
   | Test_platform
   | Conf_no_depext
+  | Ci_failure
+      (** the CI failed, not the package: a crash of its tools or workers, a
+          base image it could not build, a container that did not start *)
   | Other of string
       (** a name no rule has (stored by another version): kept as it is. Only
           {!of_string} makes one, so that it never holds a known name. *)

@@ -48,6 +48,7 @@ type t =
   | Ocaml_runtime_api
   | Test_platform
   | Conf_no_depext
+  | Ci_failure
   | Other of string
 
 let names =
@@ -99,6 +100,7 @@ let names =
     (Ocaml_runtime_api, "ocaml-runtime-api");
     (Test_platform, "test-platform");
     (Conf_no_depext, "conf-no-depext");
+    (Ci_failure, "ci-failure");
   ]
 
 let to_string = function Other s -> s | r -> List.assoc r names

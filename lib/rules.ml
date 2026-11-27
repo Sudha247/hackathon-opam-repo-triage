@@ -1451,6 +1451,71 @@ let http_error_code_re =
   Rx.v
     {|HTTP error code (5\d\d|429)|Could not resolve host|Connection (?:reset|timed out)|}
 
+let day10_internal_error_re =
+  Rx.v {|day10: internal error, uncaught exception:\s*([^\n]*)|}
+
+let worker_internal_error_re =
+  Rx.v
+    {|Uncaught exception: ([^\n]{0,200})(?:[^\n]*\n){1,3}[^\n]*Job failed: Failed: Internal error|}
+
+let windows_container_re = Rx.v {|ctr: hcs::System::Start [^:\n]*: ([^\n]*)|}
+
+let base_image_re =
+  Rx.v {|\[ERROR\] Building the base for (\S+) failed with status \d+|}
+
+let sources_again_re =
+  Rx.v {|\[ERROR\] Failed to get sources of (\S+): ([^\n]*)|}
+
+(* A crash of the CI's tools or workers, a container or base image it could
+   not start or build, sources it could not fetch again after installing
+   the package: (error, what failed) when the log shows one. *)
+let ci_crash text =
+  Util.first_some
+    [
+      (fun () ->
+        Option.map
+          (fun m ->
+            ( "day10 crashed: " ^ String.trim (Rx.group m 1),
+              "the day10 builder crashed (an internal error, exit code 125)" ))
+          (Rx.search day10_internal_error_re text));
+      (fun () ->
+        Option.map
+          (fun m ->
+            ( "Internal error of the CI worker: " ^ String.trim (Rx.group m 1),
+              "the CI worker failed (\"Internal error\")" ))
+          (Rx.search worker_internal_error_re text));
+      (fun () ->
+        Option.map
+          (fun m ->
+            ( "The Windows container did not start: "
+              ^ String.trim (Rx.group m 1),
+              "the Windows container did not start" ))
+          (Rx.search windows_container_re text));
+      (fun () ->
+        Option.map
+          (fun m ->
+            ( "day10 could not build its base image for " ^ Rx.group m 1,
+              "day10 could not build its base image (the distribution's \
+               packages, before any opam package)" ))
+          (Rx.search base_image_re text));
+      (fun () ->
+        (* day10 fetches the sources again after the build: a failure then
+           is the network's, the package installed. *)
+        List.find_map
+          (fun m ->
+            let pkg = Rx.group m 1 in
+            if Util.contains text ("-> installed " ^ pkg ^ "\n") then
+              Some
+                ( Printf.sprintf
+                    "Failed to get sources of %s again, after installing it: %s"
+                    pkg
+                    (String.trim (Rx.group m 2)),
+                  "the CI could not download the sources a second time, after \
+                   the package built and installed" )
+            else None)
+          (Rx.finditer sources_again_re text));
+    ]
+
 (* Failures of the CI rather than of the build: a system package missing
    from the distribution, a crash of the CI tool, a container that did not
    start, a network error. *)
@@ -1494,6 +1559,27 @@ let ci_failure job text (info : info) pr_packages =
                      or it does not exist there.";
                 ])
         | _ -> None);
+      (fun () ->
+        match ci_crash text with
+        | Some (error, what) ->
+            Some
+              ([
+                 `Rule Rule.Ci_failure;
+                 `Failing (if owner = "" then None else Some owner);
+               ]
+              @ Where.fix_where Ci "the CI environment"
+              @ [
+                  `Error error;
+                  `Confidence "high";
+                  `Note
+                    (Printf.sprintf
+                       "Not the package: %s. Nothing to change in the PR; \
+                        rerun the job (\"Rebuild failed\" on the CI page), and \
+                        report the failure to the CI's maintainers if it \
+                        persists."
+                       what);
+                ])
+        | None -> None);
       (fun () ->
         match Rx.search segmentation_fault_bus_re text with
         | Some m ->

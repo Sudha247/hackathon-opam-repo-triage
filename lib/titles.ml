@@ -47,6 +47,7 @@ let rule_title : Rule.t -> string option = function
   | Test_platform -> Some "Fails on one compiler variant"
   | Health_check_preexisting -> Some "Also fails on master"
   | Conf_no_depext -> Some "No system package for this platform"
+  | Ci_failure -> Some "CI failure, not the package"
   | Transient | Previous_release_bound | Other _ -> None
 
 let packages_re = Rx.v {|(\d+) packages \[|}

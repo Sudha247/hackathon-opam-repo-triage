@@ -180,6 +180,7 @@ let merge_versions_rules : Rule.t list =
     Missing_pkg_config;
     Sources;
     Conf_no_depext;
+    Ci_failure;
   ]
 
 let jobs_or_variant r =
@@ -205,7 +206,13 @@ let merge_versions results =
           || String.contains failing ' '
         then true
         else begin
-          let k = (name, r.rule, Where.where_kind r) in
+          (* CI failures of different kinds (their notes) stay apart. *)
+          let k =
+            ( name,
+              r.rule,
+              Where.where_kind r,
+              if r.rule = Some Ci_failure then r.note else None )
+          in
           match Hashtbl.find_opt first k with
           | None ->
               Hashtbl.replace first k r;

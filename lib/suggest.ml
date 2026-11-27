@@ -177,7 +177,8 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
      about the package: leave them out of the pass/fail patterns. *)
   let transient =
     List.concat_map
-      (fun r -> if r.rule = Some Transient then keys_of r else [])
+      (fun r ->
+        if Titles.has_rule [ Transient; Ci_failure ] r then keys_of r else [])
       results
   in
   let jobs =

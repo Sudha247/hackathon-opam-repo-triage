@@ -646,6 +646,88 @@ let cases =
             ({|note|}, {|git could not check out|});
           ];
       ] );
+    (* Failures of the CI, not of the package: a crash of day10 (60 jobs of
+       PR 28291) and of an obuilder worker, after which the job list says
+       nothing about the package. *)
+    ( {|archive-ci-crashes|},
+      {|3e46e7fdc64d91bd792acd6d282116b1fe84d312|},
+      [
+        {|--max|};
+        {|2|};
+        {|--match|};
+        {|^(day10,debian-13,x86_64,5\.5,archive\.3\.7\.2\+6,tests|extras,arm64-ocaml-5\.5,archive-lwt)|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|where|}, {|the CI|});
+            ({|failing|}, {|archive.3.7.2+6|});
+            ({|error|}, {|day10 crashed: File "bin/main.ml", line 246|});
+          ];
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|failing|}, {|archive-lwt.3.7.2+6|});
+            ({|error|}, {|/var/cache/obuilder/result-tmp/|});
+          ];
+      ] );
+    (* The build and the tests pass, then the macOS worker fails to unmount
+       its ZFS dataset (PR 31341). *)
+    ( {|fix-macos-zfs-internal-error|},
+      {|e34660db48e0d033c9090ef6bb865a58cd8f9318|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^macos,macos-homebrew-ocaml-5\.5-arm64,fix\.|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|where_kind|}, {|ci|});
+            ({|error|}, {|"zfs\" \"unmount\"|});
+          ];
+      ] );
+    (* day10 installs ocaml-compiler.5.5, then fails to download its sources
+       again (PR 29582). *)
+    ( {|ocaml-compiler-sources-again|},
+      {|fa5fb3a6a806e832e4c7791145889a6bbe8b64ef|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^day10,debian-12,ppc64,4\.14,ocaml-compiler\.5\.5$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|failing|}, {|ocaml-compiler.5.5|});
+            ({|error|}, {|again, after installing it: curl failed|});
+          ];
+      ] );
+    (* A Windows container that did not start and a day10 base image that
+       did not build (PR 31206): CI failures, not a platform pattern ("fails
+       only on Windows") nor the day10 builder's environment. *)
+    ( {|eventually-ci-infrastructure|},
+      {|9738cca01c16ebc799600fecc413c75bc55690ab|},
+      [],
+      [
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|error|}, {|The Windows container did not start|});
+          ];
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|error|}, {|base image for archlinux-latest-x86_64|});
+          ];
+        Not [ ({|rule|}, {|platform-matrix|}) ];
+        Not [ ({|rule|}, {|builder-specific|}) ];
+      ] );
   ]
 
 let fixtures =
