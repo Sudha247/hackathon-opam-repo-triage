@@ -41,10 +41,7 @@ let spaces_re = Rx.v {|\s+|}
     hashes. *)
 let normalise s =
   let s = Util.strip ~chars:"." (String.trim s) in
-  let s =
-    U.sub path_re "<path>" s
-    (* unix + windows paths *)
-  in
+  let s = U.sub path_re "<path>" s (* unix + windows paths *) in
   let s = U.sub hash_re "<hash>" s in
   (* package.version -> package   (conf-bison.2, plcairo.5.15.0.1, ocaml.4.14.4) *)
   let s = U.sub package_version_re {|\1|} s in

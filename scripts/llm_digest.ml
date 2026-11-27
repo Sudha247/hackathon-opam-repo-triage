@@ -56,10 +56,7 @@ let spaces_re = Rx.v {|\s+|}
 (** An error line without its locations and numbers. *)
 let exact line =
   let s = U.sub file_line_characters_re "" line in
-  let s =
-    U.sub path_re "<path>" s
-    (* paths *)
-  in
+  let s = U.sub path_re "<path>" s (* paths *) in
   let s = U.sub ml_mli_cpp_re "<file>" s in
   let s =
     U.sub number_re "N" s
@@ -142,10 +139,7 @@ let value_module_constructor_re =
 
 let masked line =
   let s = exact line in
-  let s =
-    mask_quoted s
-    (* quoted names, not messages *)
-  in
+  let s = mask_quoted s (* quoted names, not messages *) in
   let s = mask_paths s in
   (* (A library or package name is quoted in the errors, masked above: the word
      after "package" in a sentence is not a name.) *)
