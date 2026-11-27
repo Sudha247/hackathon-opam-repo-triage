@@ -1441,6 +1441,9 @@ let version_ints r =
 
 let these_packages_are_re = Rx.v "These packages are still missing: (.+)"
 
+let unavailable_system_package_re =
+  Rx.v {|Package (\S+) depends on the unavailable system package '([^']+)'|}
+
 let segmentation_fault_bus_re =
   Rx.v
     {|(Segmentation fault|Bus error|Illegal instruction)\s+(day10[\w-]*|obuilder[\w-]*)|}
@@ -1521,18 +1524,32 @@ let ci_crash text =
    start, a network error. *)
 let ci_failure job text (info : info) pr_packages =
   let owner = match failing_pkg job with Some o -> o | None -> "" in
+  let dims = job_dims job in
+  let plat =
+    match dims.distro with
+    | Some d when d <> "" -> d
+    | _ -> if dims.os = "linux" then "debian-13" else dims.os
+  in
+  let missing_system_package_fields () =
+    [
+      `New
+        (Some
+           (Printf.sprintf
+              {|x-ci-accept-failures: ["%s"]   (or correct the depext names for %s)|}
+              plat plat));
+      `Confidence "medium";
+      `Note
+        "Either the depext name is wrong for this distribution, the package \
+         needs an extra repository (EPEL, CRB, ports), or it does not exist \
+         there.";
+    ]
+  in
   Util.first_some
     [
       (fun () ->
         match Rx.search these_packages_are_re text with
         | Some m when info.failing = None ->
             let names = Util.split (Rx.group m 1) in
-            let dims = job_dims job in
-            let plat =
-              match dims.distro with
-              | Some d when d <> "" -> d
-              | _ -> if dims.os = "linux" then "debian-13" else dims.os
-            in
             let is_conf =
               String.starts_with ~prefix:"conf-" (fst (split_pkg owner))
             in
@@ -1547,18 +1564,49 @@ let ci_failure job text (info : info) pr_packages =
                   `Error
                     (Printf.sprintf "System packages not available on %s: %s"
                        plat (String.concat ", " names));
-                  `New
-                    (Some
-                       (Printf.sprintf
-                          {|x-ci-accept-failures: ["%s"]   (or correct the depext names for %s)|}
-                          plat plat));
-                  `Confidence "medium";
-                  `Note
-                    "Either the depext name is wrong for this distribution, \
-                     the package needs an extra repository (EPEL, CRB, ports), \
-                     or it does not exist there.";
-                ])
+                ]
+              @ missing_system_package_fields ())
         | _ -> None);
+      (fun () ->
+        (* day10 names the package whose depexts are missing. *)
+        match Rx.finditer unavailable_system_package_re text with
+        | [] -> None
+        | m :: _ as ms ->
+            let pkg = Rx.group m 1 in
+            let names =
+              Util.dedup
+                (List.filter_map
+                   (fun m ->
+                     if Rx.group m 1 = pkg then Some (Rx.group m 2) else None)
+                   ms)
+            in
+            let where =
+              if dims.arch = "" || dims.arch = "x86_64" then plat
+              else plat ^ " " ^ dims.arch
+            in
+            Some
+              ([ `Rule Rule.Missing_system_package; `Failing (Some pkg) ]
+              @ Where.pr_or_other pkg (List.mem pkg pr_packages)
+              @ [
+                  `Error
+                    (Printf.sprintf
+                       "System packages not available on %s: %s (depexts of %s)"
+                       where (String.concat ", " names) pkg);
+                ]
+              @ missing_system_package_fields ()
+              @
+              if where = plat then []
+              else
+                [
+                  `Note
+                    (Printf.sprintf
+                       "Either the depext name is wrong for this distribution, \
+                        the package needs an extra repository (EPEL, CRB, \
+                        ports), or it does not exist there. If it exists only \
+                        on some architectures (not %s), filter the depext and \
+                        `available` on `arch` instead."
+                       dims.arch);
+                ]));
       (fun () ->
         match ci_crash text with
         | Some (error, what) ->

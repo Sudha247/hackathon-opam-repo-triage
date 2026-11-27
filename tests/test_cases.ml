@@ -728,6 +728,57 @@ let cases =
         Not [ ({|rule|}, {|platform-matrix|}) ];
         Not [ ({|rule|}, {|builder-specific|}) ];
       ] );
+    (* day10 names the package whose depext is not available: a typo in this
+       PR's depexts ('plpot', PR 30297), a dependency's (conf-lld.1, PR
+       27642), an x86-only system package on arm64 (PR 26991). *)
+    ( {|plcairo-unavailable-depext|},
+      {|fa8b5f03906e3abc1bfaed14e7a9793575ee5f67|},
+      [
+        {|--max|}; {|1|}; {|--match|}; {|^day10,archlinux,x86_64,4\.14,plcairo|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|missing-system-package|});
+            ({|failing|}, {|plcairo.5.15.0.1|});
+            ({|where|}, {|this PR|});
+            ({|error|}, {|archlinux: plpot (depexts of plcairo.5.15.0.1)|});
+          ];
+      ] );
+    ( {|conf-rust-llvm-unavailable-depext|},
+      {|883443dcb74125770863632551853b048843182a|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^day10,alpine-3\.24,arm64,4\.14,conf-rust-llvm|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|missing-system-package|});
+            ({|failing|}, {|conf-lld.1|});
+            ({|where|}, {|conf-lld.1 (another package)|});
+            ({|error|}, {|alpine-3.24 arm64: lld|});
+          ];
+      ] );
+    ( {|conf-gcc-multilib-arm64|},
+      {|069b299224dbee131c028707bcb27bfd93962d3a|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^day10,debian-12,arm64,4\.14,conf-gcc-multilib|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|missing-system-package|});
+            ({|where|}, {|this PR|});
+            ({|error|}, {|debian-12 arm64: gcc-multilib|});
+            ({|note|}, {|filter the depext and `available` on `arch`|});
+          ];
+      ] );
   ]
 
 let fixtures =
