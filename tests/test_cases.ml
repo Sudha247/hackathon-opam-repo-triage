@@ -162,11 +162,14 @@ let cases =
        --llm call recorded on 2026-11-26; offline, a missing answer is a
        cache miss, never an API call). The answer puts the fix in another
        package: the place names it. Its version bound is text to check, not
-       a diff. Re-recording this case calls the API (with
-       ANTHROPIC_API_KEY set) and may get another answer. *)
+       a diff. The same error in ojs_filetree.0.9.0 (on OCaml 5.5) is
+       another question, not asked when recording (it shared the answer about
+       0.8.0 until answers were keyed on the exact package): --llm-max 0 uses
+       the cached answers only. Re-recording this case calls the API (with
+       ANTHROPIC_API_KEY set, and --llm-max 2) and may get other answers. *)
     ( {|websocket-bound-llm|},
       {|f290556e5d03adbda8dc847188358e06abe16436|},
-      [ {|--max|}; {|6|}; {|--llm|}; {|--llm-max|}; {|1|} ],
+      [ {|--max|}; {|6|}; {|--llm|}; {|--llm-max|}; {|0|} ],
       [
         Has
           [
@@ -176,6 +179,7 @@ let cases =
             ({|where_pkg|}, {|ojs_filetree.0.8.0|});
           ];
         Not [ ({|rule|}, {|llm|}); ({|new|}, {|js_of_ocaml|}) ];
+        Not [ ({|rule|}, {|llm|}); ({|failing|}, {|ojs_filetree.0.9.0|}) ];
       ] );
     ( {|lambdapi-bound|},
       {|5fe799b6cebb0d22cd7b963e1103bd17aa545bae|},

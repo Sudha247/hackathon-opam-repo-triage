@@ -30,9 +30,11 @@ val apply_llm :
 val llm_todo : Suggestion.t list -> Ci.data -> Suggestion.t list
 (** The failures to ask the LLM about: those no rule explains. *)
 
-val llm_sig : Suggestion.t -> string
-(** Failures with the same signature (the same error on other platforms) share
-    one answer. *)
+val llm_sig : ?key_line:string -> Suggestion.t -> string
+(** Failures with the same signature share one answer: the same error from the
+    rules, digits aside (the same error on other platforms); without one, the
+    same failing package (exactly: not another version of it) and the same
+    [key_line] of the log, digits aside. *)
 
 (** {1 Calls} *)
 

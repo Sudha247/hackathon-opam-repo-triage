@@ -839,16 +839,16 @@ let llm_todo (results : Suggestion.t list) (data : Ci.data) =
 
 let number_re = Rx.v {|\d+|}
 
-let llm_sig (r : Suggestion.t) =
-  let s =
-    match r.error with
-    | Some e when e <> "" -> e
-    | _ -> (
-        match Suggestion.get r.Suggestion.failing with
+let llm_sig ?key_line (r : Suggestion.t) =
+  let normalised s = Util.prefix_chars (Rx.sub number_re "N" s) 120 in
+  match r.error with
+  | Some e when e <> "" -> normalised e
+  | _ ->
+      (match Suggestion.get r.Suggestion.failing with
         | Some f when f <> "" -> f
         | _ -> Suggestion.str r.Suggestion.variant)
-  in
-  Util.prefix_chars (Rx.sub number_re "N" s) 120
+      ^ "\n"
+      ^ normalised (Option.value ~default:"" key_line)
 
 (* The name of an exception's constructor, without its module path (the
    name of the error's class in the stored answers). *)
@@ -864,20 +864,49 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
     pr_packages limit model dry_run =
   let job_of v = List.find (fun (j : Ci.job) -> j.variant = v) data.jobs in
   let todo = llm_todo results data in
+  let texts = Hashtbl.create 16 in
+  let text_of url =
+    match Hashtbl.find_opt texts url with
+    | Some t -> t
+    | None ->
+        let t =
+          try Ok (!log_text_hook (!fetch_hook url cache_dir))
+          with e -> Error e
+        in
+        Hashtbl.replace texts url t;
+        t
+  in
+  (* Without an error from the rules, the log's key error line tells failures
+     apart (a conf package's check fails differently per distribution). *)
+  let sigs =
+    List.map
+      (fun r ->
+        let key_line =
+          if Suggestion.nonempty r.Suggestion.error then None
+          else
+            match text_of (Suggestion.str r.Suggestion.url) with
+            | Ok text -> ( try !key_error_line_hook text with _ -> None)
+            | Error _ -> None
+        in
+        (r, llm_sig ?key_line r))
+      todo
+  in
+  let sig_of r = List.assq r sigs in
   let seen = Hashtbl.create 16
   and answers = Hashtbl.create 16
   and left = Hashtbl.create 16 in
   let done_ = ref 0 and beyond = ref 0 in
   List.iter
     (fun r ->
-      let sig_ = llm_sig r in
+      let sig_ = sig_of r in
       if not (Hashtbl.mem seen sig_) then begin
         Hashtbl.replace seen sig_ ();
         let res =
           try
             let text =
-              !log_text_hook
-                (!fetch_hook (Suggestion.str r.Suggestion.url) cache_dir)
+              match text_of (Suggestion.str r.Suggestion.url) with
+              | Ok t -> t
+              | Error e -> raise e
             in
             let has_error =
               (match
@@ -947,7 +976,7 @@ let apply_llm (results : Suggestion.t list) (data : Ci.data) src cache_dir
   (* Failures with the same signature (the same error on other platforms) share the answer. *)
   List.iter
     (fun r ->
-      match Hashtbl.find_opt answers (llm_sig r) with
+      match Hashtbl.find_opt answers (sig_of r) with
       | None -> ()
       | Some ((res : Answer.t), names, log_err) ->
           (* The package to change must be one the input names: one of the

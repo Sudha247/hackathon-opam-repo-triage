@@ -277,6 +277,67 @@ let test_unanswered_counted () =
   (* two beyond the limit *);
   Alcotest.(check int) "limit 0" 3 (run_with ~jobs ~suggest:ask (mk ()) 0)
 
+let test_shared_answers () =
+  (* Failures share an answer only with the same failing package (not another
+     version of it) and the same error; without an error from the rules, the
+     log's key error line (PR 29110: conf-llvm-static.20 and .21, and
+     llvm.20-static failing in conf-llvm-static.20 on other distributions, got
+     the Alpine answer; PR 31316: a test failure on OCaml 5.2 and a build
+     failure on arm64 shared one). Digits aside: the same error on other
+     platforms. *)
+  setup ();
+  let logs =
+    [
+      ("v0", "missing: /usr/lib/llvm20/lib/libLLVMDemangle.a");
+      ("v1", "missing: /usr/lib/llvm21/lib/libLLVMDemangle.a");
+      ("v2", "missing: /usr/lib/llvm20/lib/libLLVMDemangle.a");
+      ("v3", "Got '' but required '20'");
+      ("v4", "missing: /usr/lib/llvm21/lib/libLLVMDemangle.a");
+      ("v5", "Got '' but required '20'");
+    ]
+  in
+  (Llm.fetch_hook := fun url _ -> url);
+  (Llm.key_error_line_hook := fun text -> List.assoc_opt text logs);
+  let rs =
+    List.map
+      (fun (v, failing) ->
+        let r = result ~variant:v ~error:"" ~failing [] in
+        r.url <- Some v;
+        r)
+      [
+        ("v0", "conf-llvm-static.20");
+        ("v1", "conf-llvm-static.21");
+        ("v2", "conf-llvm-static.20");
+        ("v3", "conf-llvm-static.20");
+        ("v4", "conf-llvm-static.20");
+        ("v5", "conf-llvm-static.21");
+      ]
+  in
+  let asked = ref [] in
+  let ask ?call:_ _ r _ _ _ _ _ _ _ =
+    asked := Suggestion.str r.Suggestion.variant :: !asked;
+    answer [ ("diagnosis", `String (Suggestion.str r.Suggestion.variant)) ]
+  in
+  let jobs = List.map (fun (v, _) -> job ~variant:v ()) logs in
+  ignore (run_with ~jobs ~suggest:ask rs 10);
+  Alcotest.(check (list string))
+    "asked" [ "v0"; "v1"; "v3"; "v5" ] (List.rev !asked);
+  Alcotest.(check (list string))
+    "answers"
+    [ "v0"; "v1"; "v0"; "v3"; "v0"; "v5" ]
+    (List.map (fun r -> Suggestion.str r.Suggestion.error) rs);
+  (* An error from the rules: shared by every failure with that error. *)
+  setup ();
+  asked := [];
+  let rs =
+    List.map
+      (fun (v, failing) ->
+        result ~variant:v ~error:"Unbound value f" ~failing [])
+      [ ("v0", "a.1"); ("v1", "a.2"); ("v2", "b.1") ]
+  in
+  ignore (run_with ~jobs ~suggest:ask rs 10);
+  Alcotest.(check (list string)) "asked" [ "v0" ] (List.rev !asked)
+
 let test_package_checked () =
   setup ();
   (* A package the input does not name: dropped, with the claim of where the fix goes. *)
@@ -729,6 +790,7 @@ let () =
           Alcotest.test_case "answer_round_trip" `Quick test_answer_round_trip;
           Alcotest.test_case "unanswered_counted" `Quick test_unanswered_counted;
           Alcotest.test_case "package_checked" `Quick test_package_checked;
+          Alcotest.test_case "shared_answers" `Quick test_shared_answers;
           Alcotest.test_case "errors_leave_the_failure_unrecognised" `Quick
             test_errors_leave_the_failure_unrecognised;
           Alcotest.test_case "limit_counts_api_calls_only" `Quick
