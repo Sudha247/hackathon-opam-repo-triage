@@ -135,7 +135,6 @@ let cygwin_pkg =
     ("make", "make");
     ("autoconf", "autoconf");
     ("automake", "automake");
-    ("pkg-config", "pkgconf");
     ("m4", "m4");
     ("patch", "patch");
     ("perl", "perl");
@@ -496,11 +495,27 @@ let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?run jobs
                               tool :=
                                 Rx.search program_re (Suggestion.str r.error))
                           earlier;
+                        let tool = Option.map (fun m -> Rx.group m 1) !tool in
+                        (* A cygwin depext only for a failure on Windows only
+                           (not cygwin, fedora-45 and msys2). *)
+                        let windows_only =
+                          dim = "os"
+                          || dim = "distro"
+                             && List.for_all
+                                  (fun v ->
+                                    String.starts_with ~prefix:"cygwin" v
+                                    || String.starts_with ~prefix:"msys2" v)
+                                  vals
+                        in
                         let dep =
-                          match !tool with
-                          | Some m when dim <> "arch" ->
-                              List.assoc_opt (Rx.group m 1) cygwin_pkg
+                          match tool with
+                          | Some t when windows_only ->
+                              List.assoc_opt t cygwin_pkg
                           | _ -> None
+                        in
+                        let excluded =
+                          if dim = "os" then "Windows"
+                          else String.concat "/" vals
                         in
                         match dep with
                         | Some dep
@@ -517,16 +532,31 @@ let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?run jobs
                             (* Not an opam line: the change is described in the note. *)
                             advice :=
                               Some
-                                (Printf.sprintf
-                                   "Add the missing depext%s to %s, or exclude \
-                                    %s there (`x-ci-accept-failures` or \
-                                    `available`)."
-                                   (if dim <> "arch" then
-                                      " for " ^ String.concat "/" vals
-                                    else "")
-                                   culprit
-                                   (if dim = "os" then "Windows"
-                                    else String.concat "/" vals));
+                                (match tool with
+                                | Some "pkg-config" when windows_only ->
+                                    (* #31054: conf-pkg-config.5 is installed
+                                       on cygwin, with its depext, and
+                                       conf-glib-2.1 still finds no
+                                       `pkg-config`. *)
+                                    Printf.sprintf
+                                      "On Windows, conf-pkg-config provides \
+                                       `pkgconf`, and no `pkg-config` on \
+                                       cygwin (a depext does not change that): \
+                                       %s should run `pkgconf` on Windows, as \
+                                       conf-zstd does, or exclude %s \
+                                       (`x-ci-accept-failures` or \
+                                       `available`)."
+                                      culprit excluded
+                                | _ ->
+                                    Printf.sprintf
+                                      "Add the missing depext%s to %s, or \
+                                       exclude %s there \
+                                       (`x-ci-accept-failures` or \
+                                       `available`)."
+                                      (if dim <> "arch" then
+                                         " for " ^ String.concat "/" vals
+                                       else "")
+                                      culprit excluded);
                             None)
                     | None -> (
                         match cond with

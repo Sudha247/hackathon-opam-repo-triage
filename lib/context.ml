@@ -111,6 +111,7 @@ let accepted_but_failing (results : Suggestion.t list) src sha pr_packages =
           r.old <- Absent;
           r.alternative <- None;
           r.candidates <- None;
+          r.advice <- None;
           Suggestion.update r
             (Where.fix_where Ci "the CI environment (day10 builder)"
             @ [

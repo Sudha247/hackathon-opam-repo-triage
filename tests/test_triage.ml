@@ -900,7 +900,41 @@ let test_windows_pattern () =
     "cygwin passes"
     [ "Fails only on distributions msys2: the compilation of x failed" ]
     (errors
-       [ msys2; linux; job ~category:"passed" "day10,cygwin,x86_64,5.3,x.1" ])
+       [ msys2; linux; job ~category:"passed" "day10,cygwin,x86_64,5.3,x.1" ]);
+  (* The cygwin depext of a missing tool, in the failing dependency: only for
+     a failure on Windows only; none for pkg-config, which conf-pkg-config
+     provides as `pkgconf` there (#31054: conf-glib-2.1). *)
+  let news tool distros =
+    let dep d = job ~category:"dependency" ~reason:"conf-y.1 failed:" d in
+    let earlier =
+      d
+        [
+          ("failing", s "conf-y.1");
+          ("rule", s "missing-tool");
+          ("error", s (Printf.sprintf {|"%s": command not found|} tool));
+        ]
+    in
+    List.map
+      (fun r ->
+        (Suggestion.str_field r.new_, Option.value ~default:"" r.advice))
+      (Matrix.matrix_rules
+         (linux
+         :: List.map
+              (fun d -> dep (Printf.sprintf "day10,%s,x86_64,5.3,x.1" d))
+              distros)
+         [ earlier ] None [])
+  in
+  Alcotest.(check (list string))
+    "gawk on cygwin"
+    [ {|depexts: ["gawk"] {os-distribution = "cygwin"}   (in conf-y.1)|} ]
+    (List.map fst (news "awk" [ "cygwin" ]));
+  Alcotest.(check (list string))
+    "not with fedora-45" [ "" ]
+    (List.map fst (news "awk" [ "cygwin"; "fedora-45" ]));
+  check_true "pkg-config"
+    (match news "pkg-config" [ "cygwin"; "msys2" ] with
+    | [ ("", a) ] -> Util.contains a "run `pkgconf` on Windows"
+    | _ -> false)
 
 let test_unknown_outcome () =
   (* A job the CI failed is neither a pass nor a failure: "fails only on
