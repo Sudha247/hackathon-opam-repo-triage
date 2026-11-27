@@ -904,6 +904,29 @@ let version_dune_language_re =
 let distro_version_re = Rx.v {|[-\d]|}
 let filtered_list_re = Rx.v {|\[([^\]]*)\]\s*\{([^}]*)\}|}
 
+(* The conf package of the pkg-config module [name]: conf-NAME, else, for a
+   module "libX" when conf-libX does not exist, conf-X if its newest opam file
+   checks that module (#25002: libzstd is conf-zstd's). *)
+let conf_of_pc src name deps =
+  let conf = "conf-" ^ name in
+  let stripped =
+    if String.starts_with ~prefix:"lib" name && String.length name > 3 then
+      Some ("conf-" ^ Util.drop_chars name 3)
+    else None
+  in
+  match stripped with
+  | Some alt when not (List.mem conf deps) -> (
+      match S.versions src conf with
+      | Some [] -> (
+          match S.versions src alt with
+          | Some (_ :: _ as vs) -> (
+              match S.opam_file src alt (Util.last vs) with
+              | Some text when Util.contains text ("\"" ^ name ^ "\"") -> alt
+              | _ -> conf)
+          | _ -> conf)
+      | _ -> conf)
+  | _ -> conf
+
 let package_was_found_re =
   Rx.v {|Package (\S+) was not found in the pkg-config search path|}
 
@@ -1327,7 +1350,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
         | None -> None
         | Some m ->
             let name = Rx.group m 1 in
-            let conf = "conf-" ^ name in
+            let conf = conf_of_pc src name deps in
             let r = [ `Rule Rule.Missing_pkg_config; `Error (Rx.group0 m) ] in
             Some
               (if List.mem conf deps then

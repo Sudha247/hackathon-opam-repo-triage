@@ -968,6 +968,25 @@ let cases =
           ];
         Not [ ({|rule|}, {|platform-matrix|}) ];
       ] );
+    (* llvm 16.0.6+nnp+fix-homebrew (#25002) calls `pkg-config libzstd`; on
+       centos-9, libzstd.pc is missing. There is no conf-libzstd: conf-zstd
+       checks libzstd. *)
+    ( {|llvm-libzstd-pc|},
+      {|4d9fad21a5bc93fd3b1cd19733ce12ee7f259505|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^day10,centos-9,x86_64,4\.14,llvm\.16\.0\.6\+nnp\+fix-homebrew$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|missing-pkg-config|});
+            ({|failing|}, {|llvm.16.0.6+nnp+fix-homebrew|});
+            ({|new|}, {|"conf-zstd"|});
+          ];
+      ] );
   ]
 
 let fixtures =
