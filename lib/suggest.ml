@@ -44,7 +44,9 @@ let drop_health_explained_elsewhere (notes : Context.notes) results pr_packages
     List.filter
       (fun r ->
         r.rule = Some Library_api
-        && Suggestion.is_set r.Suggestion.new_
+        && (Suggestion.is_set r.Suggestion.new_
+           (* or already bounded on master (dune's select, #26907) *)
+           || Where.where_kind r = Rerun)
         && r.dep <> None
         && not (List.mem (Suggestion.str r.dep) names))
       results

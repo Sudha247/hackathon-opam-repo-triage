@@ -1526,6 +1526,55 @@ let test_docs_not_built_expire () =
   ignore (ask "2");
   check_int "only the one without docs asked again" 3 (List.length !reqs)
 
+let test_dune_select_module () =
+  (* dune >= 3.22 reads the target of a select as a path (mopsa.1.2, #26907):
+     in the PR, the bound; dune 3.21 does not, and a name without dots is a
+     module name. *)
+  let j = job "compilers,5.5,x.1" in
+  let err =
+    [
+      {|File "analyzer/dune", lines 14-16, characters 2-204:|};
+      {|14 |   (select a.b.elinainst.ml from|};
+      {|15 |    (elina -> a.b.elinainst.real.ml)|};
+      {|16 |    (-> a.b.elinainst.dummy.ml))|};
+      {|Error: "a.b.elinainst" is an invalid|};
+      {|module name.|};
+    ]
+  in
+  let rule ?(err = err) dune =
+    Option.map Suggestion.make
+      (Rules.log_rules (src0 ()) err "mopsa"
+         (Some "depends: [\n  \"dune\" {>= \"3.7\"}\n]\n")
+         {
+           (info ~installed:[ ("dune", dune) ] ()) with
+           failing = Some ("mopsa", "1.2");
+         }
+         {
+           Rules.pr_packages = [ "mopsa.1.2" ];
+           full_text = "";
+           job_variant = j.variant;
+         }
+         j)
+  in
+  (match rule "3.24.2" with
+  | Some r ->
+      Alcotest.(check (option string))
+        "bound" (Some {|"dune" {>= "3.7" & < "3.22"}|}) (Suggestion.get r.new_);
+      check_in "dune#13175" (Suggestion.str r.note)
+  | None -> Alcotest.fail "no rule");
+  check_true "dune 3.21"
+    (match rule "3.21.0" with
+    | Some r -> r.rule <> Some Rule.Library_api
+    | None -> true);
+  check_true "a module name"
+    (match
+       rule
+         ~err:(List.map (fun l -> Util.replace l "a.b.elinainst" "a-b") err)
+         "3.24.2"
+     with
+    | Some r -> r.rule <> Some Rule.Library_api
+    | None -> true)
+
 let test_rules_do_not_assert_on_no_answer () =
   let j = job "compilers,5.3,foo.1" in
   let ctx =
@@ -3867,6 +3916,7 @@ let () =
           n "docs_not_built_expire" test_docs_not_built_expire;
           p "rules_do_not_assert_on_no_answer"
             test_rules_do_not_assert_on_no_answer;
+          p "dune_select_module" test_dune_select_module;
         ] );
       ( "ApiHistoryTest",
         [

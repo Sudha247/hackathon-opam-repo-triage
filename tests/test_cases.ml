@@ -882,7 +882,9 @@ let cases =
     (* A main-builder job that passed 245 days before the day10 failure, on
        another master commit (PR 26907: day10 2026-10-13 on 6cacf31, main
        builder 2026-02-10 on b1c846d), does not make the failure day10's: the
-       log's verdict stands (here none: mopsa's error with dune 3.24.2). *)
+       log's verdict stands: mopsa's `(select a.b.ml from ...)`, which dune
+       3.24.2 reads as a path ("a.b" is an invalid module name); mopsa.1.2 has
+       "dune" {< "3.22"} on master now: a rerun. *)
     ( {|mopsa-stale-twin|},
       {|b6229f0d14497cac47fc1ccd0ef31dd6c590ddfe|},
       [
@@ -895,7 +897,11 @@ let cases =
         Not [ ({|rule|}, {|builder-specific|}) ];
         Has
           [
-            ({|rule|}, {|unrecognised|});
+            ({|rule|}, {|library-api|});
+            ({|dep|}, {|dune|});
+            ({|where|}, {|rerun|});
+            ({|error|}, {|is an invalid module name|});
+            ({|note|}, {|"dune" {>= "3.7" & < "3.22"}|});
             ( {|jobs|},
               {|day10,debian-13,x86_64,4.14,apron.v0.9.15,revdeps,mopsa.1.2|} );
           ];

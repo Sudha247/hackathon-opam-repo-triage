@@ -1043,6 +1043,80 @@ let test_needs_other_package err full_text fname =
         ]
   | _ -> None
 
+let invalid_module_name_re =
+  Rx.v {|Error: "([\w'.]+)" is an invalid\s+(?:# )?module name|}
+
+let dune_constraint_re = Rx.v ~flags:[ Rx.M ] {|^\s*"dune"\s*\{([^}]*)\}|}
+
+(* dune 3.22.0 reads the target of [(select a.b.ml from ...)] as a path
+   relative to the module group's root (dune#13175, "Fix handling of
+   (select ..) field when used with (include_subdirs ..)" in its CHANGES):
+   "a.b" becomes the module's name, which is not valid. mopsa.1.2 (#26907)
+   builds with dune 3.21.0 and fails with 3.23.1 and 3.24.2; opam-repository
+   has since bounded it with "dune" {< "3.22"}. *)
+let dune_select_module src err fname opam_text (info : info) pr_packages =
+  let text = String.concat "\n" err in
+  match (Rx.search invalid_module_name_re text, info.failing) with
+  | Some m, Some (_, fver) when String.contains (Rx.group m 1) '.' -> (
+      let name = Rx.group m 1 in
+      let select =
+        Rx.of_re
+          (Re.seq
+             [ Rx.re {|\(select\s+|}; Re.str name; Rx.re {|\.ml\s+from\b|} ])
+      in
+      match installed_of info "dune" with
+      | Some have when Rx.test select text && opam_vcmp have "3.22" >= 0 ->
+          let bound = "3.22" in
+          let old, new_ = S.constraint_edit opam_text "dune" "<" bound in
+          let full = fname ^ "." ^ fver in
+          (* A package of opam-repository may have been bounded since. *)
+          let on_master =
+            if List.mem full pr_packages then None
+            else
+              Option.bind (S.opam_file src fname fver) (fun t ->
+                  Option.bind (Rx.search dune_constraint_re t) (fun c ->
+                      let terms = Constraints.version_terms (Rx.group c 1) in
+                      if terms <> [] && not (Constraints.allows have terms) then
+                        Some (String.trim (Rx.group0 c))
+                      else None))
+          in
+          let error =
+            Printf.sprintf
+              "dune %s reads `(select %s.ml from ...)` as a path: \"%s\" is an \
+               invalid module name"
+              have name name
+          and why =
+            Printf.sprintf
+              "Since dune 3.22.0, the target of a `select` is a path relative \
+               to the module group's root (dune#13175): the dots of `%s.ml` \
+               make its module name invalid. Upstream: a module name without \
+               dots."
+              name
+          in
+          Some
+            ([ `Rule Rule.Library_api; `Dep "dune"; `Error error ]
+            @
+            match on_master with
+            | Some line ->
+                Where.fix_where Rerun "CI (rerun)"
+                @ [
+                    `Confidence "high";
+                    `Note
+                      (Printf.sprintf
+                         "%s opam-repository's %s already has `%s`: a rerun \
+                          installs an older dune."
+                         why full line);
+                  ]
+            | None ->
+                [
+                  `Old old;
+                  `New (Some new_);
+                  `Confidence "high";
+                  `Note (why ^ " Until then, dune < 3.22 builds it, as before.");
+                ])
+      | _ -> None)
+  | _ -> None
+
 let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
   let text = String.concat "\n" err in
   let deps = direct_deps opam_text in
@@ -1055,6 +1129,8 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
   Util.first_some
     [
       (fun () -> test_timeout err job platform);
+      (fun () ->
+        dune_select_module src err fname opam_text info ctx.pr_packages);
       (fun () ->
         test_needs_other_package err
           (if ctx.full_text <> "" then ctx.full_text else text)
