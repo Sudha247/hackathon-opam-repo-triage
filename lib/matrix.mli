@@ -22,6 +22,10 @@ val twin_confidence :
     master commit or within a day (one push), "medium" within {!twin_max_days},
     [None] for an older run or one [run] cannot date. Without [run], "high". *)
 
+val builder_distro : Ci.job -> bool * string option
+(** Whether the job ran on day10 (else on the main builder), and its
+    distribution: the image it ran in. *)
+
 val per_builder : (Ci.job -> run) -> Ci.job -> run
 (** [per_builder run]: [run] read once per builder (day10 or the main one) and
     distribution: the jobs of a push run together. *)
@@ -41,6 +45,7 @@ val stale_twins :
 val matrix_rules :
   ?failing_in_log:(Ci.failure_key * string) list ->
   ?unknown:Ci.job list ->
+  ?unsure:Ci.job list ->
   ?run:(Ci.job -> run) ->
   Ci.job list ->
   Suggestion.t list ->
@@ -55,9 +60,12 @@ val matrix_rules :
     step failed in the log of each failure. [unknown]: the failed jobs left out
     of [jobs] (failures of the CI, whose outcome is not known): a platform
     pattern holds only if each of them is on the failing platforms or on a
-    platform with a real pass. [run]: when and on what a job ran (read from its
-    log, once per builder and distribution: see {!per_builder}); without it, the
-    pattern trusts any passing main-builder job (see {!twin_confidence}). *)
+    platform with a real pass. [unsure]: failed jobs of [jobs] whose log was not
+    read, on a builder and distribution where the CI's image failed other jobs:
+    unknown as well, unless a main-builder pass makes them builder-specific.
+    [run]: when and on what a job ran (read from its log, once per builder and
+    distribution: see {!per_builder}); without it, the pattern trusts any
+    passing main-builder job (see {!twin_confidence}). *)
 
 val collapse_systemic : ?threshold:int -> Suggestion.t list -> Suggestion.t list
 (** The same matrix pattern on many packages (at least [threshold], 5 by

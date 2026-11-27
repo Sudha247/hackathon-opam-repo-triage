@@ -173,11 +173,14 @@ let twin_confidence run j t =
       | _, _, Some x, Some y when abs (x - y) <= twin_max_days -> Some "medium"
       | _ -> None)
 
+(* The builder (day10 or the main one) and distribution of a job: one image. *)
+let builder_distro j = (starts_day10 j, (job_dims j).distro)
+
 (* One run per builder and distribution: the jobs of a push run together. *)
 let per_builder run =
   let memo = Hashtbl.create 8 in
   fun j ->
-    let k = (starts_day10 j, (job_dims j).distro) in
+    let k = builder_distro j in
     match Hashtbl.find_opt memo k with
     | Some r -> r
     | None ->
@@ -255,7 +258,7 @@ let unknown_covered (dim, vals) passes unknown =
       || List.exists (fun p -> plat p = plat u) passes)
     unknown
 
-let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?run jobs
+let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?(unsure = []) ?run jobs
     (earlier : Suggestion.t list) match_ pr_packages =
   let fin j = List.assoc_opt (failure_key j) failing_in_log in
   let unknown = matrix_groups unknown match_ in
@@ -403,6 +406,21 @@ let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?run jobs
           end
           else (js, fails)
         in
+        (* The failures [unsure] of: unread, on a builder and distribution
+           whose image the CI broke (#29582: ocaml-option-llvm.1's on day10's
+           fedora-45, beyond --max, made a pattern of cygwin, fedora-45 and
+           msys2). Not a failure of the package, nor a pass: unknown, as the
+           CI's failures. After the day10 twins: a pass of the main builder
+           still says the package builds there. *)
+        let doubtful = List.filter (fun j -> List.memq j unsure) fails in
+        let js, fails, group_unknown =
+          let keep j = not (List.memq j doubtful) in
+          ( List.filter keep js,
+            List.filter keep fails,
+            Option.value ~default:[]
+              (List.assoc_opt (target', revdep, kind) unknown)
+            @ doubtful )
+        in
         if
           fails <> []
           && not
@@ -460,13 +478,7 @@ let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?run jobs
           | _ -> (
               match platform_matrix js with
               | None -> ()
-              | Some p
-                when not
-                       (unknown_covered p passes
-                          (Option.value ~default:[]
-                             (List.assoc_opt (target', revdep, kind) unknown)))
-                ->
-                  ()
+              | Some p when not (unknown_covered p passes group_unknown) -> ()
               | Some (dim, vals) ->
                   let cond, what =
                     if dim = "os" then

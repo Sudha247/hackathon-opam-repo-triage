@@ -1597,7 +1597,10 @@ let runc_no_exec_re =
 
 (* A crash of the CI's tools or workers, a container or base image it could
    not start or build, sources it could not fetch again after installing
-   the package: (error, what failed) when the log shows one. *)
+   the package: (error, what failed, broken) when the log shows one; [broken]
+   when the cause is the builder's image or container for the distribution,
+   which every job there meets (fedora-45's day10 image without /usr/bin/env),
+   not this job's run. *)
 let ci_crash text =
   Util.first_some
     [
@@ -1605,13 +1608,15 @@ let ci_crash text =
         Option.map
           (fun m ->
             ( "day10 crashed: " ^ String.trim (Rx.group m 1),
-              "the day10 builder crashed (an internal error, exit code 125)" ))
+              "the day10 builder crashed (an internal error, exit code 125)",
+              false ))
           (Rx.search day10_internal_error_re text));
       (fun () ->
         Option.map
           (fun m ->
             ( "Internal error of the CI worker: " ^ String.trim (Rx.group m 1),
-              "the CI worker failed (\"Internal error\")" ))
+              "the CI worker failed (\"Internal error\")",
+              false ))
           (Rx.search worker_internal_error_re text));
       (fun () ->
         Option.map
@@ -1620,21 +1625,24 @@ let ci_crash text =
                 "The build container did not start: its image has no %s"
                 (Rx.group m 1),
               "the builder's image for this distribution is broken (a rerun \
-               fails the same way until it is rebuilt)" ))
+               fails the same way until it is rebuilt)",
+              true ))
           (Rx.search runc_no_exec_re text));
       (fun () ->
         Option.map
           (fun m ->
             ( "The Windows container did not start: "
               ^ String.trim (Rx.group m 1),
-              "the Windows container did not start" ))
+              "the Windows container did not start",
+              true ))
           (Rx.search windows_container_re text));
       (fun () ->
         Option.map
           (fun m ->
             ( "day10 could not build its base image for " ^ Rx.group m 1,
               "day10 could not build its base image (the distribution's \
-               packages, before any opam package)" ))
+               packages, before any opam package)",
+              true ))
           (Rx.search base_image_re text));
       (fun () ->
         (* day10 fetches the sources again after the build: a failure then
@@ -1649,7 +1657,8 @@ let ci_crash text =
                     pkg
                     (String.trim (Rx.group m 2)),
                   "the CI could not download the sources a second time, after \
-                   the package built and installed" )
+                   the package built and installed",
+                  false )
             else None)
           (Rx.finditer sources_again_re text));
     ]
@@ -1782,14 +1791,16 @@ let ci_failure job text (info : info) pr_packages =
         match
           match ci_crash text with
           | Some c -> Some c
-          | None -> day10_rebuild job text
+          | None ->
+              Option.map (fun (e, w) -> (e, w, false)) (day10_rebuild job text)
         with
-        | Some (error, what) ->
+        | Some (error, what, broken) ->
             Some
               ([
                  `Rule Rule.Ci_failure;
                  `Failing (if owner = "" then None else Some owner);
                ]
+              @ (if broken then [ `Broken_platform ] else [])
               @ Where.fix_where Ci "the CI environment"
               @ [
                   `Error error;

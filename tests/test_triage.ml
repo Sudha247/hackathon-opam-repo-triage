@@ -960,6 +960,73 @@ let test_unknown_outcome () =
   check_strs "on Windows" [ "platform-matrix" ]
     (rules ~unknown:[ job "day10,msys2,x86_64,5.5,x.1" ] jobs)
 
+let test_unread_on_a_broken_image () =
+  (* #29582: day10's fedora-45 image has no /usr/bin/env, and the log of one
+     job there says so; ocaml-option-llvm.1's own failure on fedora-45 is
+     beyond --max. Its cygwin failure is then no pattern of "cygwin,
+     fedora-45": fedora-45's outcome is not known. *)
+  let y = job ~category:"dependency" ~reason:"compiler-cloning.enabled failed:"
+  and fedora_x =
+    job ~category:"dependency" ~reason:"base-threads.base failed:"
+      "day10,fedora-45,x86_64,5.5,x.1"
+  in
+  let jobs =
+    [
+      y "day10,fedora-45,x86_64,5.5,y.1";
+      y "day10,fedora-45,arm64,5.5,y.1";
+      job ~category:"passed" "day10,debian-13,x86_64,5.5,y.1";
+      job "day10,cygwin,x86_64,5.5,x.1";
+      job ~category:"passed" "day10,debian-13,x86_64,5.5,x.1";
+      fedora_x;
+    ]
+  in
+  let image =
+    {|runc run failed: unable to start container process: exec: "/usr/bin/env": stat /usr/bin/env: no such file or directory|}
+  in
+  let rules ?(max = 1) jobs =
+    let fetch = !Suggest.fetch_hook in
+    (Suggest.fetch_hook :=
+       fun url _ -> if Util.contains url "y.1" then image else "failed");
+    Net.offline_ref := true;
+    Fun.protect
+      ~finally:(fun () -> Suggest.fetch_hook := fetch)
+      (fun () ->
+        List.map
+          (fun r ->
+            ( Option.fold ~none:"" ~some:Rule.to_string r.rule,
+              Suggestion.str r.error ))
+          (Suggest.suggest (String.make 40 '0') (data jobs)
+             (Sources.create (tmpdir ()))
+             (tmpdir ()) max None None))
+  in
+  let patterns ?max jobs =
+    List.filter_map
+      (fun (rule, error) ->
+        if rule = "platform-matrix" then Some error else None)
+      (rules ?max jobs)
+  in
+  check_true "the image"
+    (List.mem
+       ( "ci-failure",
+         "The build container did not start: its image has no /usr/bin/env" )
+       (rules jobs));
+  check_strs "fedora-45 unknown" [] (patterns jobs);
+  (* Not on the main builder: its fedora-45 image is another one (its job
+     sorts first: two logs read, y's and this one's). *)
+  check_strs "main builder"
+    [
+      "Fails only on distributions cygwin, fedora-45: the compilation of x \
+       failed";
+    ]
+    (patterns ~max:2
+       (List.map
+          (fun j ->
+            if j == fedora_x then
+              job ~category:"dependency" ~reason:"base-threads.base failed:"
+                "distributions,fedora-45-ocaml-5.5,x.1"
+            else j)
+          jobs))
+
 let test_pattern_after_a_change_from_the_log () =
   (* liquidsoap 2.4.6 (#30906): its tests fail on OCaml 5 with [Library
      "bytes" not found]; the log gives base-bytes, so no workaround from the
@@ -3721,6 +3788,7 @@ let () =
           p "builder_specific_twin_age" test_builder_specific_twin_age;
           p "windows_pattern" test_windows_pattern;
           p "unknown_outcome" test_unknown_outcome;
+          p "unread_on_a_broken_image" test_unread_on_a_broken_image;
           p "pattern_after_a_change_from_the_log"
             test_pattern_after_a_change_from_the_log;
           p "unanalysed_count" test_unanalysed_count;

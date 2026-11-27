@@ -85,6 +85,7 @@ module T = struct
     mutable check : (string * string) option;
     mutable installed : (string * string) list option;
     mutable unexplained : bool;
+    mutable broken_platform : bool;
     mutable placed : bool;
   }
 end
@@ -175,6 +176,7 @@ let create () =
     installed = None;
     install = None;
     unexplained = false;
+    broken_platform = false;
     placed = false;
   }
 
@@ -234,7 +236,8 @@ type set =
   | `Depexts of (string list * string) list
   | `Check of string * string
   | `Installed of (string * string) list
-  | `Unexplained ]
+  | `Unexplained
+  | `Broken_platform ]
 
 let set r (x : set) =
   match x with
@@ -289,6 +292,7 @@ let set r (x : set) =
   | `Check (a, b) -> r.check <- Some (a, b)
   | `Installed v -> r.installed <- Some v
   | `Unexplained -> r.unexplained <- true
+  | `Broken_platform -> r.broken_platform <- true
 
 let update r l = List.iter (set r) l
 

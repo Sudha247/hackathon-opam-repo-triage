@@ -147,6 +147,9 @@ module T : sig
         (** the versions the failing job installed *)
     mutable unexplained : bool;
         (** no rule explains the failure: the LLM may be asked *)
+    mutable broken_platform : bool;
+        (** a failure of the CI that every job of its builder and distribution
+            has (a broken image: see ci_failure in rules.ml) *)
     mutable placed : bool;
         (** the review placed it on a line of the PR's diff *)
   }
@@ -273,7 +276,8 @@ type set =
   | `Depexts of (string list * string) list
   | `Check of string * string
   | `Installed of (string * string) list
-  | `Unexplained ]
+  | `Unexplained
+  | `Broken_platform ]
 (** One member to set, as the rules list them. An optional string sets a member
     that can be null ([None]: null). *)
 

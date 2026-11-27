@@ -229,10 +229,32 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
         && (List.mem (failure_key j) transient || List.mem j.variant ci_jobs))
       data.jobs
   in
+  (* A broken image fails every job of its builder and distribution: the
+     failures there whose log was not read may be the same (#29582: the
+     fedora-45 image of day10). *)
+  let broken =
+    List.concat_map
+      (fun r ->
+        if r.Suggestion.broken_platform then
+          List.filter_map
+            (fun v ->
+              Option.map Matrix.builder_distro
+                (Hashtbl.find_opt jobs_by_variant v))
+            (Checks.jobs_or_variant r)
+        else [])
+      ci
+  in
+  let unsure =
+    List.filter
+      (fun j ->
+        let ((_, distro) as k) = Matrix.builder_distro j in
+        distro <> None && List.mem k broken)
+      (List.concat dropped)
+  in
   let matrix =
     Matrix.collapse_systemic
-      (Matrix.matrix_rules ~failing_in_log ~unknown ~run jobs results match_
-         pr_packages)
+      (Matrix.matrix_rules ~failing_in_log ~unknown ~unsure ~run jobs results
+         match_ pr_packages)
   in
   (* A matrix suggestion explains the per-job failures that had no rule. *)
   let explained = List.concat_map (fun m -> m.Suggestion.keys) matrix in
@@ -325,7 +347,8 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
       r.distros <- [];
       r.keep <- false;
       r.depexts <- None;
-      r.check <- None)
+      r.check <- None;
+      r.broken_platform <- false)
     results;
   (match llm with
   | Some l when data.unfinished > 0 && not l.dry_run ->
