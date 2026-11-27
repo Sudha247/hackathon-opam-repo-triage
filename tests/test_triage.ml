@@ -1027,6 +1027,69 @@ let test_unread_on_a_broken_image () =
             else j)
           jobs))
 
+let test_compiler_option () =
+  (* A job that fails only on a compiler-option variant and passes on the
+     plain compiler of that version (#31312: nx on no-flat-float-array;
+     #31318: hegel on flambda). *)
+  let t v = job ~category:"build-or-test" (v ^ ",x.1,tests") in
+  let plain = job ~category:"passed" "compilers,5.5,x.1,tests" in
+  let rules ?(earlier = []) js =
+    List.filter_map
+      (fun r ->
+        if r.rule = Some Rule.Compiler_option then
+          Some
+            ( Suggestion.str_field r.new_,
+              Option.value ~default:"" r.alternative,
+              Where_kind.to_string (Where.where_kind r),
+              List.length r.keys )
+        else None)
+      (Matrix.matrix_rules js earlier None [ "x.1" ])
+  in
+  let no_flat = t "extras,ocaml-5.5-no-flat-float-array" in
+  Alcotest.(check (list (pair string string)))
+    "no-flat-float-array"
+    [ ({|conflicts: ["ocaml-option-no-flat-float-array"]|}, "pr") ]
+    (List.map (fun (n, _, w, _) -> (n, w)) (rules [ plain; no_flat ]));
+  check_int "its failure" 1
+    (List.length
+       (List.filter (fun (_, _, _, k) -> k = 1) (rules [ plain; no_flat ])));
+  (* The same CI reason on riscv64: the failure is not the option's alone. *)
+  check_int "shared failure" 0
+    (match rules [ plain; no_flat; t "extras,riscv64-ocaml-5.5" ] with
+    | [ (_, _, _, k) ] -> k
+    | _ -> -1);
+  check_int "no plain pass" 0
+    (List.length
+       (rules [ no_flat; job ~category:"passed" "extras,arm64-ocaml-5.5,x.1" ]));
+  Alcotest.(check (list (pair string string)))
+    "flambda: upstream"
+    [
+      ( {|conflicts: ["ocaml-option-flambda"]   (only hides it: prefer the upstream fix)|},
+        "upstream" );
+    ]
+    (List.map
+       (fun (_, a, w, _) -> (a, w))
+       (rules [ plain; t "extras,ocaml-5.5-flambda" ]));
+  (* A rule explained the log (alcobar: flambda's stack overflow). *)
+  let flambda = t "extras,ocaml-5.5-flambda" in
+  let earlier = d [ ("failing", s "x.1"); ("rule", s "test-platform") ] in
+  earlier.key <- Some (failure_key flambda);
+  check_int "explained by the log" 0
+    (List.length (rules ~earlier:[ earlier ] [ plain; flambda ]));
+  (* Five packages on one option stay five suggestions (each its place). *)
+  let five =
+    List.concat_map
+      (fun i ->
+        let t p v = job ~category:p (Printf.sprintf "%s,p%d.1,tests" v i) in
+        [ t "passed" "compilers,5.5"; t "build-or-test" "extras,ocaml-5.5-afl" ])
+      [ 1; 2; 3; 4; 5 ]
+  in
+  check_strs "not systemic"
+    (List.init 5 (fun _ -> "compiler-option"))
+    (List.map
+       (fun r -> Option.fold ~none:"" ~some:Rule.to_string r.rule)
+       (Matrix.collapse_systemic (Matrix.matrix_rules five [] None [])))
+
 let test_pattern_after_a_change_from_the_log () =
   (* liquidsoap 2.4.6 (#30906): its tests fail on OCaml 5 with [Library
      "bytes" not found]; the log gives base-bytes, so no workaround from the
@@ -3789,6 +3852,7 @@ let () =
           p "windows_pattern" test_windows_pattern;
           p "unknown_outcome" test_unknown_outcome;
           p "unread_on_a_broken_image" test_unread_on_a_broken_image;
+          p "compiler_option" test_compiler_option;
           p "pattern_after_a_change_from_the_log"
             test_pattern_after_a_change_from_the_log;
           p "unanalysed_count" test_unanalysed_count;

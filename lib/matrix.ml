@@ -258,6 +258,56 @@ let unknown_covered (dim, vals) passes unknown =
       || List.exists (fun p -> plat p = plat u) passes)
     unknown
 
+(* The compiler options of the CI's extras variants ([extras,ocaml-5.5-flambda]),
+   the opam packages that select them (ocaml-option-NAME), and why a package
+   fails with one: [`Unsupported] what it does not support, declared with a
+   conflict on the option's package (owl 1.3 for no-flat-float-array,
+   #31274); [`Upstream] what changes code that works otherwise (optimisation,
+   instrumentation), for upstream to fix. *)
+let compiler_options =
+  let no_flat =
+    `Unsupported
+      "Without flat float arrays, code that reads a float array as an array of \
+       doubles (C stubs, Obj.magic) breaks."
+  and nnp =
+    `Unsupported
+      "Without naked pointers, code that stores pointers outside the OCaml \
+       heap in OCaml values breaks."
+  and flambda =
+    `Upstream
+      "Only flambda fails: its optimisations change what code relying on \
+       unspecified behaviour sees (the physical equality `==` of immutable \
+       values, their sharing, the evaluation order), or make deep recursion \
+       use more stack."
+  and slower what =
+    `Upstream
+      (Printf.sprintf
+         "It fails only with %s: the same code runs slower there, and tests \
+          that depend on time or speed fail."
+         what)
+  in
+  [
+    ("no-flat-float-array", ([ "ocaml-option-no-flat-float-array" ], no_flat));
+    ("flambda", ([ "ocaml-option-flambda" ], flambda));
+    ("flambda-fp", ([ "ocaml-option-flambda"; "ocaml-option-fp" ], flambda));
+    ("fp", ([ "ocaml-option-fp" ], slower "frame pointers (fp)"));
+    ("afl", ([ "ocaml-option-afl" ], slower "afl's instrumentation"));
+    ("nnp", ([ "ocaml-option-nnp" ], nnp));
+    ("nnpchecker", ([ "ocaml-option-nnpchecker" ], nnp));
+  ]
+
+let option_variant_re = Rx.v {|^ocaml-(\d+\.\d+)-([a-z-]+)$|}
+
+(* The OCaml version and option of a job on a compiler-option variant. *)
+let compiler_option j =
+  match j.platform with
+  | [ "extras"; e ] -> (
+      match Rx.match_ option_variant_re e with
+      | Some m when List.mem_assoc (Rx.group m 2) compiler_options ->
+          Some (Rx.group m 1, Rx.group m 2)
+      | _ -> None)
+  | _ -> None
+
 let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?(unsure = []) ?run jobs
     (earlier : Suggestion.t list) match_ pr_packages =
   let fin j = List.assoc_opt (failure_key j) failing_in_log in
@@ -422,6 +472,112 @@ let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?(unsure = []) ?run jobs
             Option.value ~default:[]
               (List.assoc_opt (target', revdep, kind) unknown)
             @ doubtful )
+        in
+        (* A failure on a compiler-option variant (extras,ocaml-5.5-flambda)
+           when the same job passes on the plain compiler of that version
+           (compilers,5.5: the same builder and image): the option breaks
+           it. Not when a rule explained the failure from its log (flambda's
+           stack overflow, a timeout: the job of the log may be another of
+           its failure's), and the failure is the option's only when all
+           its failed jobs are on such variants (#31312: nx's tests are
+           killed by SIGSEGV on no-flat-float-array, and fail differently on
+           ppc64, riscv64 and FreeBSD under the same CI reason). *)
+        let explained_in_log j =
+          List.exists
+            (fun r -> r.Suggestion.rule <> None && r.key = Some (failure_key j))
+            earlier
+        in
+        let option_fails =
+          List.filter_map
+            (fun j ->
+              match compiler_option j with
+              | Some (v, opt)
+                when (not (explained_in_log j))
+                     && List.exists
+                          (fun p -> p.platform = [ "compilers"; v ])
+                          (real_passes js) ->
+                  Some (opt, (v, j))
+              | _ -> None)
+            fails
+        in
+        List.iter
+          (fun (opt, vjs) ->
+            let ojs = List.map (fun (_, (_, j)) -> j) vjs
+            and v = fst (snd (List.hd vjs)) in
+            let keys =
+              List.filter
+                (fun k ->
+                  List.for_all
+                    (fun j ->
+                      failure_key j <> k
+                      || List.exists (fun (_, (_, o)) -> o == j) option_fails)
+                    fails)
+                (Util.dedup (keys_of ojs))
+            in
+            let packages, why = List.assoc opt compiler_options in
+            let conflicts =
+              Printf.sprintf "conflicts: [%s]"
+                (String.concat " "
+                   (List.map (fun p -> "\"" ^ p ^ "\"") packages))
+              ^ match culprit with Some c -> "   (in " ^ c ^ ")" | None -> ""
+            in
+            let r =
+              Suggestion.make
+                ([ `Variant label; `Failing (Some owner) ]
+                @ (match why with
+                  | `Upstream _ ->
+                      Where.fix_where Upstream "upstream (the package's source)"
+                  | `Unsupported _ -> where)
+                @ [
+                    `Rule Rule.Compiler_option;
+                    `Error
+                      (Printf.sprintf
+                         "%s only with OCaml %s built with %s (%s), %s on the \
+                          plain OCaml %s%s"
+                         (if tests_only then "Tests fail" else "Fails")
+                         v opt
+                         (String.concat ", " packages)
+                         (if tests_only then "pass" else "passes")
+                         v
+                         (match culprit with
+                         | Some c -> "; the failure is in the dependency " ^ c
+                         | None -> ""));
+                    `Confidence "medium";
+                    `Keys keys;
+                    `Jobs (variants ojs);
+                  ]
+                @
+                match why with
+                | `Upstream w ->
+                    [
+                      `Alternative
+                        (conflicts
+                       ^ "   (only hides it: prefer the upstream fix)");
+                      `Note
+                        (w
+                       ^ " The fix is upstream; the conflict with the option's \
+                          package in the alternative only hides it.");
+                    ]
+                | `Unsupported w ->
+                    [
+                      `Old None;
+                      `New (Some conflicts);
+                      `Note
+                        (w
+                        ^ Printf.sprintf
+                            " If the package cannot support OCaml built with \
+                             %s, declare the conflict with the option's \
+                             package, as owl 1.3 does for no-flat-float-array; \
+                             otherwise fix it upstream."
+                            opt);
+                    ])
+            in
+            out := r :: !out)
+          (Util.group_by fst option_fails);
+        let js, fails =
+          let gone j = List.exists (fun (_, (_, o)) -> o == j) option_fails in
+          ( List.filter (fun j -> not (gone j)) js,
+            List.filter (fun j -> not (gone j)) fails )
         in
         if
           fails <> []
@@ -688,7 +844,9 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
   in
   List.concat_map
     (fun ((rule, pattern, _), rs) ->
-      if List.length rs < threshold then rs
+      (* Not compiler-option: the option's package and where the fix goes
+         (upstream or the package) are each package's. *)
+      if List.length rs < threshold || rule = Some Rule.Compiler_option then rs
       else begin
         let names =
           sorted_strings

@@ -51,6 +51,7 @@ type t =
   | Ci_failure
   | Test_timeout
   | Test_needs_other_package
+  | Compiler_option
   | Other of string
 
 let names =
@@ -105,6 +106,7 @@ let names =
     (Ci_failure, "ci-failure");
     (Test_timeout, "test-timeout");
     (Test_needs_other_package, "test-needs-other-package");
+    (Compiler_option, "compiler-option");
   ]
 
 let to_string = function Other s -> s | r -> List.assoc r names

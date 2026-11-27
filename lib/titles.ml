@@ -50,6 +50,7 @@ let rule_title : Rule.t -> string option = function
   | Ci_failure -> Some "CI failure, not the package"
   | Test_timeout -> Some "Test timed out"
   | Test_needs_other_package -> Some "Tests need another package's targets"
+  | Compiler_option -> Some "Fails only with a compiler option"
   | Transient | Previous_release_bound | Other _ -> None
 
 let packages_re = Rx.v {|(\d+) packages \[|}

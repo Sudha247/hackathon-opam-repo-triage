@@ -1034,6 +1034,28 @@ let cases =
           ];
         Not [ ({|note|}, {|the CI did not install it|}) ];
       ] );
+    (* hegel.0.28.0's tests fail only on the flambda variant ("FAIL an equal
+       atom is not raw") and pass on the plain OCaml 5.5 (PR 31318): code
+       relying on what flambda optimises, for upstream to fix. *)
+    ( {|hegel-flambda|},
+      {|6ee5d38ebdf5e75702bfcbc10ca7cfa90f741381|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^(compilers,5\.5|extras,ocaml-5\.5-flambda),hegel\.0\.28\.0,tests$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|compiler-option|});
+            ({|failing|}, {|hegel.0.28.0|});
+            ({|where|}, {|upstream|});
+            ({|error|}, {|only with OCaml 5.5 built with flambda|});
+            ({|alternative|}, {|conflicts: ["ocaml-option-flambda"]|});
+          ];
+        Not [ ({|rule|}, {|unrecognised|}) ];
+      ] );
   ]
 
 let fixtures =
