@@ -1,4 +1,5 @@
-(* Tests of the scripts: the digest of the LLM answers (scripts/llm_digest.ml). *)
+(* Tests of the scripts: the digest of the LLM answers (scripts/llm_digest.ml),
+   the accuracy report (scripts/accuracy_report.ml). *)
 
 open Triage
 
@@ -217,6 +218,83 @@ let test_page_data_round_trip () =
   in
   same "state" state (P.State.to_json (P.State.of_json state))
 
+(* accuracy-report on an evaluation, after [prev] (the history's latest):
+   its exit code, its report, and the lines of history.jsonl. *)
+let accuracy_report ~prev cur =
+  let dir = Filename.temp_dir "test-accuracy" "" in
+  let write f v =
+    Out_channel.with_open_bin (Filename.concat dir f) (fun oc ->
+        output_string oc (Json.dumps v))
+  in
+  write "latest.json" prev;
+  Out_channel.with_open_bin (Filename.concat dir "history.jsonl") (fun oc ->
+      output_string oc
+        "{\"date\": \"2026-11-23\", \"prs\": 1, \"hit\": 2, \"scored\": 2}\n");
+  write "cur.json" cur;
+  let out =
+    Proc.run
+      [
+        Filename.concat
+          (Filename.dirname Sys.executable_name)
+          "../scripts/bin/accuracy_report.exe";
+        Filename.concat dir "cur.json";
+        "--history";
+        dir;
+      ]
+  in
+  let history =
+    List.map Json.parse
+      (Util.splitlines
+         (In_channel.with_open_bin
+            (Filename.concat dir "history.jsonl")
+            In_channel.input_all))
+  in
+  (out.code, out.stdout, history)
+
+let test_accuracy_scoring_break () =
+  (* A run scored the new way after one scored the old way (27 November 2026:
+     the review bot's changes, new archives, alternatives): not compared, no
+     failure on the precision drop nor on the lost hit; the history stays one
+     JSON object per line. *)
+  let row hit =
+    Json.parse
+      (Printf.sprintf
+         {|{"pr": 1, "initial": "a", "suggestions": [{"package": "p.1", "rule": "r", "hit": %b, "tokens": ["dep:x"]}]}|}
+         hit)
+  in
+  let eval totals hit =
+    `Assoc [ ("totals", Json.parse totals); ("prs", `List [ row hit ]) ]
+  in
+  let prev =
+    eval
+      {|{"hit": 2, "scored": 2, "fix_covered": 1, "fix_tokens": 2, "health_hit": 0, "health_scored": 0}|}
+      true
+  in
+  let cur =
+    eval
+      {|{"scoring": 3, "hit": 0, "scored": 6, "fix_covered": 0, "fix_tokens": 2, "health_hit": 0, "health_scored": 0}|}
+      false
+  in
+  let code, report, history = accuracy_report ~prev cur in
+  Alcotest.(check int) ("exit code: " ^ report) 0 code;
+  Alcotest.(check bool)
+    "break said" true
+    (Util.contains report "scored differently (scoring 2, this run 3");
+  Alcotest.(check (list int))
+    "history" [ 2; 0 ]
+    (List.map (fun h -> Json.to_int (Json.member "hit" h)) history);
+  Alcotest.(check bool)
+    "scoring recorded" true
+    (Json.member "scoring" (List.nth history 1) = `Int 3);
+  (* Two runs scored the same way: the regression fails the check. *)
+  let prev =
+    eval
+      {|{"scoring": 3, "hit": 2, "scored": 2, "fix_covered": 1, "fix_tokens": 2}|}
+      true
+  in
+  let code, report, _ = accuracy_report ~prev cur in
+  Alcotest.(check int) ("exit code: " ^ report) 1 code
+
 let () =
   Alcotest.run "scripts"
     [
@@ -228,4 +306,8 @@ let () =
         ] );
       ( "page_data",
         [ Alcotest.test_case "round trip" `Quick test_page_data_round_trip ] );
+      ( "accuracy_report",
+        [
+          Alcotest.test_case "scoring break" `Quick test_accuracy_scoring_break;
+        ] );
     ]

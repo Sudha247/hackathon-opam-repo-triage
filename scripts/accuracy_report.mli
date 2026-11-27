@@ -18,7 +18,9 @@
 
     Exits with status 1 on a regression, or when precision drops by --max-drop
     points or more (with at least --min-scored suggestions), so that a scheduled
-    job fails and GitHub notifies. *)
+    job fails and GitHub notifies. Not when the two runs were scored differently
+    (the "scoring" of the totals, since 27 November 2026): the report says that
+    they are not comparable. *)
 
 val main : unit -> unit
 (** Run [accuracy-report] with the command line's arguments. *)

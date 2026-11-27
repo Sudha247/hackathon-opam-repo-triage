@@ -184,6 +184,35 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
            else "none")
         ^ " |";
       ];
+  (* The scoring of evaluate_closed_prs: "scoring" in the totals since 27
+     November 2026 (3); before, 2 with the opam-health-check totals (20
+     November 2026), else 1. *)
+  let scoring t =
+    match List.assoc_opt "scoring" t.members with
+    | Some (`Int n) -> n
+    | _ -> if has_health t then 2 else 1
+  in
+  (* A break in the series since the scoring of 27 November 2026: the totals,
+     and the hits of a PR, are not compared. *)
+  let break =
+    match pt with
+    | Some pt -> scoring pt <> scoring t && max (scoring pt) (scoring t) >= 3
+    | None -> false
+  in
+  if break then
+    add
+      [
+        "";
+        Printf.sprintf
+          "The previous run was scored differently (scoring %d, this run %d; \
+           since 27 November 2026 the review bot's x-maintenance-intent and \
+           description changes are not fixes, packages with a new archive are \
+           not scored, and alternatives and fixes placed in another package of \
+           the PR are): the totals are not comparable, and no check fails on \
+           them."
+          (match pt with Some pt -> scoring pt | None -> 0)
+          (scoring t);
+      ];
   if prev <> None && has_health t && not prev_has_health then
     (* evaluate_closed_prs changed on 2026-11-20: each file of the PR compared
        between its two versions (rebased PRs), new archives and
@@ -236,7 +265,13 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
           [
             "Suggestions that now match the author's fix: " ^ show !gained ^ ".";
           ];
-      if !lost <> [] then begin
+      if !lost <> [] && break then
+        add
+          [
+            "Suggestions that matched the author's fix and no longer do (not \
+             compared: the scoring changed): " ^ show !lost ^ ".";
+          ]
+      else if !lost <> [] then begin
         add
           [
             "**Regressions**, suggestions that matched the author's fix and no \
@@ -251,7 +286,8 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
       end;
       match (p, pp) with
       | Some p', Some pp'
-        when Option.value ~default:0 t.scored >= min_scored
+        when (not break)
+             && Option.value ~default:0 t.scored >= min_scored
              && pp' -. p' >= max_drop ->
           failed :=
             !failed

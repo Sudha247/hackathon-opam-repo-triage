@@ -434,6 +434,16 @@ On 200 PRs merged since 2026-08-01 (16 evaluable, rules only, no LLM): 13 of
 of 4 cases), and 13 of the 41 changes authors made in failing packages were
 anticipated.
 
+What counts (the scoring, version 3 since 27 November 2026, recorded in the
+totals): a suggested change (`new`, candidates or an `alternative`) placed in
+this PR, or in another package the PR changes, against the author's changes
+in that package (each version of a merged entry "a.1, a.2"); not the
+`x-maintenance-intent` and `description` changes (the review bot asks for
+the former); not the packages that got a new upstream archive (a new
+checksum or `x-commit-hash`: the fix came upstream). `accuracy-report` does
+not compare the totals of runs scored differently (the series has a break on
+27 November 2026), and fails no check on them.
+
 A weekly GitHub Action (`.github/workflows/accuracy.yml`, Mondays, or by
 hand) runs the evaluation on the PRs merged in the last 90 days and compares
 it with the previous run (`accuracy-report`, `scripts/accuracy_report.ml`). The totals move with

@@ -283,6 +283,9 @@ let actual_fix number initial final =
   let paths =
     List.filter (fun f -> Rx.test_match packages_opam_re f) (pr_files number)
   in
+  let packages =
+    List.map (fun path -> List.nth (String.split_on_char '/' path) 2) paths
+  in
   let old = blobs initial paths and new_ = blobs final paths in
   let changed = Odict.create () in
   List.iter
@@ -307,11 +310,22 @@ let actual_fix number initial final =
       | _ ->
           () (* packages added/removed between the two versions are not fixes *))
     paths;
-  Odict.to_list changed
+  (Odict.to_list changed, packages)
 
 (* A new upstream archive (a fix made upstream, then released again): not a
-   change of the opam file that the tool could suggest, so not in the recall. *)
+   change of the opam file that the tool could suggest. Such a package is not
+   scored at all: its other changes come with the new release. *)
 let new_archive = S.of_list [ "field:checksum"; "field:x-commit-hash" ]
+
+(* Changes that fix no CI failure: what opam-repository's review bot asks for
+   (x-maintenance-intent), and the description. *)
+let not_fixes = S.of_list [ "field:x-maintenance-intent"; "field:description" ]
+
+(* The version of the scoring, in the totals: accuracy-report does not compare
+   runs scored differently. 3 (27 November 2026): not_fixes, packages with a
+   new archive left out, alternatives and fixes in another package of the PR
+   scored, merged [failing] lists. *)
+let scoring = 3
 
 (* The rules that compare with opam-health-check's latest run (see main). *)
 let health_rules : Rule.t list = [ Health_check_new ]
@@ -418,6 +432,7 @@ let run ~since ~limit ~max_ ~json () =
   let totals =
     Odict.of_list
       [
+        ("scoring", scoring);
         ("scored", 0);
         ("hit", 0);
         ("fix_tokens", 0);
@@ -432,10 +447,22 @@ let run ~since ~limit ~max_ ~json () =
   List.iter
     (fun (pr, init) ->
       let number = Json.to_int (pr |. "number") in
+      let fix, pr_packages =
+        actual_fix number init (Json.str "headRefOid" pr)
+      in
       let fix =
-        List.filter
-          (fun (_, v) -> not (S.is_empty v))
-          (actual_fix number init (Json.str "headRefOid" pr))
+        List.filter_map
+          (fun (p, v) ->
+            let v = S.diff v not_fixes in
+            if S.is_empty v then None else Some (p, v))
+          fix
+      in
+      (* Packages that got a new upstream archive: not scored. *)
+      let archived =
+        List.filter_map
+          (fun (p, v) ->
+            if S.is_empty (S.inter v new_archive) then None else Some p)
+          fix
       in
       if fix <> [] then begin
         (* (else the author changed nothing in opam files, e.g. CI rerun only) *)
@@ -463,24 +490,45 @@ let run ~since ~limit ~max_ ~json () =
         | Some sugg ->
             let sugg = List.map Suggestion.of_json sugg in
             let has_change (s : Suggestion.t) =
-              Suggestion.is_set s.new_ || Suggestion.list s.candidates <> []
+              Suggestion.is_set s.new_
+              || Suggestion.list s.candidates <> []
+              || s.alternative <> None
+            in
+            (* The packages a suggestion changes: the failing ones (several
+               versions when merged: "a.1, a.2"), or the other package of
+               the PR where it places the fix (#31170: a bound on
+               console-eio, modified by k7's PR). *)
+            let packages (s : Suggestion.t) =
+              match (Where.where_kind s, Where.where_pkg s) with
+              | Pr, _ ->
+                  Util.split_on ", "
+                    (Option.value ~default:"" (Suggestion.get s.failing))
+              | Other_package, Some p when List.mem p pr_packages -> [ p ]
+              | _ -> []
             in
             let scored =
               List.filter_map
                 (fun (s : Suggestion.t) ->
-                  if s.fix_in <> Some "this PR" || not (has_change s) then None
+                  let pkgs =
+                    List.filter
+                      (fun p -> p <> "" && not (List.mem p archived))
+                      (packages s)
+                  in
+                  if pkgs = [] || not (has_change s) then None
                   else begin
                     let pkg = Json.opt_string (Suggestion.get s.failing) in
                     let toks = suggestion_tokens s in
                     let fixed =
-                      match pkg with
-                      | `String p ->
-                          Option.value ~default:S.empty (List.assoc_opt p fix)
-                      | _ -> S.empty
+                      List.fold_left
+                        (fun acc p ->
+                          S.union acc
+                            (Option.value ~default:S.empty
+                               (List.assoc_opt p fix)))
+                        S.empty pkgs
                     in
                     let hit = not (S.is_empty (S.inter toks fixed)) in
                     Some
-                      ( pkg,
+                      ( pkgs,
                         s.rule,
                         `Assoc
                           [
@@ -527,22 +575,15 @@ let run ~since ~limit ~max_ ~json () =
              are not fixes of a CI failure). *)
             let failed = failing_packages init in
             let fix_failed =
-              List.filter_map
-                (fun (p, ts) ->
-                  if S.mem p failed then Some (p, S.diff ts new_archive)
-                  else None)
+              List.filter
+                (fun (p, _) -> S.mem p failed && not (List.mem p archived))
                 fix
             in
             tadd "new_archive"
               (List.length
                  (List.filter
-                    (fun (p, ts) ->
-                      S.mem p failed
-                      && not (S.is_empty (S.inter ts new_archive)))
-                    fix));
-            let fix_failed =
-              List.filter (fun (_, ts) -> not (S.is_empty ts)) fix_failed
-            in
+                    (fun p -> S.mem p failed)
+                    (List.sort_uniq compare archived)));
             let covered =
               List.length
                 (List.concat_map
@@ -550,8 +591,8 @@ let run ~since ~limit ~max_ ~json () =
                      List.filter
                        (fun t ->
                          List.exists
-                           (fun (pkg, _, _, _, toks) ->
-                             pkg = `String p && S.mem t toks)
+                           (fun (pkgs, _, _, _, toks) ->
+                             List.mem p pkgs && S.mem t toks)
                            scored)
                        (S.elements ts))
                    fix_failed)
