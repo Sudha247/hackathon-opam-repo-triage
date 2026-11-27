@@ -22,6 +22,22 @@ val twin_confidence :
     master commit or within a day (one push), "medium" within {!twin_max_days},
     [None] for an older run or one [run] cannot date. Without [run], "high". *)
 
+val per_builder : (Ci.job -> run) -> Ci.job -> run
+(** [per_builder run]: [run] read once per builder (day10 or the main one) and
+    distribution: the jobs of a push run together. *)
+
+val stale_twins :
+  run:(Ci.job -> run) ->
+  among:Ci.job list ->
+  Ci.job list ->
+  string option ->
+  Ci.job list
+(** [stale_twins ~run ~among jobs match_]: the day10 failures of [among] whose
+    distribution, architecture and OCaml version pass on the main builder (in
+    [jobs], matching the regular expression [match_]), but in a run too far from
+    theirs to vouch for them (see {!twin_confidence}): nothing explains them but
+    their own log. *)
+
 val matrix_rules :
   ?failing_in_log:(Ci.failure_key * string) list ->
   ?run:(Ci.job -> run) ->
@@ -36,9 +52,9 @@ val matrix_rules :
     logs (their [key] is the failure they come from): next to a change from a
     log, the pattern adds only a workaround. [failing_in_log]: the package whose
     step failed in the log of each failure. [run]: when and on what a job ran
-    (read from its log: one day10 job and one main-builder job per distribution
-    with a day10 failure where the main builder passes); without it, the pattern
-    trusts any passing main-builder job (see {!twin_confidence}). *)
+    (read from its log, once per builder and distribution: see {!per_builder});
+    without it, the pattern trusts any passing main-builder job (see
+    {!twin_confidence}). *)
 
 val collapse_systemic : ?threshold:int -> Suggestion.t list -> Suggestion.t list
 (** The same matrix pattern on many packages (at least [threshold], 5 by

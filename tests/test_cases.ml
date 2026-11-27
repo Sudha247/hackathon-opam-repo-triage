@@ -401,6 +401,9 @@ let cases =
         Has
           [ ({|failing|}, {|ordma.0.0.6|}); ({|rule|}, {|needs-git-checkout|}) ];
       ] );
+    (* Also: the day10 failures on centos-10 and opensuse-tumbleweed pass on
+       the main builder, but 116 and 236 days earlier: beyond --max 2, their
+       logs are read (day10's second build, a CI failure). *)
     ( {|llvm-python3|},
       {|e3b282a9c0eb1ef824245e3ffb935dc8fcc9b1ea|},
       [ {|--max|}; {|2|}; {|--match|}; {|llvm.20-shared|} ],
@@ -409,7 +412,13 @@ let cases =
           [
             ({|rule|}, {|missing-tool|}); ({|new|}, {|"conf-python-3" {build}|});
           ];
-        Not [ ({|error|}, {|llvm-config-|}) ];
+        Not [ ({|rule|}, {|missing-tool|}); ({|error|}, {|llvm-config-|}) ];
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|error|}, {|day10 built llvm.20-shared a second time|});
+            ({|jobs|}, {|day10,opensuse-tumbleweed,x86_64,4.14,llvm.20-shared|});
+          ];
       ] );
     ( {|slipshow-cmdliner2|},
       {|5697d67430433b6e7f81fe26a2cc05f4a4f816b6|},

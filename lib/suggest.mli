@@ -20,8 +20,9 @@ val suggest :
   Suggestion.t list
 (** [suggest sha data src cache_dir max_logs match_ llm]: the suggestions for a
     CI run, analysing at most [max_logs] distinct failures of the jobs whose
-    variant matches [match_] (the others that nothing explains are counted in
-    [data.unanalysed]). *)
+    variant matches [match_], and up to [max_logs] more on day10 that a pass of
+    the main builder in another run does not explain (the others that nothing
+    explains are counted in [data.unanalysed]). *)
 
 val distinct_failures : Ci.job list -> string option -> Ci.job list list
 (** [distinct_failures jobs match_]: the failed jobs to analyse, one group per

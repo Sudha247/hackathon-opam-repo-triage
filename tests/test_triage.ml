@@ -864,7 +864,22 @@ let test_builder_specific_twin_age () =
        (rules (fun j -> if j == fail then at 20739 else at 20737)));
   check_false "stale"
     (List.mem "builder-specific"
-       (rules (fun j -> if j == fail then at 20739 else at 20494)))
+       (rules (fun j -> if j == fail then at 20739 else at 20494)));
+  (* Suggest analyses these beyond its limit: nothing else explains them. *)
+  let stale run among =
+    List.map
+      (fun j -> j.variant)
+      (Matrix.stale_twins ~run ~among [ fail; classic ] None)
+  in
+  let old_run j = if j == fail then at 20739 else at 20494 in
+  Alcotest.(check (list string))
+    "stale twins"
+    [ "day10,debian-13,x86_64,5.3,x.1" ]
+    (stale old_run [ fail ]);
+  Alcotest.(check (list string))
+    "fresh twin" []
+    (stale (fun j -> if j == fail then at 20739 else at 20738) [ fail ]);
+  Alcotest.(check (list string)) "not among" [] (stale old_run [])
 
 let test_pattern_after_a_change_from_the_log () =
   (* liquidsoap 2.4.6 (#30906): its tests fail on OCaml 5 with [Library

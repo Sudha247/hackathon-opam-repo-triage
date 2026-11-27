@@ -95,8 +95,48 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
     Printf.eprintf
       "note: %d distinct failures, analysing the first %d (use --max)\n%!"
       (List.length groups) max_logs;
+  (* When and on what a job ran, for the day10 failures that pass on the main
+     builder (a log that cannot be read dates nothing). *)
+  let run =
+    Matrix.per_builder (fun j : Matrix.run ->
+        match log_text (!fetch_hook j.url cache_dir) with
+        | exception _ -> { day = None; base = None }
+        | text ->
+            {
+              day =
+                Option.bind (Rx.search log_day_re text) (fun m ->
+                    Date.days_of_date (Rx.group m 1));
+              base = List.assoc_opt "base" (excerpt text);
+            })
+  in
+  (* The day10 failures sort last: most of them are day10's, and the pattern
+     of passes says so (builder-specific). Not those whose main-builder twin
+     passed in another run, months before: only their log explains them. Their
+     groups are analysed beyond the limit, [max_logs] more at most (#24267:
+     gnuplot missing on centos-9; #27642: llvm-17-dev on debian-12). The
+     analysed groups keep their order. *)
+  let analysed =
+    if List.length groups <= max_logs then groups
+    else begin
+      let first = Util.take max_logs groups
+      and rest = Util.drop max_logs groups in
+      let stale =
+        Matrix.stale_twins ~run ~among:(List.concat rest) data.jobs match_
+      in
+      let more =
+        Util.take max_logs
+          (List.filter (List.exists (fun j -> List.memq j stale)) rest)
+      in
+      if more <> [] then
+        Printf.eprintf
+          "note: also analysing %s that a main-builder pass from another run \
+           does not explain\n\
+           %!"
+          (Words.counted (List.length more) "day10 failure");
+      List.filter (fun g -> List.memq g first || List.memq g more) groups
+    end
+  in
   (* [merged] keeps every job behind each analysed one, so the report can say how many it stands for. *)
-  let analysed = Util.take max_logs groups in
   let uniq = List.map List.hd analysed in
   let merged =
     List.map
@@ -104,7 +144,7 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
       analysed
   in
   let merged_of j = List.assoc (group_key j) merged in
-  let dropped = Util.drop max_logs groups in
+  let dropped = List.filter (fun g -> not (List.memq g analysed)) groups in
   (* to count the failures no suggestion explains *)
   let results = ref [] and base = ref None in
   let prev_cache = Hashtbl.create 4 in
@@ -190,19 +230,6 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
           && (List.mem (failure_key j) transient || List.mem j.variant ci_jobs)
           ))
       data.jobs
-  in
-  (* When and on what a job ran, for the day10 failures that pass on the main
-     builder (a log that cannot be read dates nothing). *)
-  let run j : Matrix.run =
-    match log_text (!fetch_hook j.url cache_dir) with
-    | exception _ -> { day = None; base = None }
-    | text ->
-        {
-          day =
-            Option.bind (Rx.search log_day_re text) (fun m ->
-                Date.days_of_date (Rx.group m 1));
-          base = List.assoc_opt "base" (excerpt text);
-        }
   in
   let matrix =
     Matrix.collapse_systemic

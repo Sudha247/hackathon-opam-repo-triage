@@ -171,24 +171,65 @@ let twin_confidence run j t =
       | _, _, Some x, Some y when abs (x - y) <= twin_max_days -> Some "medium"
       | _ -> None)
 
+(* One run per builder and distribution: the jobs of a push run together. *)
+let per_builder run =
+  let memo = Hashtbl.create 8 in
+  fun j ->
+    let k = (starts_day10 j, (job_dims j).distro) in
+    match Hashtbl.find_opt memo k with
+    | Some r -> r
+    | None ->
+        let r = run j in
+        Hashtbl.replace memo k r;
+        r
+
+(* The main builder's pass, among [passes], on the distribution, architecture
+   and OCaml version of the day10 failure [j]. Not when day10 passes on another
+   architecture of the same distribution and OCaml version: the failure then
+   depends on the architecture. *)
+let classic_twin passes j =
+  let d = job_dims j in
+  let same =
+    List.filter
+      (fun p ->
+        let dp = job_dims p in
+        dp.distro = d.distro
+        && (match d.distro with Some s -> s <> "" | None -> false)
+        && dp.ocaml = d.ocaml)
+      passes
+  in
+  if List.exists (fun p -> starts_day10 p && job_arch p <> job_arch j) same then
+    None
+  else
+    List.find_opt
+      (fun p -> (not (starts_day10 p)) && job_arch p = job_arch j)
+      same
+
+let real_passes js =
+  List.filter (fun j -> (not j.experimental) && j.category = Category.passed) js
+
+let real_fails js =
+  List.filter
+    (fun j -> (not j.experimental) && List.mem j.category failing_cats)
+    js
+
+let stale_twins ~run ~among jobs match_ =
+  List.concat_map
+    (fun (_, js) ->
+      let passes = real_passes js in
+      List.filter
+        (fun j ->
+          starts_day10 j && List.memq j among
+          &&
+          match classic_twin passes j with
+          | Some t -> twin_confidence (Some run) j t = None
+          | None -> false)
+        (real_fails js))
+    (matrix_groups jobs match_)
+
 let matrix_rules ?(failing_in_log = []) ?run jobs (earlier : Suggestion.t list)
     match_ pr_packages =
   let fin j = List.assoc_opt (failure_key j) failing_in_log in
-  (* One run per builder and distribution: the jobs of a push run together. *)
-  let run =
-    Option.map
-      (fun run ->
-        let memo = Hashtbl.create 8 in
-        fun j ->
-          let k = (starts_day10 j, (job_dims j).distro) in
-          match Hashtbl.find_opt memo k with
-          | Some r -> r
-          | None ->
-              let r = run j in
-              Hashtbl.replace memo k r;
-              r)
-      run
-  in
   let done_ =
     List.map (fun r -> (Suggestion.get r.Suggestion.failing, r.dep)) earlier
   in
@@ -259,40 +300,13 @@ let matrix_rules ?(failing_in_log = []) ?run jobs (earlier : Suggestion.t list)
         (* A day10 failure whose distribution, architecture and OCaml version
            pass on the classic builder is a problem of the day10 environment,
            not of the package: report it as such, and leave it out of the
-           analyses below. Not when day10 passes on another architecture of
-           the same distribution and OCaml version: the failure then depends
-           on the architecture. *)
-        let passes =
-          List.filter
-            (fun j -> (not j.experimental) && j.category = Category.passed)
-            js
-        in
-        let classic_twin j =
-          let d = job_dims j in
-          let same =
-            List.filter
-              (fun p ->
-                let dp = job_dims p in
-                dp.distro = d.distro
-                && (match d.distro with Some s -> s <> "" | None -> false)
-                && dp.ocaml = d.ocaml)
-              passes
-          in
-          if
-            List.exists
-              (fun p -> starts_day10 p && job_arch p <> job_arch j)
-              same
-          then None
-          else
-            List.find_opt
-              (fun p -> (not (starts_day10 p)) && job_arch p = job_arch j)
-              same
-        in
+           analyses below. *)
+        let passes = real_passes js in
         let twins =
           List.filter_map
             (fun j ->
               if starts_day10 j then
-                Option.bind (classic_twin j) (fun t ->
+                Option.bind (classic_twin passes j) (fun t ->
                     Option.map (fun c -> (j, c)) (twin_confidence run j t))
               else None)
             fails

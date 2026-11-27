@@ -93,7 +93,9 @@ Options (each command takes only those it uses: `opam-ci-triage COMMAND
   `day10,debian-13,x86_64,5.5,lwt.5.10.2,tests`.
 - `--max N` (`suggest`, `comment`, `review`; for `logs`, the logs to fetch): analyse at most N distinct failures (default 30): those of the
   PR's own packages first, then those of their reverse dependencies, and
-  experimental platforms last. `suggest --json` gives the number of the others
+  experimental platforms last; beyond N, up to N more day10 failures whose
+  platform passed on the main builder in another run (an older pass says
+  nothing, only their log explains them). `suggest --json` gives the number of the others
   that no suggestion explains in `unanalysed`; the PR comment and the triage
   page say how many, and such a PR is not listed as seeming ready.
 - `--all` (`summary`, `compare`): also the jobs that passed, were ignored or
