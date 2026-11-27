@@ -49,6 +49,7 @@ let rule_title : Rule.t -> string option = function
   | Conf_no_depext -> Some "No system package for this platform"
   | Ci_failure -> Some "CI failure, not the package"
   | Test_timeout -> Some "Test timed out"
+  | Test_needs_other_package -> Some "Tests need another package's targets"
   | Transient | Previous_release_bound | Other _ -> None
 
 let packages_re = Rx.v {|(\d+) packages \[|}

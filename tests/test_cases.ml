@@ -824,6 +824,28 @@ let cases =
           [ ({|rule|}, {|test-timeout|}); ({|failing|}, {|jera.1.0.0~beta1|}) ];
         Not [ ({|rule|}, {|test-output|}) ];
       ] );
+    (* dune runtest -p elpi-json runs a test of the elpi repository that
+       needs elpi_REPL.exe, which -p leaves out (closed PR 31292, all 148
+       jobs; the author then gave the test command elpi-json's directory). *)
+    ( {|elpi-json-runtest-other-package|},
+      {|dc22031fac16eabd94aa584a2b68f24fd178ceea|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^compilers,5\.5,elpi-json\.4\.1\.1,tests$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|test-needs-other-package|});
+            ({|where|}, {|this PR|});
+            ( {|error|},
+              {|`dune runtest -p elpi-json` cannot build elpi_REPL.exe (needed by tests/plugin/dune)|}
+            );
+            ({|advice|}, {|"runtest" "-p" name "-j" jobs "DIR"|});
+          ];
+      ] );
   ]
 
 let fixtures =

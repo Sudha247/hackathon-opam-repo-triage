@@ -972,6 +972,54 @@ let test_timeout err job platform =
           ])
   | _ -> None
 
+let no_rule_found_re = Rx.v {|Error: No rule found for (\S+)|}
+let dune_file_re = Rx.v {|File "([^"]*dune)"|}
+let jobs_flag_re = Rx.v {| -j \d+|}
+
+let failed_runtest_re =
+  Rx.v
+    {|The compilation of \S+ failed at "([^"\n]*\bdune\b[^"\n]*(?:\bruntest\b|@runtest)[^"\n]*)"|}
+
+(* [dune runtest -p pkg] (or [dune build -p pkg @runtest]) cannot build a
+   target the tests use: -p hides the targets of the other packages of the
+   repository (an executable of another package, a test of the whole
+   repository). *)
+let test_needs_other_package err full_text fname =
+  let text = String.concat "\n" err in
+  match
+    (Rx.search no_rule_found_re text, Rx.search failed_runtest_re full_text)
+  with
+  | Some m, Some c when Util.contains (Rx.group c 1) " -p " ->
+      let target = Rx.group m 1 in
+      let where =
+        let before = String.sub text 0 (Rx.start m) in
+        match Util.last_opt (Rx.finditer dune_file_re before) with
+        | Some f -> Printf.sprintf " (needed by %s)" (Rx.group f 1)
+        | None -> ""
+      in
+      Some
+        [
+          `Rule Rule.Test_needs_other_package;
+          `Confidence "medium";
+          `Error
+            (Printf.sprintf "`%s` cannot build %s%s"
+               (Rx.sub jobs_flag_re "" (Rx.group c 1))
+               target where);
+          `Advice
+            (Printf.sprintf
+               "Run only %s's tests: give the test command its directories, as \
+                in `[\"dune\" \"runtest\" \"-p\" name \"-j\" jobs \"DIR\"] \
+                {with-test}`, or remove the test command."
+               fname);
+          `Note
+            (Printf.sprintf
+               "With -p %s, dune builds only that package's targets, and a \
+                test of the repository needs %s, which another package builds. \
+                Not a missing dependency."
+               fname target);
+        ]
+  | _ -> None
+
 let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
   let text = String.concat "\n" err in
   let deps = direct_deps opam_text in
@@ -984,6 +1032,10 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
   Util.first_some
     [
       (fun () -> test_timeout err job platform);
+      (fun () ->
+        test_needs_other_package err
+          (if ctx.full_text <> "" then ctx.full_text else text)
+          fname);
       (fun () ->
         (* Python: implicit declaration of function ['‘]?(caml_\w+) *)
         match Rx.search implicit_declaration_function_re text with

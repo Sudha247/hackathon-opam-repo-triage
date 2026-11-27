@@ -50,6 +50,7 @@ type t =
   | Conf_no_depext
   | Ci_failure
   | Test_timeout
+  | Test_needs_other_package
   | Other of string
 
 let names =
@@ -103,6 +104,7 @@ let names =
     (Conf_no_depext, "conf-no-depext");
     (Ci_failure, "ci-failure");
     (Test_timeout, "test-timeout");
+    (Test_needs_other_package, "test-needs-other-package");
   ]
 
 let to_string = function Other s -> s | r -> List.assoc r names
