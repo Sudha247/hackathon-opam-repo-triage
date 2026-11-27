@@ -866,6 +866,77 @@ let cases =
             ({|advice|}, {|Add depexts for centos-10 to conf-rocksdb|});
           ];
       ] );
+    (* A main-builder job that passed 245 days before the day10 failure, on
+       another master commit (PR 26907: day10 2026-10-13 on 6cacf31, main
+       builder 2026-02-10 on b1c846d), does not make the failure day10's: the
+       log's verdict stands (here none: mopsa's error with dune 3.24.2). *)
+    ( {|mopsa-stale-twin|},
+      {|b6229f0d14497cac47fc1ccd0ef31dd6c590ddfe|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^(day10,debian-13,x86_64,4\.14|compilers,4\.14),apron\.v0\.9\.15,revdeps,mopsa\.1\.2$|};
+      ],
+      [
+        Not [ ({|rule|}, {|builder-specific|}) ];
+        Has
+          [
+            ({|rule|}, {|unrecognised|});
+            ( {|jobs|},
+              {|day10,debian-13,x86_64,4.14,apron.v0.9.15,revdeps,mopsa.1.2|} );
+          ];
+      ] );
+    (* PR 29110: day10 builds llvm.20-shared, installs it, extracts it again
+       and fails on "mkdir build" (File exists): a CI failure. On fedora-45 the
+       main builder passed on the same master commit: day10's environment. *)
+    ( {|llvm-day10-rebuild|},
+      {|e3b282a9c0eb1ef824245e3ffb935dc8fcc9b1ea|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^(day10,(fedora-45|centos-10),x86_64,4\.14|distributions,(fedora-45|centos-10)-ocaml-4\.14),llvm\.20-shared$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|error|}, {|day10 built llvm.20-shared a second time|});
+          ];
+        Has
+          [
+            ({|rule|}, {|builder-specific|});
+            ({|error|}, {|on fedora-45;|});
+            ({|confidence|}, {|high|});
+          ];
+        Not [ ({|rule|}, {|builder-specific|}); ({|error|}, {|centos-10|}) ];
+      ] );
+    (* day10's fedora-45 image has no /usr/bin/env (PR 31054): a CI failure,
+       for the jobs merged with the analysed one too, not "rerun" for some and
+       "fails only on day10" for the others. *)
+    ( {|ocgtk-fedora45-image|},
+      {|13119b5623ed55644cd0cc789165cb294e987db2|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^(day10,fedora-45,x86_64,4\.14|distributions,fedora-45-ocaml-4\.14),(conf-gdk-pixbuf-2\.1|conf-gtk4\.3|ocgdk\.0\.1~preview3)$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|ci-failure|});
+            ({|error|}, {|its image has no /usr/bin/env|});
+            ({|jobs|}, {|day10,fedora-45,x86_64,4.14,conf-gtk4.3|});
+          ];
+        Not [ ({|rule|}, {|rerun|}) ];
+        Not
+          [
+            ({|rule|}, {|builder-specific|});
+            ({|jobs|}, {|day10,fedora-45,x86_64,4.14,conf-gtk4.3|});
+          ];
+      ] );
   ]
 
 let fixtures =

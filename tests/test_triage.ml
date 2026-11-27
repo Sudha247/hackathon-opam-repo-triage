@@ -821,6 +821,51 @@ let test_builder_specific_same_arch () =
             job ~category:"passed" "day10,macos-homebrew,x86_64,5.5,x.1";
           ]))
 
+let test_builder_specific_twin_age () =
+  (* The main builder's pass vouches for a day10 failure only from the same
+     master commit or push (high), or within a few days (medium); not from a run
+     months older (PR 26907: day10 on 2026-10-13, main builder on
+     2026-02-10), nor from a run the logs do not date. *)
+  let fail = job "day10,debian-13,x86_64,5.3,x.1"
+  and classic = job ~category:"passed" "compilers,5.3,x.1" in
+  let conf day10 main =
+    let run j : Matrix.run = if j == fail then day10 else main in
+    Matrix.twin_confidence (Some run) fail classic
+  in
+  let at ?base day : Matrix.run = { day = Some day; base } in
+  Alcotest.(check (list (option string)))
+    "tiers"
+    [
+      Some "high";
+      Some "high";
+      Some "high";
+      Some "medium";
+      None;
+      None;
+      Some "high";
+    ]
+    [
+      conf (at ~base:"b" 20739) (at ~base:"b" 20494);
+      conf (at ~base:"b" 20739) (at ~base:"b" 20739);
+      conf (at ~base:"b" 20739) (at ~base:"c" 20738);
+      conf (at ~base:"b" 20739) (at ~base:"c" 20736);
+      conf (at ~base:"b" 20739) (at ~base:"c" 20494);
+      conf { day = None; base = None } (at 20739);
+      Matrix.twin_confidence None fail classic;
+    ];
+  (* In the pattern: a stale pass leaves the failure to the log. *)
+  let rules run =
+    List.map
+      (fun r -> Option.fold ~none:"" ~some:Rule.to_string r.rule)
+      (Matrix.matrix_rules ~run [ fail; classic ] [] None [ "x.1" ])
+  in
+  check_true "fresh"
+    (List.mem "builder-specific"
+       (rules (fun j -> if j == fail then at 20739 else at 20737)));
+  check_false "stale"
+    (List.mem "builder-specific"
+       (rules (fun j -> if j == fail then at 20739 else at 20494)))
+
 let test_pattern_after_a_change_from_the_log () =
   (* liquidsoap 2.4.6 (#30906): its tests fail on OCaml 5 with [Library
      "bytes" not found]; the log gives base-bytes, so no workaround from the
@@ -3579,6 +3624,7 @@ let () =
           p "preexisting_same_failure (render_page)" test_preexisting_page;
           p "unanalysed_order" test_unanalysed_order;
           p "builder_specific_same_arch" test_builder_specific_same_arch;
+          p "builder_specific_twin_age" test_builder_specific_twin_age;
           p "pattern_after_a_change_from_the_log"
             test_pattern_after_a_change_from_the_log;
           p "unanalysed_count" test_unanalysed_count;

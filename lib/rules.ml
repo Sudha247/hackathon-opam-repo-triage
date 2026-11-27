@@ -1568,6 +1568,10 @@ let base_image_re =
 let sources_again_re =
   Rx.v {|\[ERROR\] Failed to get sources of (\S+): ([^\n]*)|}
 
+let runc_no_exec_re =
+  Rx.v
+    {|runc run failed: [^\n]*exec: \\?"([^"\\]+)\\?": stat [^:\n]+: no such file or directory|}
+
 (* A crash of the CI's tools or workers, a container or base image it could
    not start or build, sources it could not fetch again after installing
    the package: (error, what failed) when the log shows one. *)
@@ -1586,6 +1590,15 @@ let ci_crash text =
             ( "Internal error of the CI worker: " ^ String.trim (Rx.group m 1),
               "the CI worker failed (\"Internal error\")" ))
           (Rx.search worker_internal_error_re text));
+      (fun () ->
+        Option.map
+          (fun m ->
+            ( Printf.sprintf
+                "The build container did not start: its image has no %s"
+                (Rx.group m 1),
+              "the builder's image for this distribution is broken (a rerun \
+               fails the same way until it is rebuilt)" ))
+          (Rx.search runc_no_exec_re text));
       (fun () ->
         Option.map
           (fun m ->
@@ -1617,6 +1630,42 @@ let ci_crash text =
             else None)
           (Rx.finditer sources_again_re text));
     ]
+
+let compilation_failed_at_re =
+  Rx.v {|The compilation of (\S+) failed at "([^"\n]*)"|}
+
+let test_command_re = Rx.v {|@runtest|\bruntest\b|\btests?\b|}
+
+(* day10 builds a package, installs it, then extracts and builds it again
+   (for its tests, in a tests job); in a build job (seen only there), a
+   failure of that second build, at a step that is not a test, comes from what
+   the first build left in the source directory (llvm's "mkdir build": File
+   exists), not from the package. *)
+let day10_rebuild job text =
+  match job.platform with
+  | "day10" :: _ when job.kind = Kind.Build -> (
+      match Rx.search compilation_failed_at_re text with
+      | Some m when not (Rx.test test_command_re (Rx.group m 2)) ->
+          let pkg = Rx.group m 1 in
+          let before = String.sub text 0 (Rx.start m) in
+          let i = Util.find before ("-> installed " ^ pkg ^ "\n") in
+          if
+            i >= 0
+            && Util.contains
+                 (Util.slice ~start:i before)
+                 ("[" ^ pkg ^ ": extract]")
+          then
+            Some
+              ( Printf.sprintf
+                  "day10 built %s a second time after installing it, and the \
+                   second build failed at `%s`"
+                  pkg (Rx.group m 2),
+                "day10 extracts and builds the package again in the directory \
+                 of the first build, which succeeded: what that build left \
+                 there breaks the second (`mkdir: File exists`)" )
+          else None
+      | _ -> None)
+  | _ -> None
 
 (* Failures of the CI rather than of the build: a system package missing
    from the distribution, a crash of the CI tool, a container that did not
@@ -1707,7 +1756,11 @@ let ci_failure job text (info : info) pr_packages =
                        dims.arch);
                 ]));
       (fun () ->
-        match ci_crash text with
+        match
+          match ci_crash text with
+          | Some c -> Some c
+          | None -> day10_rebuild job text
+        with
         | Some (error, what) ->
             Some
               ([

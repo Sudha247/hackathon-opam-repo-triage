@@ -273,6 +273,31 @@ let merge_versions results =
     out;
   out
 
+let merge_ci_failures results =
+  let first = Hashtbl.create 4 in
+  List.filter
+    (fun r ->
+      if r.rule <> Some Ci_failure then true
+      else
+        let k = (r.Suggestion.error, r.note) in
+        match Hashtbl.find_opt first k with
+        | None ->
+            Hashtbl.replace first k r;
+            true
+        | Some f ->
+            let names = Util.split_on ", " (Suggestion.str_field f.failing) in
+            let more =
+              List.filter
+                (fun x -> x <> "" && not (List.mem x names))
+                (Util.split_on ", " (Suggestion.str_field r.failing))
+            in
+            if more <> [] then
+              f.failing <- Set (String.concat ", " (names @ more));
+            f.jobs <- Some (merge_jobs (jobs_or_variant f) (jobs_or_variant r));
+            if r.experimental <> Some true then f.experimental <- r.experimental;
+            false)
+    results
+
 let merge_unrecognised results =
   let unk =
     List.filter

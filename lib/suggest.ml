@@ -80,6 +80,7 @@ let keys_of (r : Suggestion.t) =
 let fetch_hook = ref (fun url cache_dir -> Net.fetch url cache_dir)
 let suggest_for_job_hook = ref Rules.suggest_for_job
 let windows_freebsd_macos_re = Rx.v "Windows|freebsd|macos"
+let log_day_re = Rx.v ~flags:[ Rx.M ] {|^(\d{4}-\d\d-\d\d) \d\d:\d\d|}
 
 let suggest sha (data : data) src cache_dir max_logs match_ llm =
   let pr_packages =
@@ -175,20 +176,37 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
   in
   (* Jobs that failed because of the CI (tool crash, network) say nothing
      about the package: leave them out of the pass/fail patterns. *)
-  let transient =
-    List.concat_map
-      (fun r ->
-        if Titles.has_rule [ Transient; Ci_failure ] r then keys_of r else [])
-      results
-  in
+  let ci = List.filter (Titles.has_rule [ Transient; Ci_failure ]) results in
+  let transient = List.concat_map keys_of ci in
+  (* ... and the jobs merged with them (the same dependency failure of other
+     packages, on that distribution: the fedora-45 image of day10 without
+     /usr/bin/env made them a pattern of their own) *)
+  let ci_jobs = List.concat_map Checks.jobs_or_variant ci in
   let jobs =
     List.filter
-      (fun j -> not (j.status = Failed && List.mem (failure_key j) transient))
+      (fun j ->
+        not
+          (j.status = Failed
+          && (List.mem (failure_key j) transient || List.mem j.variant ci_jobs)
+          ))
       data.jobs
+  in
+  (* When and on what a job ran, for the day10 failures that pass on the main
+     builder (a log that cannot be read dates nothing). *)
+  let run j : Matrix.run =
+    match log_text (!fetch_hook j.url cache_dir) with
+    | exception _ -> { day = None; base = None }
+    | text ->
+        {
+          day =
+            Option.bind (Rx.search log_day_re text) (fun m ->
+                Date.days_of_date (Rx.group m 1));
+          base = List.assoc_opt "base" (excerpt text);
+        }
   in
   let matrix =
     Matrix.collapse_systemic
-      (Matrix.matrix_rules ~failing_in_log jobs results match_ pr_packages)
+      (Matrix.matrix_rules ~failing_in_log ~run jobs results match_ pr_packages)
   in
   (* A matrix suggestion explains the per-job failures that had no rule. *)
   let explained = List.concat_map (fun m -> m.Suggestion.keys) matrix in
@@ -490,4 +508,6 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
   Checks.check_changes results src sha pr_packages;
   Context.accepted_elsewhere results src pr_packages;
   List.iter (fun (r : Suggestion.t) -> r.installed <- None) results;
-  Titles.readable (Checks.merge_versions (Checks.merge_unrecognised results))
+  Titles.readable
+    (Checks.merge_ci_failures
+       (Checks.merge_versions (Checks.merge_unrecognised results)))

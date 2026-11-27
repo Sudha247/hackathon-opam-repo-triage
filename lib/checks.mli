@@ -21,6 +21,11 @@ val applied : string -> Suggestion.t -> string option
 val jobs_or_variant : Suggestion.t -> string list
 (** The jobs a suggestion stands for, or its own job. *)
 
+val merge_ci_failures : Suggestion.t list -> Suggestion.t list
+(** The CI failures with the same error and note (the same broken image or
+    crashing worker, under several packages): one entry, listing the packages
+    and every job. *)
+
 val merge_versions : Suggestion.t list -> Suggestion.t list
 (** Several versions of one package with the same rule and no diff (a diff stays
     with its own opam file, for line comments): one entry, listing them. *)

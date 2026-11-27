@@ -145,9 +145,50 @@ let keys_of js = List.map failure_key js
 let variants js = List.map (fun j -> j.variant) js
 let program_re = Rx.v {|(?:Program "?|")([\w.+-]+)|}
 
-let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
+type run = { day : int option; base : string option }
+
+(* A passing job of the main builder vouches for a day10 failure only if it
+   ran on the same master commit, or within [twin_max_days] of it: master
+   gains dozens of releases a week, and the builders' images change. One push
+   starts its jobs within the hour, and a rebuild of failed jobs follows
+   within a day or two. *)
+let twin_max_days = 3
+
+(* How much a passing main-builder job [t] vouches for the day10 failure [j]:
+   [Some "high"] on the same master commit or the same push (a day apart at
+   most: the builders merge the PR onto master when the job starts, so the
+   commits of one push differ), [Some "medium"] within [twin_max_days], else
+   [None] (an older run, or a run the logs do not date). Without [run], as
+   before: the job list alone. *)
+let twin_confidence run j t =
+  match run with
+  | None -> Some "high"
+  | Some run -> (
+      let a = run j and b = run t in
+      match (a.base, b.base, a.day, b.day) with
+      | Some x, Some y, _, _ when x = y -> Some "high"
+      | _, _, Some x, Some y when abs (x - y) <= 1 -> Some "high"
+      | _, _, Some x, Some y when abs (x - y) <= twin_max_days -> Some "medium"
+      | _ -> None)
+
+let matrix_rules ?(failing_in_log = []) ?run jobs (earlier : Suggestion.t list)
     match_ pr_packages =
   let fin j = List.assoc_opt (failure_key j) failing_in_log in
+  (* One run per builder and distribution: the jobs of a push run together. *)
+  let run =
+    Option.map
+      (fun run ->
+        let memo = Hashtbl.create 8 in
+        fun j ->
+          let k = (starts_day10 j, (job_dims j).distro) in
+          match Hashtbl.find_opt memo k with
+          | Some r -> r
+          | None ->
+              let r = run j in
+              Hashtbl.replace memo k r;
+              r)
+      run
+  in
   let done_ =
     List.map (fun r -> (Suggestion.get r.Suggestion.failing, r.dep)) earlier
   in
@@ -251,7 +292,8 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
           List.filter_map
             (fun j ->
               if starts_day10 j then
-                Option.map (fun t -> (j, t)) (classic_twin j)
+                Option.bind (classic_twin j) (fun t ->
+                    Option.map (fun c -> (j, c)) (twin_confidence run j t))
               else None)
             fails
         in
@@ -303,7 +345,10 @@ let matrix_rules ?(failing_in_log = []) jobs (earlier : Suggestion.t list)
                          "Fails only on the day10 builder on %s; the main \
                           builder passes there."
                          (String.concat ", " dists));
-                    `Confidence "high";
+                    `Confidence
+                      (if List.for_all (fun (_, c) -> c = "high") twins then
+                         "high"
+                       else "medium");
                     `Note note;
                     `Keys (keys_of tj);
                     `Jobs (variants tj);
