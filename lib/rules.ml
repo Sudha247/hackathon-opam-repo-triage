@@ -926,6 +926,52 @@ let missing_tool_messages =
     ]
   @ [ Rx.v ~flags:[ Rx.M ] {|^\S*?([\w.+-]+): (?:command )?not found$|} ]
 
+let timed_out_re =
+  Rx.v {|timed out after (\d+(?:\.\d+)?) ?(s|ms|seconds?|minutes?)\b|}
+
+let test_fail_re = Rx.v {|^[#\s-]*FAIL\s+(.*)$|}
+let runtest_re = Rx.v {|@runtest|\bruntest\b|}
+
+(* Tests that ran past their own time limit, and no other test failure: a
+   slow machine (or a test too slow for one), not the package's metadata. *)
+let test_timeout err job platform =
+  let timeouts =
+    List.filter_map
+      (fun l ->
+        Option.map (fun m -> (l, Rx.group0 m)) (Rx.search timed_out_re l))
+      err
+  in
+  let fails = List.filter (fun l -> Rx.test test_fail_re l) err in
+  let is_test =
+    job.kind = Kind.Tests || List.exists (fun l -> Rx.test runtest_re l) err
+  in
+  match timeouts with
+  | (_, first) :: _ when is_test && List.length fails <= List.length timeouts ->
+      let name =
+        match fails with
+        | l :: _ -> (
+            match Rx.search test_fail_re l with
+            | Some m ->
+                " (" ^ Util.prefix_chars (String.trim (Rx.group m 1)) 120 ^ ")"
+            | None -> "")
+        | [] -> ""
+      in
+      Some
+        ([ `Rule Rule.Test_timeout ]
+        @ Where.fix_where Upstream "upstream (the package's source)"
+        @ [
+            `Confidence "medium";
+            `Error (Printf.sprintf "A test %s on %s%s" first platform name);
+            `Note
+              "The test ran past its own time limit: CI machines are loaded, \
+               and some are slow (riscv64, emulated or FreeBSD runners), so a \
+               slow or flaky test times out there. Not the opam file: raise or \
+               drop the limit upstream, or make the test lighter; until then, \
+               the tests can be skipped on the slow platforms (a filter on \
+               `with-test`).";
+          ])
+  | _ -> None
+
 let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
   let text = String.concat "\n" err in
   let deps = direct_deps opam_text in
@@ -937,6 +983,7 @@ let log_rules src err fname opam_text (info : info) (ctx : ctx) job =
   in
   Util.first_some
     [
+      (fun () -> test_timeout err job platform);
       (fun () ->
         (* Python: implicit declaration of function ['‘]?(caml_\w+) *)
         match Rx.search implicit_declaration_function_re text with

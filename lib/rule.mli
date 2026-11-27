@@ -57,6 +57,7 @@ type t =
   | Ci_failure
       (** the CI failed, not the package: a crash of its tools or workers, a
           base image it could not build, a container that did not start *)
+  | Test_timeout  (** a test ran past its own time limit *)
   | Other of string
       (** a name no rule has (stored by another version): kept as it is. Only
           {!of_string} makes one, so that it never holds a known name. *)

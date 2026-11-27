@@ -801,6 +801,29 @@ let cases =
             ({|where|}, {|this PR|});
           ];
       ] );
+    (* Tests that run past their own time limit (raven, PR 31312: 35 jobs of
+       rig, tolk, norn, rune, ...): a slow or loaded machine, not the opam
+       file. jera's timeout was taken for a test output diff. *)
+    ( {|raven-test-timeouts|},
+      {|ee202184836b34fb30ddd7a1f3a06bad69efae94|},
+      [
+        {|--max|};
+        {|2|};
+        {|--match|};
+        {|^(compilers,5\.5,rig\.1\.0\.0~beta1,tests|distributions,alpine-3\.24-ocaml-5\.5,jera\.1\.0\.0~beta1,tests)$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|test-timeout|});
+            ({|failing|}, {|rig.1.0.0~beta1|});
+            ({|where|}, {|upstream|});
+            ({|error|}, {|A test timed out after 60s|});
+          ];
+        Has
+          [ ({|rule|}, {|test-timeout|}); ({|failing|}, {|jera.1.0.0~beta1|}) ];
+        Not [ ({|rule|}, {|test-output|}) ];
+      ] );
   ]
 
 let fixtures =
