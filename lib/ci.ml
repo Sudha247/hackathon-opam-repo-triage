@@ -564,6 +564,11 @@ let log_text page =
   else text
 
 let error_line = Rx.v {|^# ?(Error\b|.*\b(error|Error):)|}
+
+let failure_mark =
+  Rx.v
+    {|^# ?\s*FAIL\b|\bkilled by SIG[A-Z]+\b|\btimed out after \d|\bmake(?:\[\d+\])?: \*\*\* .*\bError \d+|}
+
 let env_output_file_re = Rx.v "# (env|output)-file"
 
 let error_package_conflict_re =
@@ -577,7 +582,8 @@ let new_job_re = Rx.v "New job: (.*)"
 let git_merge_edit_re =
   Rx.v "git merge --no-edit ([0-9a-f]{40})|onto master ([0-9a-f]{40})"
 
-let excerpt ?(max_output_lines = 40) text : (string * string) list =
+let excerpt ?(max_output_lines = 40) ?(marks = false) text :
+    (string * string) list =
   let lines = Array.of_list (Util.splitlines text) in
   let nl = Array.length lines in
   let out = Odict.create () in
@@ -616,9 +622,17 @@ let excerpt ?(max_output_lines = 40) text : (string * string) list =
                 let cut = nb - max_output_lines in
                 let tail = Util.drop (nb - max_output_lines) body in
                 (* Keep the first error too when it is before the tail: dune
-                    prints errors first and pages of warnings can follow. *)
+                    prints errors first and pages of warnings can follow.
+                    With [marks], when no line before the tail is an error,
+                    the first that marks a failure (#31312: nx's tests killed
+                    by SIGSEGV, 616 lines before the end). *)
+                let head = Util.take cut body in
                 let first =
-                  List.find_index (Rx.test error_line) (Util.take cut body)
+                  match List.find_index (Rx.test error_line) head with
+                  | Some i -> Some i
+                  | None when marks ->
+                      List.find_index (Rx.test failure_mark) head
+                  | None -> None
                 in
                 match first with
                 | None ->

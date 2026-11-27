@@ -185,6 +185,10 @@ val key_error_line : string -> string option
 val fetch_hook : (string -> string -> string) ref
 val log_text_hook : (string -> string) ref
 
+val excerpt : ?max_output_lines:int -> string -> (string * string) list
+(** {!Ci.excerpt} with the lines that mark a failure ([marks]): the log's part
+    of the prompt. *)
+
 val excerpt_hook :
   (?max_output_lines:int -> string -> (string * string) list) ref
 

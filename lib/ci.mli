@@ -151,11 +151,19 @@ val log_text : string -> string
 (** The text of a job's log page. day10 logs are made to read like classic ones
     (without the indentation day10 adds to opam's output). *)
 
-val excerpt : ?max_output_lines:int -> string -> (string * string) list
+val failure_mark : Rx.t
+(** A line of a log that marks a failure without the word "error": a test
+    runner's [FAIL], a process killed by a signal, a test that timed out, make's
+    [*** ... Error N]. *)
+
+val excerpt :
+  ?max_output_lines:int -> ?marks:bool -> string -> (string * string) list
 (** The relevant parts of a log: [error_block] (the first
-    ["#=== ERROR while ..."] block), [solver], [final], [job_failed], [job],
-    [base] (the master commit the PR was merged onto), [builder] (main or
-    day10). *)
+    ["#=== ERROR while ..."] block, its output cut to the last
+    [max_output_lines] lines and the first error line before them, or with
+    [marks] the first {!failure_mark} line when no error line comes before
+    them), [solver], [final], [job_failed], [job], [base] (the master commit the
+    PR was merged onto), [builder] (main or day10). *)
 
 (** {1 Jobs} *)
 

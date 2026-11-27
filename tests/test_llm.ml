@@ -632,7 +632,57 @@ let test_key_error_line () =
     (Llm.key_error_line
        (Util.replace head "conf-glib-2.1" "pds.6.55"
        ^ Util.replace block "conf-glib-2.1" "pds.6.55"
-       ^ "### output ###\n# Passed tests\n"))
+       ^ "### output ###\n# Passed tests\n"));
+  (* A test runner's failure without the word "error" (#31312: nx killed by
+     SIGSEGV on no-flat-float-array, FAIL and an exception on ppc64), and
+     make's summary when nothing else names the error. *)
+  let output lines =
+    Util.replace head "conf-glib-2.1" "nx.1"
+    ^ Util.replace block "conf-glib-2.1" "nx.1"
+    ^ "### output ###\n"
+    ^ String.concat "" (List.map (fun l -> "# " ^ l ^ "\n") lines)
+  in
+  Alcotest.(check (option string))
+    "signal" (Some "the test ended its worker process, killed by SIGSEGV")
+    (Llm.key_error_line
+       (output
+          [
+            "  FAIL  cpu › a view";
+            "    the test ended its worker process, killed by SIGSEGV";
+          ]));
+  Alcotest.(check (option string))
+    "fail" (Some "FAIL  loads and saves")
+    (Llm.key_error_line
+       (output [ "  FAIL  loads and saves"; "      uncaught exception:" ]));
+  Alcotest.(check (option string))
+    "make" (Some "make: *** [Makefile:21: c] Error 2")
+    (Llm.key_error_line
+       (output [ "ar rcs x.a"; "make: *** [Makefile:21: c] Error 2" ]))
+
+(* The prompt's excerpt keeps the first line that marks a failure before the
+   last 80 lines when no error line comes before them (#31312: nx's FAIL ...
+   killed by SIGSEGV, 616 lines before the end); the rules' excerpt does
+   not. *)
+let test_excerpt_failure_marks () =
+  let text =
+    "#=== ERROR while compiling nx.1 ===#\n# exit-code 1\n### output ###\n"
+    ^ String.concat ""
+        (List.init 300 (fun i ->
+             if i = 100 then "#   FAIL  cpu › a view\n"
+             else if i = 101 then "#     killed by SIGSEGV\n"
+             else Printf.sprintf "# ok %d\n" i))
+  in
+  let block e = List.assoc "error_block" e in
+  Alcotest.(check bool)
+    "kept" true
+    (Util.contains
+       (block (Llm.excerpt ~max_output_lines:80 text))
+       "killed by SIGSEGV");
+  Alcotest.(check bool)
+    "not for the rules" false
+    (Util.contains
+       (block (Ci.excerpt ~max_output_lines:80 text))
+       "killed by SIGSEGV")
 
 (* The request sent to the Messages API, and the SDK's retry: not in the
    Python tests (the SDK did that), checked here on a fake transport. *)
@@ -802,6 +852,8 @@ let () =
             test_new_on_master_reaches_the_llm;
           Alcotest.test_case "llm_change_is_code" `Quick test_llm_change_is_code;
           Alcotest.test_case "key_error_line" `Quick test_key_error_line;
+          Alcotest.test_case "excerpt_failure_marks" `Quick
+            test_excerpt_failure_marks;
           Alcotest.test_case "http_request" `Quick test_http_request;
         ] );
     ]

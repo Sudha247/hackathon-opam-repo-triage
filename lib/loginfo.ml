@@ -23,7 +23,7 @@ let error_compilation_installation_re =
 
 let note_error_processing_re = Rx.v {|\[(NOTE|ERROR)\]|Processing:|}
 
-let log_info text =
+let log_info ?marks text =
   let installed = Odict.create () in
   let lines = Util.splitlines text in
   List.iter
@@ -52,7 +52,8 @@ let log_info text =
   in
   let blk =
     Option.value ~default:""
-      (List.assoc_opt "error_block" (Ci.excerpt ~max_output_lines:200 text))
+      (List.assoc_opt "error_block"
+         (Ci.excerpt ~max_output_lines:200 ?marks text))
   in
   let error_lines =
     List.map

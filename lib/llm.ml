@@ -100,9 +100,16 @@ let fetch_hook : (string -> string -> string) ref =
 
 let log_text_hook : (string -> string) ref = ref Ci.log_text
 
+(* The excerpt of the prompt keeps the lines that mark a failure without the
+   word "error" (FAIL, killed by SIGSEGV, timed out, make's *** Error N): the
+   model said the error was elided (#31312: nx's SIGSEGV, 616 lines before
+   the end). *)
+let excerpt ?max_output_lines text =
+  Ci.excerpt ?max_output_lines ~marks:true text
+
 let excerpt_hook :
     (?max_output_lines:int -> string -> (string * string) list) ref =
-  ref Ci.excerpt
+  ref excerpt
 
 let none_str = function Some s -> s | None -> "None"
 let packages_re = Rx.v {|^\s*=== \w+ \d+ packages?|}
@@ -779,11 +786,16 @@ let error_compilation_installation_re =
   Rx.v ~flags:[ Rx.M ]
     {|^\[ERROR\] (The (?:compilation|installation) of \S+ failed at "[^"\n]*")|}
 
-(* The marks of the line that best names an error, strongest first. *)
+(* The marks of the line that best names an error, strongest first: an
+   error, a test killed by a signal, timed out or failed (a test runner's
+   FAIL line, #31312), an exception, a failure in words. *)
 let error_markers =
   List.map Rx.v
     [
       {|\b(?:Error|error|Fatal error|fatal error):|};
+      {|\bkilled by SIG[A-Z]+\b|};
+      {|\btimed out after \d|};
+      {|^FAIL\b|};
       {|\bError\b|\b[Ee]xception\b|};
       {|\bfailed\b|not found|No such file|Read-only|cannot|};
     ]
@@ -792,20 +804,21 @@ let key_error_line text =
   let lines =
     List.filter_map
       (fun l -> match String.trim l with "" -> None | l -> Some l)
-      (Loginfo.log_info text).error_lines
+      (Loginfo.log_info ~marks:true text).error_lines
   in
   let lines =
     List.filter (fun l -> not (Rx.test_match error_while_context_re l)) lines
   in
-  let lines =
-    List.filter (fun l -> not (Rx.test_match make_re l)) lines
-    (* make's own summary *)
+  let makes, lines =
+    List.partition (fun l -> Rx.test_match make_re l) lines
+    (* make's own summary: only when nothing else names the error *)
   in
   let hit =
     List.find_map
       (fun rx -> List.find_opt (fun l -> Rx.test rx l) lines)
       error_markers
   in
+  let hit = match hit with Some h -> Some h | None -> List.nth_opt makes 0 in
   match hit with
   | Some h -> Some (Util.prefix_chars h 300)
   | None -> (

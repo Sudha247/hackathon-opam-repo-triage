@@ -18,8 +18,8 @@ type info = {
 }
 (** What a job's log says about its failure. *)
 
-val log_info : string -> info
-(** The facts of a log's text. *)
+val log_info : ?marks:bool -> string -> info
+(** The facts of a log's text ([marks]: see {!Ci.excerpt}). *)
 
 val dep_names : string option -> string -> string list
 (** [dep_names opam_text field]: the package names of an opam file's [depends]
