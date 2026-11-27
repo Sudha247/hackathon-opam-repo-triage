@@ -86,9 +86,12 @@ let platform_matrix js =
   if fails = [] || passes = [] then None
   else begin
     let fd = List.map job_dims fails and pd = List.map job_dims passes in
+    (* Not when a Windows job passes (#29582: ocaml-compiler.5.3 fails on
+       msys2, without diff, and passes on cygwin): see the distributions. *)
     if
       List.for_all (fun d -> d.os = "win32") fd
       && List.exists (fun d -> d.os <> "win32") pd
+      && not (List.exists (fun d -> d.os = "win32") pd)
     then
       Some
         ( "os",
@@ -461,7 +464,7 @@ let matrix_rules ?(failing_in_log = []) ?run jobs (earlier : Suggestion.t list)
                           earlier;
                         let dep =
                           match !tool with
-                          | Some m when dim = "os" ->
+                          | Some m when dim <> "arch" ->
                               List.assoc_opt (Rx.group m 1) cygwin_pkg
                           | _ -> None
                         in

@@ -881,6 +881,27 @@ let test_builder_specific_twin_age () =
     (stale (fun j -> if j == fail then at 20739 else at 20738) [ fail ]);
   Alcotest.(check (list string)) "not among" [] (stale old_run [])
 
+let test_windows_pattern () =
+  (* "Fails only on Windows" ([available: os != "win32"]) only when no Windows
+     job passes: ocaml-compiler.5.3 (#29582) fails on msys2 (no diff) and
+     passes on cygwin; the pattern is then msys2's. *)
+  let errors js =
+    List.map
+      (fun r -> Suggestion.str r.error)
+      (Matrix.matrix_rules js [] None [])
+  in
+  let linux = job ~category:"passed" "day10,debian-13,x86_64,5.3,x.1" in
+  let msys2 = job "day10,msys2,x86_64,5.3,x.1" in
+  Alcotest.(check (list string))
+    "windows"
+    [ "Fails only on Windows (msys2): the compilation of x failed" ]
+    (errors [ msys2; linux ]);
+  Alcotest.(check (list string))
+    "cygwin passes"
+    [ "Fails only on distributions msys2: the compilation of x failed" ]
+    (errors
+       [ msys2; linux; job ~category:"passed" "day10,cygwin,x86_64,5.3,x.1" ])
+
 let test_pattern_after_a_change_from_the_log () =
   (* liquidsoap 2.4.6 (#30906): its tests fail on OCaml 5 with [Library
      "bytes" not found]; the log gives base-bytes, so no workaround from the
@@ -3640,6 +3661,7 @@ let () =
           p "unanalysed_order" test_unanalysed_order;
           p "builder_specific_same_arch" test_builder_specific_same_arch;
           p "builder_specific_twin_age" test_builder_specific_twin_age;
+          p "windows_pattern" test_windows_pattern;
           p "pattern_after_a_change_from_the_log"
             test_pattern_after_a_change_from_the_log;
           p "unanalysed_count" test_unanalysed_count;
