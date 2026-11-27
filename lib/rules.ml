@@ -1670,6 +1670,7 @@ type build = {
   text : string; (* the job's log *)
   info : info;
   pr_packages : string list;
+  pr_sha : string; (* the PR's commit: the opam files of [pr_packages] *)
   gref : string; (* the git ref [opam_text] comes from *)
   fname : string;
   fver : string;
@@ -2058,7 +2059,9 @@ let file_tests_re = Rx.v ~flags:[ Rx.M ] {|^File "(?:[^"]*/)?tests?/|}
 (* An unbound identifier from a library: the bound on the dependency that
    adds or removes it. *)
 let library_bound (b : build) out err_text kind mods ident top =
-  let { src; text; info; pr_packages; gref; fname; fver; opam_text } = b in
+  let { src; text; info; pr_packages; pr_sha; gref; fname; fver; opam_text } =
+    b
+  in
   (* Candidate packages whose name matches the top module. *)
   let installed_names = List.map fst info.installed in
   let cands =
@@ -2235,6 +2238,13 @@ let library_bound (b : build) out err_text kind mods ident top =
                   (if Odict.mem chosen pkg then [ S.module_find_source ] else [])
               in
               let use x = if not (List.mem x !used) then used := x :: !used in
+              (* The upstream repository of pkg.v, from its opam file (in
+                 the PR for a version the PR adds). *)
+              let upstream v =
+                if List.mem (pkg ^ "." ^ v) pr_packages then
+                  S.upstream ~ref:pr_sha src pkg v
+                else S.upstream src pkg v
+              in
               let bounds = S.existing_bounds opam_text pkg in
               let allowed v =
                 S.satisfies v (List.filter (fun (op, _) -> op <> "=") bounds)
@@ -2285,9 +2295,9 @@ let library_bound (b : build) out err_text kind mods ident top =
                     | None -> (
                         (* 3. fallback: shallow blob-less git fetch of the matching tag *)
                         let repo =
-                          match S.upstream src pkg v with
+                          match upstream v with
                           | Some r -> Some r
-                          | None -> S.upstream src pkg bad
+                          | None -> upstream bad
                         in
                         let t =
                           match repo with
@@ -2325,7 +2335,7 @@ let library_bound (b : build) out err_text kind mods ident top =
                     match has_mod with
                     | Some b -> b
                     | None -> (
-                        match S.upstream src pkg bad with
+                        match upstream bad with
                         | Some repo when repo <> "" -> (
                             match S.tag_for src repo pkg bad with
                             | Some t when t <> "" ->
@@ -2385,6 +2395,24 @@ let library_bound (b : build) out err_text kind mods ident top =
                           `New (Some new_);
                           `Confidence "high";
                         ];
+                      (* A version this PR adds or changes breaks a reverse
+                         dependency: opam-repository's usual fix is the upper
+                         bound in the reverse dependency, in the same PR. *)
+                      if
+                        op = "<"
+                        && List.mem (pkg ^ "." ^ v) pr_packages
+                        && not (List.mem (fname ^ "." ^ fver) pr_packages)
+                      then begin
+                        Suggestion.update out (Where.fix_where Pr "this PR");
+                        out.note <-
+                          Some
+                            (String.trim
+                               (Suggestion.str out.note
+                               ^ Printf.sprintf
+                                   " %s.%s is this PR's: the usual fix is this \
+                                    bound in %s.%s's opam file, in this PR."
+                                   pkg v fname fver))
+                      end;
                       if
                         List.mem (pkg ^ "." ^ fver) pr_packages
                         && S.upstream ~ref:gref src fname fver
@@ -2453,7 +2481,9 @@ let build_failure src job text (info : info) pr_packages pr_sha out (fname, fver
     | Some t when t <> "" -> Some t
     | _ -> S.opam_file src fname fver
   in
-  let b = { src; text; info; pr_packages; gref; fname; fver; opam_text } in
+  let b =
+    { src; text; info; pr_packages; pr_sha; gref; fname; fver; opam_text }
+  in
 
   match same_version_reinstall b with
   | Some fields -> Suggestion.update out fields

@@ -64,7 +64,8 @@ val health_run_stale : ?today:string -> string option -> bool
 (** Whether an opam-health-check run of a date (YYYY-MM-DD...) is older than a
     week (the service runs about daily: an older run is stuck, and describes an
     older master). An undated run is used; offline, the test fixtures are
-    snapshots: never stale. [today] is "YYYY-MM-DD". *)
+    snapshots: never stale, nor while recording one (OPAM_CI_RECORD=1, so that
+    it holds what the replay reads). [today] is "YYYY-MM-DD". *)
 
 (** {1 Rules on the CI run} *)
 

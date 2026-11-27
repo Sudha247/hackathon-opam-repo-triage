@@ -291,7 +291,10 @@ let health_max_age_days = 7
 let health_run_stale ?today date =
   match date with
   | None | Some "" -> false
-  | _ when Net.is_offline () -> false
+  | _ when Net.is_offline () || Sys.getenv_opt "OPAM_CI_RECORD" = Some "1" ->
+      (* the tests replay a fixture at any date; recording one fetches what
+         the replay reads *)
+      false
   | Some d -> (
       match Date.days_of_date (Util.prefix_chars d 10) with
       | None -> false

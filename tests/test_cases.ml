@@ -779,6 +779,28 @@ let cases =
             ({|note|}, {|filter the depext and `available` on `arch`|});
           ];
       ] );
+    (* A release that removes a function its reverse dependencies use (PR
+       31339): uring.2.15.2 exists only in the PR, so its upstream repository
+       comes from the PR's opam file (on master the git fallback found none,
+       and ocaml.org has no docs for it yet). The bound goes to the reverse
+       dependency, in this PR. *)
+    ( {|uring-revdeps-bound|},
+      {|3984ea4fcfb49293a19803bcc13fb18f4fa84789|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^compilers,5\.5,uring\.2\.15\.2,revdeps,eio_linux\.1\.6$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|library-api|});
+            ({|failing|}, {|eio_linux.1.6|});
+            ({|new|}, {|"uring" {>= "2.15.0" & < "2.15.2"}|});
+            ({|where|}, {|this PR|});
+          ];
+      ] );
   ]
 
 let fixtures =
