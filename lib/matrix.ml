@@ -321,6 +321,27 @@ let platform_property_rules : Rule.t list =
     Missing_system_package;
   ]
 
+(* The rules that recognise an error in the code (an API, a link, the C
+   compiler, x86-only flags, test output): something to fix upstream. *)
+let code_error_rules : Rule.t list =
+  [
+    Library_api;
+    Stdlib_change;
+    Safe_string;
+    Link_error;
+    Ocaml_runtime_api;
+    Newer_c_compiler;
+    Platform_unsupported;
+    Install_missing_files;
+    Test_output;
+    Test_output_ocaml;
+  ]
+
+(* A log's key error line that is a compiler's or a build's error ("error:",
+   "error[E0308]:", "Error:", "fatal error"), not opam's "[ERROR] The
+   compilation of … failed". *)
+let error_line_re = Rx.v {|\berror(\[E\d+\])?:|\bError:|fatal error|}
+
 let os_words = function
   | "macos" -> "macOS"
   | "freebsd" -> "FreeBSD"
@@ -336,10 +357,12 @@ let os_words = function
    conf-postgresql.2 and conf-mariadb.2 under veins' tests on macOS). The
    matrix's other patterns leave experimental jobs out. Not the keys for
    which a job's log gave a change, or a result kept beside the patterns
-   (that suggestion stays, marked experimental). The diagnosis of a log on those keys is carried over (the
-   results without a change on a key the matrix explains are dropped), and
-   when it is a property of the platform, accepting the failure there is the
-   alternative. *)
+   (that suggestion stays, marked experimental). The diagnosis of a log on
+   those keys is carried over (the results without a change on a key the
+   matrix explains are dropped). Its place follows the cause: a property of
+   the platform, nothing to fix (accepting the failure there is the
+   alternative); an error in the code, upstream (medium confidence); not
+   known, nothing to fix with medium confidence. *)
 let experimental_only ~fin ~earlier ~from_log ~group_unknown ~pkg ~kind ~revdep
     ~target js out =
   let failed j = List.mem j.category failing_cats in
@@ -355,43 +378,62 @@ let experimental_only ~fin ~earlier ~from_log ~group_unknown ~pkg ~kind ~revdep
     List.mem k from_log
     || List.exists (fun r -> r.Suggestion.keep && r.key = Some k) earlier
   in
+  (* the failing dependency: the log's package first (the CI's reason for a
+     dependency failure names the first of the failed packages) *)
+  let culprit j =
+    match fin j with
+    | Some d when d <> "" ->
+        if fst (split_pkg d) <> fst (split_pkg pkg) then Some d else None
+    | _ -> (
+        match
+          if j.category = Dependency then failing_dep j.reason else None
+        with
+        | Some x when x <> "" -> Some x
+        | _ -> None)
+  in
+  (* a key whose read log has no rule's diagnosis, no error line and no conf
+     package failing: the cause is not known, and that job's own entry
+     (marked experimental) stays, for the LLM as before *)
+  let unknown_read j =
+    let k = failure_key j in
+    let rs = List.filter (fun r -> r.Suggestion.key = Some k) earlier in
+    rs <> []
+    && List.for_all
+         (fun r ->
+           (r.Suggestion.rule = None || r.rule = Some Rule.Unrecognised)
+           &&
+           match r.key_line with
+           | Some l -> not (Rx.test error_line_re l)
+           | None -> true)
+         rs
+    &&
+    match culprit j with
+    | Some d -> not (String.starts_with ~prefix:"conf-" d)
+    | None -> true
+  in
   let only =
     List.filter
       (fun j ->
         j.experimental && failed j
         && (not (List.mem (failure_key j) blocking))
-        && not (covered (failure_key j)))
+        && (not (covered (failure_key j)))
+        && not (unknown_read j))
       js
   in
   let keys = Util.dedup (keys_of only) in
   if only <> [] && real_passes js <> [] then begin
-    let named =
-      Util.dedup
-        (List.filter_map
-           (fun j ->
-             (* the log's package first: the CI's reason for a dependency
-                failure names the first of the failed packages *)
-             match fin j with
-             | Some d when d <> "" ->
-                 if fst (split_pkg d) <> fst (split_pkg pkg) then Some d
-                 else None
-             | _ -> (
-                 match
-                   if j.category = Dependency then failing_dep j.reason
-                   else None
-                 with
-                 | Some x when x <> "" -> Some x
-                 | _ -> None))
-           only)
+    let named = Util.dedup (List.filter_map culprit only) in
+    let on_keys r =
+      match r.Suggestion.key with Some k -> List.mem k keys | None -> false
     in
     let evidence =
       List.find_opt
         (fun r ->
-          r.Suggestion.rule <> None
-          && (match r.key with Some k -> List.mem k keys | None -> false)
+          r.Suggestion.rule <> None && on_keys r
           && r.rule <> Some Rule.Unrecognised)
         earlier
     in
+    let read = List.exists on_keys earlier in
     let dims = List.map job_dims only in
     let distros =
       sorted_strings
@@ -415,21 +457,56 @@ let experimental_only ~fin ~earlier ~from_log ~group_unknown ~pkg ~kind ~revdep
       | [] -> pkg
       | l -> String.concat ", " (List.sort_uniq compare l)
     in
-    let alternative =
+    (* What the logs on those keys say: a property of the platform (a rule's
+       missing tool, header, library, depext or system package, or a conf
+       package's check failing: #31316's conf-postgresql and conf-mariadb on
+       macOS), an error in the code (a rule's, or a key error line that is a
+       compiler's: #30751's Rust "error[E0308]: mismatched types"), or
+       nothing known (no log read, beyond --max, or no error line in it). *)
+    let names l =
+      List.sort_uniq compare (List.map (fun p -> fst (split_pkg p)) l)
+    in
+    let cause =
       match evidence with
       | Some r when Titles.has_rule platform_property_rules r ->
-          let owner =
-            match Suggestion.get r.failing with
-            | Some f when f <> "" -> fst (split_pkg f)
-            | _ -> fst (split_pkg pkg)
-          in
+          `Platform
+            (names
+               [
+                 (match Suggestion.get r.failing with
+                 | Some f when f <> "" -> f
+                 | _ -> pkg);
+               ])
+      | _
+        when named <> []
+             && List.for_all
+                  (fun p -> String.starts_with ~prefix:"conf-" p)
+                  named ->
+          `Platform (names named)
+      | Some r when Titles.has_rule code_error_rules r -> `Code None
+      | _ -> (
+          match
+            List.find_map
+              (fun r ->
+                match r.Suggestion.key_line with
+                | Some l when on_keys r && Rx.test error_line_re l -> Some l
+                | _ -> None)
+              earlier
+          with
+          | Some l -> `Code (Some l)
+          | None -> `Unknown)
+    in
+    let alternative =
+      match cause with
+      | `Platform owners ->
           [
             `Alternative
               (Printf.sprintf
-                 "x-ci-accept-failures: [%s]   (in %s, if it cannot support %s)"
+                 "x-ci-accept-failures: [%s]   (in %s, if %s cannot support %s)"
                  (String.concat " "
                     (List.map (fun d -> "\"" ^ d ^ "\"") distros))
-                 owner (String.concat ", " oses));
+                 (String.concat ", " owners)
+                 (if List.length owners > 1 then "they" else "it")
+                 (String.concat ", " oses));
           ]
       | _ -> []
     in
@@ -440,19 +517,32 @@ let experimental_only ~fin ~earlier ~from_log ~group_unknown ~pkg ~kind ~revdep
         (String.concat " and " oses
         ^ if List.length oses > 1 then " are" else " is")
         (if List.length oses > 1 then "their" else "its")
+      ^ (match evidence with
+        | Some r ->
+            Printf.sprintf " Its log: %s: %s%s" (Titles.title_of r)
+              (Util.rstrip ~chars:"." (Suggestion.str r.error))
+              (match r.note with Some n when n <> "" -> ". " ^ n | _ -> ".")
+        | None -> "")
       ^
-      match evidence with
-      | Some r ->
-          Printf.sprintf " Its log: %s: %s%s" (Titles.title_of r)
-            (Util.rstrip ~chars:"." (Suggestion.str r.error))
-            (match r.note with Some n when n <> "" -> ". " ^ n | _ -> ".")
-      | None -> ""
+      match cause with
+      | `Code (Some l) ->
+          Printf.sprintf
+            " Its log shows an error in the build, for upstream to fix: `%s`."
+            (Util.prefix_chars l 200)
+      | `Code None -> " An error in the code, for upstream to fix."
+      | `Unknown when read -> "" (* a rule's diagnosis, above *)
+      | `Unknown -> " No log of these jobs was read: the cause is not known."
+      | `Platform _ -> ""
     in
     out :=
       Suggestion.make
         ([ `Variant label; `Failing (Some failing) ]
-        @ Where.fix_where Nothing
-            "nothing (an experimental platform does not block the merge)"
+        @ (match cause with
+          | `Code _ ->
+              Where.fix_where Upstream "upstream (the package's source)"
+          | _ ->
+              Where.fix_where Nothing
+                "nothing (an experimental platform does not block the merge)")
         @ [
             `Rule Rule.Experimental_only;
             `Experimental true;
@@ -473,7 +563,8 @@ let experimental_only ~fin ~earlier ~from_log ~group_unknown ~pkg ~kind ~revdep
                      ^ (if List.length l > 1 then "the dependencies "
                         else "the dependency ")
                      ^ String.concat ", " (List.sort_uniq compare l)));
-            `Confidence "high";
+            `Confidence
+              (match cause with `Platform _ -> "high" | _ -> "medium");
             `Note note;
             `Keys keys;
             `Jobs (variants only);
@@ -1046,10 +1137,49 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
         in
         let r0 = List.hd rs in
         if rule = Some Rule.Experimental_only then
-          (* One entry, still not blocking: the packages' own diagnoses
-             (their logs) are left out. *)
-          let note, _, _ =
-            Util.partition (Suggestion.str r0.note) " Its log: "
+          (* One entry, still not blocking, whose place is the most
+             conservative of theirs: upstream when a log shows an error in the
+             code (with that example), else nothing to fix, with medium
+             confidence when a cause is not known. *)
+          let base r =
+            let b, m, _ =
+              Util.partition
+                (Suggestion.str r.Suggestion.note)
+                "other platforms."
+            in
+            b ^ m
+          in
+          let detail r =
+            let n = Suggestion.str r.Suggestion.note in
+            String.trim (Util.slice ~start:(String.length (base r)) n)
+          in
+          let upstream =
+            List.filter (fun r -> r.Suggestion.where_kind = Some Upstream) rs
+          and unknown =
+            List.filter
+              (fun r -> Suggestion.get r.Suggestion.confidence = Some "medium")
+              rs
+          in
+          let cons =
+            match (upstream, unknown) with
+            | r :: _, _ | [], r :: _ -> r
+            | [], [] -> r0
+          in
+          let note =
+            base r0
+            ^
+            match upstream with
+            | r :: _ ->
+                Printf.sprintf
+                  " %d of the %d packages fail with an error in the code, for \
+                   upstream to fix; %s: %s"
+                  (List.length upstream) (List.length rs)
+                  (Suggestion.str_field r.failing)
+                  (detail r)
+            | [] when unknown <> [] ->
+                Printf.sprintf " The cause is not known for %d of them."
+                  (List.length unknown)
+            | [] -> ""
           in
           [
             Suggestion.make
@@ -1062,12 +1192,16 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
                       (String.concat ", " (Util.take 6 names)
                       ^ if List.length names > 6 then " ..." else ""));
                ]
-              @ Where.fix_where Nothing (Suggestion.str r0.fix_in)
+              @ Where.fix_where
+                  (Option.value ~default:Where_kind.Nothing cons.where_kind)
+                  (Suggestion.str cons.fix_in)
               @ [
                   `Rule Rule.Experimental_only;
                   `Experimental true;
                   `Error pattern;
-                  `Confidence "high";
+                  `Confidence
+                    (Option.value ~default:"high"
+                       (Suggestion.get cons.confidence));
                   `Note note;
                   `Keys (List.concat_map (fun r -> r.Suggestion.keys) rs);
                   `Jobs

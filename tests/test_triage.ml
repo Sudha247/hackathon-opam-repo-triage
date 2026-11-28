@@ -1066,6 +1066,95 @@ let test_experimental_only () =
        (fun (_, _, a, _) -> a)
        (run ~earlier:[ earlier ] [ macos; linux ]))
 
+let test_experimental_only_cause () =
+  (* Where the fix of a failure only on experimental platforms goes follows
+     its cause: an error in the code (#30751 randoml: rustc's
+     "error[E0308]: mismatched types" in vendored ocaml-interop) is
+     upstream's, medium confidence; a conf package's check failing (#31316:
+     conf-postgresql.2 on macOS) is a property of the platform, nothing to
+     fix, with x-ci-accept-failures in the conf package; no log read: nothing
+     to fix, medium. A log read without an error line or a rule's
+     diagnosis gives no such entry: the job's own entry stays (for the
+     LLM). Five packages or more: one entry, whose place is the most
+     conservative of theirs. *)
+  let linux v =
+    job ~category:"passed" (Printf.sprintf "day10,debian-13,x86_64,5.3,%s" v)
+  in
+  let macos ?(category = "build") ?(reason = "The compilation of x failed") v =
+    job ~experimental:true ~category ~reason
+      (Printf.sprintf "macos,macos-homebrew-ocaml-5.3-arm64,%s" v)
+  in
+  let unexplained j line =
+    let r = d [ ("failing", s "x.1"); ("note", s "Unrecognised error.") ] in
+    r.unexplained <- true;
+    r.key <- Some (Ci.failure_key j);
+    r.key_line <- line;
+    r
+  in
+  let place ?(earlier = []) js =
+    List.map
+      (fun r ->
+        ( Where_kind.to_string (Where.where_kind r),
+          Suggestion.str_field r.confidence,
+          Suggestion.str r.alternative,
+          Suggestion.str r.note ))
+      (List.filter
+         (fun r -> r.rule = Some Rule.Experimental_only)
+         (Matrix.collapse_systemic (Matrix.matrix_rules js earlier None [])))
+  in
+  let m = macos "x.1" in
+  (match
+     place
+       ~earlier:[ unexplained m (Some "error[E0308]: mismatched types") ]
+       [ m; linux "x.1" ]
+   with
+  | [ (w, c, a, n) ] ->
+      check_str "code: where" "upstream" w;
+      check_str "code: confidence" "medium" c;
+      check_str "code: no alternative" "" a;
+      check_true "code: the line"
+        (Util.contains n "`error[E0308]: mismatched types`")
+  | l -> Alcotest.failf "code: %d entries" (List.length l));
+  (match place [ m; linux "x.1" ] with
+  | [ (w, c, _, n) ] ->
+      check_str "unread: where" "none" w;
+      check_str "unread: confidence" "medium" c;
+      check_true "unread: note"
+        (Util.contains n "No log of these jobs was read")
+  | l -> Alcotest.failf "unread: %d entries" (List.length l));
+  Alcotest.(check int)
+    "read, no error line" 0
+    (List.length
+       (place
+          ~earlier:[ unexplained m (Some "make: *** [all] Stopped") ]
+          [ m; linux "x.1" ]));
+  let dep =
+    macos ~category:"dependency"
+      ~reason:"conf-postgresql.2 conf-mariadb.2 failed:" "x.1,tests"
+  in
+  (match place [ dep; linux "x.1,tests" ] with
+  | [ (w, c, a, _) ] ->
+      check_str "conf: where" "none" w;
+      check_str "conf: confidence" "high" c;
+      check_str "conf: alternative"
+        {|x-ci-accept-failures: ["macos-homebrew"]   (in conf-postgresql, if it cannot support macOS)|}
+        a
+  | l -> Alcotest.failf "conf: %d entries" (List.length l));
+  (* five packages, one of them with an error in its code *)
+  let pkgs = List.init 5 (fun i -> Printf.sprintf "p%d.1" i) in
+  let js = List.concat_map (fun p -> [ macos p; linux p ]) pkgs in
+  let code = List.hd js in
+  match
+    place
+      ~earlier:[ unexplained code (Some "fatal error: x.h: No such file") ]
+      js
+  with
+  | [ (w, c, _, n) ] ->
+      check_str "collapsed: where" "upstream" w;
+      check_str "collapsed: confidence" "medium" c;
+      check_true "collapsed: note" (Util.contains n "1 of the 5 packages")
+  | l -> Alcotest.failf "collapsed: %d entries" (List.length l)
+
 let test_unknown_outcome () =
   (* A job the CI failed is neither a pass nor a failure: "fails only on
      Windows" needs a real pass on its platform (#28291: fedora-45's image
@@ -4033,6 +4122,7 @@ let () =
           p "windows_pattern" test_windows_pattern;
           p "unknown_outcome" test_unknown_outcome;
           p "experimental_only" test_experimental_only;
+          p "experimental_only_cause" test_experimental_only_cause;
           p "unread_on_a_broken_image" test_unread_on_a_broken_image;
           p "compiler_option" test_compiler_option;
           p "pattern_after_a_change_from_the_log"

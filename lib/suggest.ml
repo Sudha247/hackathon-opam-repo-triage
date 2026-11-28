@@ -185,6 +185,17 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
     let lb = Rules.lower_bounds_rule src j text r pr_packages sha in
     let info = Loginfo.log_info text in
     r.installed <- Some info.installed;
+    (* for Matrix.experimental_only: what the log of an experimental job says *)
+    if j.experimental then
+      r.key_line <-
+        (match
+           List.find_opt
+             (Rx.test Matrix.error_line_re)
+             (List.map String.trim info.error_lines)
+         with
+        | Some l ->
+            Some l (* the first: rustc's error[E0308] before cargo's summary *)
+        | None -> Llm.key_error_line text);
     let pb =
       Rules.previous_release_bound src j info pr_packages sha prev_cache
     in
@@ -447,7 +458,8 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
       r.keep <- false;
       r.depexts <- None;
       r.check <- None;
-      r.broken_platform <- false)
+      r.broken_platform <- false;
+      r.key_line <- None)
     results;
   (match llm with
   | Some l when data.unfinished > 0 && not l.dry_run ->

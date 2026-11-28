@@ -150,6 +150,9 @@ module T : sig
     mutable broken_platform : bool;
         (** a failure of the CI that every job of its builder and distribution
             has (a broken image: see ci_failure in rules.ml) *)
+    mutable key_line : string option;
+        (** the key error line of the job's log (Llm.key_error_line), for the
+            matrix rules *)
     mutable placed : bool;
         (** the review placed it on a line of the PR's diff *)
   }

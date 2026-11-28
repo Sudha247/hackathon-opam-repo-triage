@@ -86,6 +86,7 @@ module T = struct
     mutable installed : (string * string) list option;
     mutable unexplained : bool;
     mutable broken_platform : bool;
+    mutable key_line : string option;
     mutable placed : bool;
   }
 end
@@ -177,6 +178,7 @@ let create () =
     install = None;
     unexplained = false;
     broken_platform = false;
+    key_line = None;
     placed = false;
   }
 

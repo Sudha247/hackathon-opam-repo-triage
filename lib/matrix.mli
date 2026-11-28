@@ -67,6 +67,10 @@ val matrix_rules :
     distribution: see {!per_builder}); without it, the pattern trusts any
     passing main-builder job (see {!twin_confidence}). *)
 
+val error_line_re : Rx.t
+(** A compiler's or a build's error line ("error:", "error[E0308]:", "Error:",
+    "fatal error"), not opam's "[ERROR] The compilation of … failed". *)
+
 val collapse_systemic : ?threshold:int -> Suggestion.t list -> Suggestion.t list
 (** The same matrix pattern on many packages (at least [threshold], 5 by
     default) is one cause (the PR, a shared dependency or the CI environment),
