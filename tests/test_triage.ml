@@ -677,6 +677,31 @@ let test_conf_rule () =
     (String.starts_with ~prefix:"conf-glib-2 has no depexts at all"
        (Suggestion.str r.note))
 
+(* opam's os-family is the first word of ID_LIKE: "suse" on openSUSE Leap
+   (the CI's opensuse-16.0), "opensuse" on Tumbleweed; os-distribution is ID,
+   "opensuse-leap" or "opensuse-tumbleweed". A depext for os-family "suse"
+   only (plcairo's "plplot-devel", PR 30297) misses Tumbleweed. *)
+let test_opensuse_family () =
+  let leap = "distributions,opensuse-16.0-ocaml-5.5,a.1"
+  and tw = "day10,opensuse-tumbleweed,x86_64,5.5,a.1" in
+  let ev f v = Filter.eval_filter (Some f) (Filter.platform_vars (job v)) in
+  let pb = Alcotest.(option bool) in
+  Alcotest.check pb "suse on Leap" (Some true) (ev {|os-family = "suse"|} leap);
+  Alcotest.check pb "suse on Tumbleweed" (Some false)
+    (ev {|os-family = "suse"|} tw);
+  Alcotest.check pb "opensuse on Tumbleweed" (Some true)
+    (ev {|os-family = "opensuse"|} tw);
+  Alcotest.check pb "leap" (Some true)
+    (ev {|os-distribution = "opensuse-leap"|} leap);
+  Alcotest.check pb "either" (Some true)
+    (ev {|os-family = "suse" | os-family = "opensuse"|} tw);
+  let opam =
+    Util.replace conf_opam {|["libglib2.0-dev"] {os-family = "debian"}|}
+      {|["glib2-devel"] {os-family = "suse"}|}
+  in
+  check_true "no depext on Tumbleweed" (conf_rule ~opam tw <> None);
+  check_none "a depext on Leap" (conf_rule ~opam leap)
+
 let test_platforms_of_the_group () =
   (* The jobs with the same error on other platforms (#27642): those without
      a depext are named, an entry whose filter misses its platform (there,
@@ -3940,6 +3965,7 @@ let () =
           p "rule" test_conf_rule;
           p "platforms_of_the_group" test_platforms_of_the_group;
           p "depext_entries" test_depext_entries;
+          p "opensuse_family" test_opensuse_family;
         ] );
       ( "RulesTest",
         [

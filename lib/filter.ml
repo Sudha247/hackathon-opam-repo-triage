@@ -15,14 +15,23 @@ let os_distribution =
     ("msys2", "msys2");
     ("macos-homebrew", "homebrew");
     ("freebsd", "freebsd");
+    ("opensuse", "opensuse-leap");
+    ("opensuse-tumbleweed", "opensuse-tumbleweed");
   ]
 
 (* opam's os-family (OpamSysPoll.poll_os_family): on Linux the first word of
    ID_LIKE in /etc/os-release, else the distribution's ID; "bsd" and
-   "windows"; elsewhere the os-distribution. CentOS Stream 9 and 10 have
-   ID_LIKE="rhel fedora" (centos-stream-release.spec, branches c9s and c10s
-   on gitlab.com/redhat/centos-stream/rpms). openSUSE is left out: Leap 15
-   says "suse opensuse", but Leap 16.0's and Tumbleweed's were not checked. *)
+   "windows"; elsewhere the os-distribution. Its os-distribution on Linux is
+   ID. CentOS Stream 9 and 10 have ID_LIKE="rhel fedora"
+   (centos-stream-release.spec, branches c9s and c10s on
+   gitlab.com/redhat/centos-stream/rpms). openSUSE: the CI's "opensuse-16.0"
+   (and Leap 15's "opensuse-15.N") is Leap, ID="opensuse-leap" and
+   ID_LIKE="suse opensuse" (Leap-release.spec, 000release-packages of
+   src.opensuse.org/openSUSE/Leap, branch leap-16.0; Leap 15.6's
+   /etc/os-release is the same); Tumbleweed has ID="opensuse-tumbleweed" and
+   ID_LIKE="opensuse suse" (openSUSE-release.spec, branch factory of
+   src.opensuse.org/pool/000release-packages): os-family "suse" on Leap,
+   "opensuse" on Tumbleweed. *)
 let os_family =
   [
     ("debian", "debian");
@@ -35,6 +44,8 @@ let os_family =
     ("fedora", "fedora");
     ("centos", "rhel");
     ("macos-homebrew", "homebrew");
+    ("opensuse", "suse");
+    ("opensuse-tumbleweed", "opensuse");
   ]
 
 let unstable_testing_re = Rx.v {|-[\d.]+$|-(unstable|testing)$|}
