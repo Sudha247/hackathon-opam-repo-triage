@@ -758,6 +758,27 @@ let cases =
             ({|error|}, {|archlinux: plpot (depexts of plcairo.5.15.0.1)|});
           ];
       ] );
+    (* opam's "These packages are still missing" names no package: the
+       failing package declares them itself (plcairo's "plplot-devel" and
+       "epel-release" on centos, added by PR 30297), so the fix is in the
+       PR, not in a dependency. *)
+    ( {|plcairo-still-missing-own-depext|},
+      {|fa8b5f03906e3abc1bfaed14e7a9793575ee5f67|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^distributions,centos-10-ocaml-4\.14,plcairo|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|missing-system-package|});
+            ({|failing|}, {|plcairo.5.15.0.1|});
+            ({|where|}, {|this PR|});
+            ({|error|}, {|plplot-devel (depexts of plcairo.5.15.0.1)|});
+          ];
+      ] );
     ( {|conf-rust-llvm-unavailable-depext|},
       {|883443dcb74125770863632551853b048843182a|},
       [

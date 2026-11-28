@@ -1819,7 +1819,7 @@ let day10_rebuild job text =
 (* Failures of the CI rather than of the build: a system package missing
    from the distribution, a crash of the CI tool, a container that did not
    start, a network error. *)
-let ci_failure job text (info : info) pr_packages =
+let ci_failure src job text (info : info) pr_packages pr_sha =
   let owner = match failing_pkg job with Some o -> o | None -> "" in
   let dims = job_dims job in
   let plat =
@@ -1847,20 +1847,52 @@ let ci_failure job text (info : info) pr_packages =
         match Rx.search these_packages_are_re text with
         | Some m when info.failing = None ->
             let names = Util.split (Rx.group m 1) in
-            let is_conf =
-              String.starts_with ~prefix:"conf-" (fst (split_pkg owner))
+            let name, version = split_pkg owner in
+            let in_pr = List.mem owner pr_packages in
+            (* The message names no package: the failing package declares
+               these depexts when each is in one of its depexts whose filter
+               may hold here (#30297: plcairo's own "plplot-devel" and
+               "epel-release" on centos, added by the PR); its opam file is
+               the PR's when it is one of the PR's packages. *)
+            let own_depexts () =
+              let gref =
+                if in_pr then pr_sha
+                else
+                  match info.base with
+                  | Some b when b <> "" -> b
+                  | _ -> "master"
+              in
+              let opam_text =
+                match S.opam_file ~ref:gref src name version with
+                | Some t when t <> "" -> Some t
+                | _ -> S.opam_file src name version
+              in
+              let env = Filter.platform_vars job in
+              List.concat_map
+                (fun (pkgs, flt) ->
+                  if Filter.eval_filter (Some flt) env = Some false then []
+                  else pkgs)
+                (Option.value ~default:[] (depext_entries opam_text))
             in
+            let is_conf = String.starts_with ~prefix:"conf-" name in
+            let own =
+              (not is_conf) && owner <> "" && names <> []
+              &&
+              let own = own_depexts () in
+              List.for_all (fun n -> List.mem n own) names
+            in
+            let declared = is_conf || own in
             Some
               ([ `Rule Rule.Missing_system_package; `Failing (Some owner) ]
-              @ (if is_conf then
-                   Where.pr_or_other owner (List.mem owner pr_packages)
+              @ (if declared then Where.pr_or_other owner in_pr
                  else
                    Where.fix_where Other_package
                      "the dependency declaring these depexts")
               @ [
                   `Error
-                    (Printf.sprintf "System packages not available on %s: %s"
-                       plat (String.concat ", " names));
+                    (Printf.sprintf "System packages not available on %s: %s%s"
+                       plat (String.concat ", " names)
+                       (if own then " (depexts of " ^ owner ^ ")" else ""));
                 ]
               @ missing_system_package_fields ())
         | _ -> None);
@@ -2862,7 +2894,7 @@ let suggest_for_job src job text pr_packages pr_sha : Suggestion.t =
     out.distros <-
       [ (match dd.distro with Some d when d <> "" -> d | _ -> dd.os) ]
     (* see accepted_but_failing *);
-  (match ci_failure job text info pr_packages with
+  (match ci_failure src job text info pr_packages pr_sha with
   | Some fields -> Suggestion.update out fields
   | None -> (
       match info.failing with
