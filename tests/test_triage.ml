@@ -1246,6 +1246,86 @@ let test_unread_on_a_broken_image () =
             else j)
           jobs))
 
+(* Suggest on synthetic jobs whose logs are [log url], offline; the logs of
+   [cached] are in the cache (offline, the other OSes' logs of a failure are
+   read only from the cache: see Suggest.os_splits). *)
+let suggest_logs ?(max = 6) ~log ~cached jobs =
+  let fetch = !Suggest.fetch_hook in
+  let cache = tmpdir () in
+  List.iter
+    (fun (j : Ci.job) ->
+      Out_channel.with_open_bin (Net.cache_path j.url cache) ignore)
+    cached;
+  (Suggest.fetch_hook := fun url _ -> log url);
+  Net.offline_ref := true;
+  Fun.protect
+    ~finally:(fun () -> Suggest.fetch_hook := fetch)
+    (fun () ->
+      Suggest.suggest (String.make 40 '0') (data jobs)
+        (Sources.create (tmpdir ()))
+        cache max None None)
+
+let test_split_ci_failure () =
+  (* One failure key on Alpine and Cygwin; Cygwin's log is a CI failure (its
+     image), Alpine's a build failure: the CI failure makes only Cygwin's
+     job of unknown outcome, not every job of the key, so Alpine's failure,
+     with Debian and Cygwin (4.14) passing, is a pattern. *)
+  let alpine = job "day10,alpine-3.24,x86_64,5.5,x.1"
+  and cygwin = job "day10,cygwin,x86_64,5.5,x.1" in
+  let jobs =
+    [
+      alpine;
+      cygwin;
+      job ~category:"passed" "day10,debian-13,x86_64,5.5,x.1";
+      job ~category:"passed" "day10,cygwin,x86_64,4.14,x.1";
+    ]
+  in
+  let log url =
+    if Util.contains url "cygwin" then
+      {|runc run failed: unable to start container process: exec: "/usr/bin/env": stat /usr/bin/env: no such file or directory|}
+    else "[ERROR] The compilation of x.1 failed at \"make\"."
+  in
+  let rs = suggest_logs ~log ~cached:[ cygwin ] jobs in
+  let rule r = Option.fold ~none:"" ~some:Rule.to_string r.rule in
+  check_true "cygwin: ci-failure"
+    (List.exists
+       (fun r ->
+         rule r = "ci-failure" && Checks.jobs_or_variant r = [ cygwin.variant ])
+       rs);
+  check_strs "alpine: pattern"
+    [ "Fails only on distributions alpine-3.24: the compilation of x failed" ]
+    (List.filter_map
+       (fun r ->
+         if rule r = "platform-matrix" then Some (Suggestion.str r.error)
+         else None)
+       rs)
+
+let test_split_explained () =
+  (* #30296: one failure key on Alpine and on experimental macOS, whose log
+     says something else. The pattern (fails only on Alpine) explains the
+     key, but lists only Alpine's job: macOS's own entry stays, its job is
+     in no matrix suggestion. *)
+  let alpine = job "day10,alpine-3.24,x86_64,5.5,x.1"
+  and macos =
+    job ~experimental:true "macos,macos-homebrew-ocaml-5.5-arm64,x.1"
+  in
+  let jobs =
+    [ alpine; macos; job ~category:"passed" "day10,debian-13,x86_64,5.5,x.1" ]
+  in
+  let log url =
+    if Util.contains url "macos" then
+      "# Fatal error: exception Failure(\"No valid installation of x found.\")\n\
+       [ERROR] The compilation of x.1 failed at \"dune build -p x\"."
+    else "[ERROR] The compilation of x.1 failed at \"make\"."
+  in
+  let rs = suggest_logs ~log ~cached:[ macos ] jobs in
+  check_true "alpine's pattern"
+    (List.exists (fun r -> r.rule = Some Rule.Platform_matrix) rs);
+  check_true "macOS's job listed"
+    (List.exists
+       (fun r -> List.mem macos.variant (Checks.jobs_or_variant r))
+       rs)
+
 let test_compiler_option () =
   (* A job that fails only on a compiler-option variant and passes on the
      plain compiler of that version (#31312: nx on no-flat-float-array;
@@ -4123,6 +4203,8 @@ let () =
           p "unknown_outcome" test_unknown_outcome;
           p "experimental_only" test_experimental_only;
           p "experimental_only_cause" test_experimental_only_cause;
+          p "split_ci_failure" test_split_ci_failure;
+          p "split_explained" test_split_explained;
           p "unread_on_a_broken_image" test_unread_on_a_broken_image;
           p "compiler_option" test_compiler_option;
           p "pattern_after_a_change_from_the_log"
