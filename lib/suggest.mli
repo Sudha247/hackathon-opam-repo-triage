@@ -22,7 +22,9 @@ val suggest :
     CI run, analysing at most [max_logs] distinct failures of the jobs whose
     variant matches [match_], and up to [max_logs] more on day10 that a pass of
     the main builder in another run does not explain (the others that nothing
-    explains are counted in [data.unanalysed]). *)
+    explains are counted in [data.unanalysed]). A distinct failure is read on
+    its first job and on the first job of each other OS among its jobs; an OS
+    whose log says something else gets a suggestion of its own. *)
 
 val distinct_failures : Ci.job list -> string option -> Ci.job list list
 (** [distinct_failures jobs match_]: the failed jobs to analyse, one group per

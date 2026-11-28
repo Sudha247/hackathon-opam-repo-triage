@@ -84,6 +84,33 @@ let suggest_for_job_hook = ref Rules.suggest_for_job
 let windows_freebsd_macos_re = Rx.v "Windows|freebsd|macos"
 let log_day_re = Rx.v ~flags:[ Rx.M ] {|^(\d{4}-\d\d-\d\d) \d\d:\d\d|}
 
+(* What a result says about its job, without the job's platform: the same on
+   two systems means one failure. For a failure no rule explains, its key
+   error line, without numbers and directories (/usr/lib/llvm20/lib/ and
+   /usr/local/llvm20/lib/ name the same missing library). *)
+let path_dirs_re = Rx.v {|(?:/[^/\s'"`]+)+/|}
+let digits_re = Rx.v {|\d+|}
+
+let diagnosis j text (r : Suggestion.t) =
+  let d = job_dims j in
+  let plats =
+    List.filter (fun p -> p <> "") [ Option.value ~default:"" d.distro; d.os ]
+  in
+  let norm s =
+    List.fold_left (fun s p -> Util.replace s p "{P}") (Suggestion.str s) plats
+  in
+  ( r.rule,
+    Suggestion.get r.failing,
+    norm r.error,
+    norm (Suggestion.get r.new_),
+    norm r.advice,
+    norm r.note,
+    if r.unexplained then
+      Rx.sub digits_re "N"
+        (Rx.sub path_dirs_re "…/"
+           (Option.value ~default:"" (Llm.key_error_line text)))
+    else "" )
+
 let suggest sha (data : data) src cache_dir max_logs match_ llm =
   let pr_packages =
     List.sort_uniq compare
@@ -138,75 +165,132 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
       List.filter (fun g -> List.memq g first || List.memq g more) groups
     end
   in
-  (* [merged] keeps every job behind each analysed one, so the report can say how many it stands for. *)
-  let uniq = List.map List.hd analysed in
-  let merged =
-    List.map
-      (fun g -> (group_key (List.hd g), List.map (fun j -> j.variant) g))
-      analysed
-  in
-  let merged_of j = List.assoc (group_key j) merged in
   let dropped = List.filter (fun g -> not (List.memq g analysed)) groups in
   (* to count the failures no suggestion explains *)
-  let results = ref [] and base = ref None in
+  let results = ref [] and base = ref None and split_keys = ref [] in
   let prev_cache = Hashtbl.create 4 in
   let add r = results := !results @ [ r ] in
   let jobs_by_variant = Hashtbl.create 64 in
   List.iter (fun x -> Hashtbl.replace jobs_by_variant x.variant x) data.jobs;
+  let variants js = List.map (fun j -> j.variant) js in
+  let read j =
+    match log_text (!fetch_hook j.url cache_dir) with
+    | exception e -> Error e
+    | text -> Ok text
+  in
+  (* The rules after the per-job ones: test output, bounds. *)
+  let finish j text (r : Suggestion.t) =
+    if r.rule = Some Test_output then
+      Rules.complete_test_output src r j text data cache_dir;
+    let lb = Rules.lower_bounds_rule src j text r pr_packages sha in
+    let info = Loginfo.log_info text in
+    r.installed <- Some info.installed;
+    let pb =
+      Rules.previous_release_bound src j info pr_packages sha prev_cache
+    in
+    (r, lb, pb)
+  in
+  (* [jobs]: every job the analysed one stands for, so the report can say how
+     many. *)
+  let add_results j jobs (r, lb, pb) =
+    let key = failure_key j in
+    (match pb with
+    | Some pb
+      when not
+             (List.exists
+                (fun x ->
+                  Suggestion.get x.Suggestion.failing
+                  = Suggestion.get pb.failing
+                  && Suggestion.get x.new_ = Suggestion.get pb.new_)
+                (!results @ [ r ])) ->
+        Suggestion.update pb [ `Key key; `Jobs jobs; `Keep ];
+        add pb
+    | _ -> ());
+    Suggestion.update r [ `Key key; `Jobs jobs ];
+    if r.depexts <> None then Rules.conf_depext_platforms r jobs_by_variant;
+    add r;
+    match lb with
+    | Some lb ->
+        Suggestion.update lb [ `Key key; `Jobs jobs ];
+        add lb
+    | None -> ()
+  in
+  (* A group is one failure key, read on its first job: the same reason on
+     several systems may hide different failures (#29110: "LLVM 20 is not
+     installed." on Alpine, Arch Linux, openSUSE and FreeBSD, whose llvm has no
+     static libraries, and on Cygwin and MSYS2, which have no LLVM). The first
+     job of each other OS in the group is read too; when its diagnosis
+     differs, its OS's jobs are a result of their own. An unreadable log
+     (offline: one not in the cache), or a rule that fails, leaves them with
+     the first job. *)
+  let os_of j = (job_dims j).os in
+  let os_splits g diag =
+    let oss = List.tl (Util.dedup (List.map os_of g)) in
+    List.filter_map
+      (fun o ->
+        let js = List.filter (fun x -> os_of x = o) g in
+        let j' = List.hd js in
+        let path = Net.cache_path j'.url cache_dir in
+        if
+          Net.is_offline ()
+          && not (Sys.file_exists path || Sys.file_exists (path ^ ".gz"))
+        then
+          None
+          (* offline, a log not recorded is not missed: this read is optional *)
+        else
+          match read j' with
+          | Error _ -> None
+          | Ok text' -> (
+              match !suggest_for_job_hook src j' text' pr_packages sha with
+              | exception ((Out_of_memory | Stack_overflow) as e) -> raise e
+              | exception _ -> None
+              | r' ->
+                  if diagnosis j' text' r' = diag then None
+                  else Some (js, text', r')))
+      oss
+  in
   List.iter
-    (fun j ->
-      match log_text (!fetch_hook j.url cache_dir) with
-      | exception e ->
+    (fun g ->
+      let j = List.hd g in
+      match read j with
+      | Error e ->
           add
             (Suggestion.make
                [
                  `Variant j.variant;
                  `Note ("Could not read the log: " ^ Util.exn_text e);
-                 `Jobs (merged_of j);
+                 `Jobs (variants g);
                ])
-      | text -> (
+      | Ok text -> (
           if !base = None then base := List.assoc_opt "base" (excerpt text);
           (* the master commit the PR was merged with *)
+          (* The diagnosis compared with the other OSes': the per-job rules',
+             before [finish] completes it (test output's candidates). *)
           match
             let r = !suggest_for_job_hook src j text pr_packages sha in
-            if r.rule = Some Test_output then
-              Rules.complete_test_output src r j text data cache_dir;
-            let lb = Rules.lower_bounds_rule src j text r pr_packages sha in
-            let info = Loginfo.log_info text in
-            r.installed <- Some info.installed;
-            let pb =
-              Rules.previous_release_bound src j info pr_packages sha prev_cache
-            in
-            (r, lb, pb)
+            let diag = diagnosis j text r in
+            (diag, finish j text r)
           with
           | exception ((Out_of_memory | Stack_overflow) as e) -> raise e
           | exception e ->
-              add (Checks.rule_error j e (merged_of j))
+              add (Checks.rule_error j e (variants g))
               (* a bug in a rule: this job only, the others are still analysed *)
-          | r, lb, pb -> (
-              let key = failure_key j in
-              (match pb with
-              | Some pb
-                when not
-                       (List.exists
-                          (fun x ->
-                            Suggestion.get x.Suggestion.failing
-                            = Suggestion.get pb.failing
-                            && Suggestion.get x.new_ = Suggestion.get pb.new_)
-                          (!results @ [ r ])) ->
-                  Suggestion.update pb [ `Key key; `Jobs (merged_of j); `Keep ];
-                  add pb
-              | _ -> ());
-              Suggestion.update r [ `Key key; `Jobs (merged_of j) ];
-              if r.depexts <> None then
-                Rules.conf_depext_platforms r jobs_by_variant;
-              add r;
-              match lb with
-              | Some lb ->
-                  Suggestion.update lb [ `Key key; `Jobs (merged_of j) ];
-                  add lb
-              | None -> ())))
-    uniq;
+          | diag, res ->
+              let splits = os_splits g diag in
+              let split = List.concat_map (fun (js, _, _) -> js) splits in
+              if splits <> [] then split_keys := failure_key j :: !split_keys;
+              add_results j
+                (variants (List.filter (fun x -> not (List.memq x split)) g))
+                res;
+              List.iter
+                (fun (js, text, r) ->
+                  let j = List.hd js in
+                  match finish j text r with
+                  | exception ((Out_of_memory | Stack_overflow) as e) -> raise e
+                  | exception e -> add (Checks.rule_error j e (variants js))
+                  | res -> add_results j (variants js) res)
+                splits))
+    analysed;
   let results = !results in
   let failing_in_log =
     List.filter_map
@@ -219,7 +303,12 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
   (* Jobs that failed because of the CI (tool crash, network) say nothing
      about the package: leave them out of the pass/fail patterns. *)
   let ci = List.filter (Titles.has_rule [ Transient; Ci_failure ]) results in
-  let transient = List.concat_map keys_of ci in
+  (* not a group split by OS (see [os_splits]): only its own jobs then *)
+  let transient =
+    List.filter
+      (fun k -> not (List.mem k !split_keys))
+      (List.concat_map keys_of ci)
+  in
   (* ... and the jobs merged with them (the same dependency failure of other
      packages, on that distribution: the fedora-45 image of day10 without
      /usr/bin/env made them a pattern of their own) *)
@@ -268,12 +357,20 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
          (fun js ->
            List.exists (fun j -> not (List.mem (failure_key j) explained)) js)
          dropped);
+  (* The results of a group split by OS: explained when the matrix
+     suggestions list each of their jobs (not those it leaves out:
+     experimental macOS jobs, #30296). *)
+  let matrix_jobs = List.concat_map Checks.jobs_or_variant matrix in
   let results =
     List.filter
       (fun r ->
         r.Suggestion.keep
         || not
              ((match r.key with
+                | Some k when List.mem k !split_keys ->
+                    List.for_all
+                      (fun v -> List.mem v matrix_jobs)
+                      (Checks.jobs_or_variant r)
                 | Some k -> List.mem k explained
                 | None -> false)
              && (not (Suggestion.is_set r.Suggestion.new_))

@@ -98,6 +98,14 @@ Options (each command takes only those it uses: `opam-ci-triage COMMAND
   nothing, only their log explains them). `suggest --json` gives the number of the others
   that no suggestion explains in `unanalysed`; the PR comment and the triage
   page say how many, and such a PR is not listed as seeming ready.
+  A distinct failure (one package, job kind and CI reason) is read on its
+  first job, and on the first job of each other OS among its jobs (Linux,
+  Windows, macOS, FreeBSD): when that log's diagnosis differs (rule, error,
+  change, note, platform names aside; for a failure no rule explains, its key
+  error line, numbers and directories aside), that OS's jobs get their own
+  suggestion (#29110: "LLVM 20 is not installed." means no static libraries
+  on Linux and FreeBSD, no LLVM on Cygwin and MSYS2). Offline, such a log not
+  in the cache is not read.
 - `--all` (`summary`, `compare`): also the jobs that passed, were ignored or
   could not run (`summary`), the pre-existing failures in full (`compare`).
 - `--category CAT` (`logs`, repeatable), `--baseline SHA` (`compare`),

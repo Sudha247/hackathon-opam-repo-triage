@@ -1061,6 +1061,32 @@ let cases =
           ];
         Not [ ({|note|}, {|the CI did not install it|}) ];
       ] );
+    (* One failure key ("LLVM 20 is not installed.") on Alpine and on Cygwin
+       and MSYS2 (PR 29110): Alpine's llvm has no static libraries, Windows
+       has no LLVM, for which conf-llvm-static has no depext. The first
+       Windows job's log is read too, and its diagnosis is its own. *)
+    ( {|conf-llvm-static-os-split|},
+      {|e3b282a9c0eb1ef824245e3ffb935dc8fcc9b1ea|},
+      [
+        {|--max|};
+        {|1|};
+        {|--match|};
+        {|^(distributions,alpine-3\.24-ocaml-4\.14|day10,(cygwin|msys2),x86_64,4\.14),conf-llvm-static\.20$|};
+      ],
+      [
+        Has
+          [
+            ({|rule|}, {|conf-no-depext|});
+            ({|failing|}, {|conf-llvm-static.20|});
+            ({|error|}, {|on cygwin, msys2|});
+            ({|jobs|}, {|day10,msys2,x86_64,4.14,conf-llvm-static.20|});
+          ];
+        Has
+          [
+            ({|rule|}, {|unrecognised|});
+            ({|error|}, {|1 failed job the tool cannot explain|});
+          ];
+      ] );
     (* hegel.0.28.0's tests fail only on the flambda variant ("FAIL an equal
        atom is not raw") and pass on the plain OCaml 5.5 (PR 31318): code
        relying on what flambda optimises, for upstream to fix. *)
