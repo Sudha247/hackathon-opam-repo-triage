@@ -21,6 +21,7 @@
    opam-repo-ci deletes old runs, so only recent PRs can be used. *)
 
 open Triage
+module Scoring = Scripts.Scoring
 
 let repo = "ocaml/opam-repository"
 
@@ -96,28 +97,9 @@ let initial_commit pr =
       | n :: _ -> Some (n |. "commit")
       | [] -> None)
 
-module S = Set.Make (String)
+module S = Scoring.S
 
-let quoted_name_re = Rx.v {|"([\w+-]+)"|}
-let field_name_re = Rx.v {|([a-z][\w-]*):|}
-let sha256_sha512_md5_re = Rx.v "(sha256|sha512|md5)="
-
-(** What a changed opam line is about: a dependency name or a field name. *)
-let line_tokens line =
-  let t = String.trim line in
-  match Rx.match_ quoted_name_re t with
-  | Some m -> S.singleton ("dep:" ^ Rx.group m 1)
-  | None -> (
-      match Rx.match_ field_name_re t with
-      | Some m -> S.singleton ("field:" ^ Rx.group m 1)
-      | None ->
-          let toks =
-            if Util.contains t "@runtest" || Util.contains t "with-test" then
-              S.singleton "field:runtest"
-            else S.empty
-          in
-          if Rx.test sha256_sha512_md5_re t then S.add "field:checksum" toks
-          else toks)
+let line_tokens = Scoring.line_tokens
 
 (** The files of a PR's merged version (relative to its own base, so not what
     master gained meanwhile). *)
@@ -321,12 +303,6 @@ let new_archive = S.of_list [ "field:checksum"; "field:x-commit-hash" ]
    (x-maintenance-intent), and the description. *)
 let not_fixes = S.of_list [ "field:x-maintenance-intent"; "field:description" ]
 
-(* The version of the scoring, in the totals: accuracy-report does not compare
-   runs scored differently. 3 (27 November 2026): not_fixes, packages with a
-   new archive left out, alternatives and fixes in another package of the PR
-   scored, merged [failing] lists. *)
-let scoring = 3
-
 (* The rules that compare with opam-health-check's latest run (see main). *)
 let health_rules : Rule.t list = [ Health_check_new ]
 let error_re = Rx.v {|Error in (\S+?):|}
@@ -367,48 +343,6 @@ let failing_packages sha =
       S.of_list (failed @ msgs)
   | _ -> S.empty
 
-let package_field_re = Rx.v {|"?([\w+-]+)"?[: ]|}
-
-(** What a suggestion would change: dependency or field tokens. *)
-let suggestion_tokens (s : Suggestion.t) =
-  let toks = ref S.empty in
-  let add t = toks := S.add t !toks in
-  (match s.dep with Some d when d <> "" -> add ("dep:" ^ d) | _ -> ());
-  List.iter
-    (fun (c : Suggestion.Candidate.t) -> add ("dep:" ^ Suggestion.str c.dep))
-    (Suggestion.list s.candidates);
-  let alternative = Suggestion.str s.alternative in
-  let alt = Rx.match_ package_field_re alternative in
-  if Util.contains alternative "@runtest" then
-    add "field:runtest" (* disable the tests: server-reason-react, #30879 *);
-  (match alt with
-  | Some m ->
-      add
-        ((if
-            String.ends_with ~suffix:":"
-              (List.hd (Util.split_on ~maxsplit:1 " " alternative))
-          then "field:"
-          else "dep:")
-        ^ Rx.group m 1)
-  | None -> ());
-  let new_ = Suggestion.str_field s.new_ in
-  (match Rx.match_ quoted_name_re new_ with
-  | Some m -> add ("dep:" ^ Rx.group m 1)
-  | None -> ());
-  (match Rx.match_ field_name_re new_ with
-  | Some m -> add ("field:" ^ Rx.group m 1)
-  | None -> ());
-  if Util.contains new_ "@runtest" then add "field:runtest";
-  if String.starts_with ~prefix:"checksum" new_ then add "field:checksum";
-  if String.starts_with ~prefix:"extra-source" new_ then (
-    add "field:extra-source";
-    add "field:extra-files");
-  if Util.contains new_ "%{_:" then (
-    add "field:build";
-    add "field:install";
-    add "field:remove");
-  !toks
-
 let strs s = Json.strings (S.elements s)
 
 let run ~since ~limit ~max_ ~json () =
@@ -432,7 +366,7 @@ let run ~since ~limit ~max_ ~json () =
   let totals =
     Odict.of_list
       [
-        ("scoring", scoring);
+        ("scoring", Scoring.version);
         ("scored", 0);
         ("hit", 0);
         ("fix_tokens", 0);
@@ -489,11 +423,7 @@ let run ~since ~limit ~max_ ~json () =
                 ]
         | Some sugg ->
             let sugg = List.map Suggestion.of_json sugg in
-            let has_change (s : Suggestion.t) =
-              Suggestion.is_set s.new_
-              || Suggestion.list s.candidates <> []
-              || s.alternative <> None
-            in
+            let has_change = Scoring.has_change in
             (* The packages a suggestion changes: the failing ones (several
                versions when merged: "a.1, a.2"), or the other package of
                the PR where it places the fix (#31170: a bound on
@@ -517,7 +447,7 @@ let run ~since ~limit ~max_ ~json () =
                   if pkgs = [] || not (has_change s) then None
                   else begin
                     let pkg = Json.opt_string (Suggestion.get s.failing) in
-                    let toks = suggestion_tokens s in
+                    let toks = Scoring.suggestion_tokens s in
                     let fixed =
                       List.fold_left
                         (fun acc p ->
@@ -539,7 +469,13 @@ let run ~since ~limit ~max_ ~json () =
                             ( "new",
                               `String
                                 (Util.prefix_chars
-                                   (Suggestion.str_field s.new_)
+                                   (if Suggestion.is_set s.new_ then
+                                      Suggestion.str_field s.new_
+                                    else
+                                      match s.advice with
+                                      | Some a when Scoring.is_advice_only s ->
+                                          "(advice) " ^ a
+                                      | _ -> Suggestion.str_field s.new_)
                                    90) );
                             ("hit", `Bool hit);
                             ("tokens", strs toks);

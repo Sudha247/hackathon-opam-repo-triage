@@ -293,7 +293,76 @@ let test_accuracy_scoring_break () =
       true
   in
   let code, report, _ = accuracy_report ~prev cur in
-  Alcotest.(check int) ("exit code: " ^ report) 1 code
+  Alcotest.(check int) ("exit code: " ^ report) 1 code;
+  (* 3 then 4 (advice scored): a break, which says what changed *)
+  let cur4 =
+    eval
+      {|{"scoring": 4, "hit": 0, "scored": 6, "fix_covered": 0, "fix_tokens": 2}|}
+      false
+  in
+  let code, report, _ = accuracy_report ~prev cur4 in
+  Alcotest.(check int) ("exit code: " ^ report) 0 code;
+  Alcotest.(check bool)
+    "break 3 -> 4" true
+    (Util.contains report
+       "scoring 3, this run 4; since 28 November 2026 a suggestion that only \
+        gives advice")
+
+(* evaluate-closed-prs scores an advice-only suggestion when its advice
+   names the field to change (scoring 4): #31292 elpi-json's
+   test-needs-other-package advice is about the test command, which its
+   author changed. *)
+let test_scoring_advice () =
+  let module Sc = Scripts.Scoring in
+  let sugg fields = Triage.Suggestion.make fields in
+  let toks s = Sc.S.elements (Sc.suggestion_tokens s) in
+  let runtest =
+    sugg
+      [
+        `Rule Triage.Rule.Test_needs_other_package;
+        `Advice
+          "Run only elpi-json's tests: give the test command its directories, \
+           as in `[\"dune\" \"runtest\" \"-p\" name \"-j\" jobs \"DIR\"] \
+           {with-test}`, or remove the test command.";
+      ]
+  in
+  Alcotest.(check bool) "runtest scored" true (Sc.has_change runtest);
+  Alcotest.(check (list string)) "runtest" [ "field:runtest" ] (toks runtest);
+  Alcotest.(check (list string))
+    "author's runtest line" [ "field:runtest" ]
+    (Sc.S.elements
+       (Sc.line_tokens {|  ["dune" "runtest" "-p" name "-j" jobs] {with-test}|}));
+  let depexts =
+    sugg [ `Advice "Add depexts for cygwin, msys2 to conf-llvm-static" ]
+  in
+  Alcotest.(check (list string)) "depexts" [ "field:depexts" ] (toks depexts);
+  let pkgconf =
+    sugg
+      [
+        `Advice
+          "On Windows, conf-pkg-config provides `pkgconf`: x should run \
+           `pkgconf` on Windows, or exclude cygwin (`x-ci-accept-failures` or \
+           `available`).";
+      ]
+  in
+  Alcotest.(check (list string))
+    "fields named"
+    [ "field:available"; "field:x-ci-accept-failures" ]
+    (toks pkgconf);
+  let other = sugg [ `Advice "Make the test lighter, or `pkgconf` it." ] in
+  Alcotest.(check bool) "no field named" false (Sc.has_change other);
+  (* with a change, the advice adds nothing *)
+  let both =
+    sugg
+      [
+        `New (Some {|x-ci-accept-failures: ["alpine-3.24"]|});
+        `Advice "Add the missing depext for alpine to x, or exclude alpine";
+      ]
+  in
+  Alcotest.(check (list string))
+    "new only"
+    [ "field:x-ci-accept-failures" ]
+    (toks both)
 
 let () =
   Alcotest.run "scripts"
@@ -309,5 +378,6 @@ let () =
       ( "accuracy_report",
         [
           Alcotest.test_case "scoring break" `Quick test_accuracy_scoring_break;
+          Alcotest.test_case "scoring advice" `Quick test_scoring_advice;
         ] );
     ]

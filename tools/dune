@@ -1,4 +1,4 @@
 (executables
  (names evaluate_closed_prs fetch_ci_logs classify_logs)
  (public_names evaluate-closed-prs fetch-ci-logs classify-logs)
- (libraries triage cmdliner unix threads.posix))
+ (libraries triage scripts cmdliner unix threads.posix))

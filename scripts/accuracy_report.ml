@@ -185,8 +185,8 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
         ^ " |";
       ];
   (* The scoring of evaluate_closed_prs: "scoring" in the totals since 27
-     November 2026 (3); before, 2 with the opam-health-check totals (20
-     November 2026), else 1. *)
+     November 2026 (3, then 4: see Scoring.version); before, 2 with the
+     opam-health-check totals (20 November 2026), else 1. *)
   let scoring t =
     match List.assoc_opt "scoring" t.members with
     | Some (`Int n) -> n
@@ -203,15 +203,29 @@ let run ~current ~history ~commit ~max_drop ~min_scored () =
     add
       [
         "";
-        Printf.sprintf
-          "The previous run was scored differently (scoring %d, this run %d; \
-           since 27 November 2026 the review bot's x-maintenance-intent and \
-           description changes are not fixes, packages with a new archive are \
-           not scored, and alternatives and fixes placed in another package of \
-           the PR are): the totals are not comparable, and no check fails on \
-           them."
-          (match pt with Some pt -> scoring pt | None -> 0)
-          (scoring t);
+        (let a = match pt with Some pt -> scoring pt | None -> 0
+         and b = scoring t in
+         let changes =
+           List.filter_map
+             (fun (v, c) ->
+               if v > min a b && v <= max a b then Some c else None)
+             [
+               ( 3,
+                 "since 27 November 2026 the review bot's x-maintenance-intent \
+                  and description changes are not fixes, packages with a new \
+                  archive are not scored, and alternatives and fixes placed in \
+                  another package of the PR are" );
+               ( 4,
+                 "since 28 November 2026 a suggestion that only gives advice \
+                  is scored when the advice names the field to change \
+                  (depexts, the test command)" );
+             ]
+         in
+         Printf.sprintf
+           "The previous run was scored differently (scoring %d, this run %d; \
+            %s): the totals are not comparable, and no check fails on them."
+           a b
+           (String.concat "; " changes));
       ];
   if prev <> None && has_health t && not prev_has_health then
     (* evaluate_closed_prs changed on 2026-11-20: each file of the PR compared
