@@ -52,6 +52,7 @@ type t =
   | Test_timeout
   | Test_needs_other_package
   | Compiler_option
+  | Experimental_only
   | Other of string
 
 let names =
@@ -107,6 +108,7 @@ let names =
     (Test_timeout, "test-timeout");
     (Test_needs_other_package, "test-needs-other-package");
     (Compiler_option, "compiler-option");
+    (Experimental_only, "experimental-only");
   ]
 
 let to_string = function Other s -> s | r -> List.assoc r names

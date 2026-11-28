@@ -1010,6 +1010,62 @@ let test_windows_pattern () =
     | [ ("", a) ] -> Util.contains a "run `pkgconf` on Windows"
     | _ -> false)
 
+let test_experimental_only () =
+  (* A failure only on experimental platforms (macOS, FreeBSD), the job
+     passing elsewhere: it does not block the merge (#30751: randoml on
+     macOS arm64). Not when the same failure (key) fails on a
+     non-experimental platform too; an alternative only after a log's
+     diagnosis that is a property of the platform. *)
+  let linux = job ~category:"passed" "day10,debian-13,x86_64,5.3,x.1" in
+  let macos =
+    job ~experimental:true "macos,macos-homebrew-ocaml-5.3-arm64,x.1"
+  in
+  let run ?(earlier = []) js =
+    List.map
+      (fun r ->
+        ( Option.fold ~none:"" ~some:Rule.to_string r.rule,
+          Suggestion.str r.error,
+          Suggestion.str r.alternative,
+          r.experimental ))
+      (Matrix.matrix_rules js earlier None [])
+  in
+  Alcotest.(check (list (pair string string)))
+    "macOS only"
+    [
+      ( "experimental-only",
+        "Fails only on macOS (macos-homebrew), an experimental platform" );
+    ]
+    (List.map (fun (r, e, _, _) -> (r, e)) (run [ macos; linux ]));
+  check_true "experimental"
+    (List.for_all (fun (_, _, _, x) -> x = Some true) (run [ macos; linux ]));
+  (* the same failure on Linux too: the other patterns' (none here) *)
+  Alcotest.(check int)
+    "also on alpine" 0
+    (List.length
+       (List.filter
+          (fun (r, _, _, _) -> r = "experimental-only")
+          (run [ macos; linux; job "day10,alpine-3.24,x86_64,5.3,x.1" ])));
+  (* no non-experimental pass: nothing says the job works elsewhere *)
+  Alcotest.(check int) "no pass" 0 (List.length (run [ macos ]));
+  (* a missing tool on macOS: x-ci-accept-failures as the alternative *)
+  let earlier =
+    d
+      [
+        ("failing", s "x.1");
+        ("rule", s "missing-tool");
+        ("error", s {|"gawk": command not found|});
+      ]
+  in
+  earlier.key <- Some (Ci.failure_key macos);
+  Alcotest.(check (list string))
+    "alternative"
+    [
+      {|x-ci-accept-failures: ["macos-homebrew"]   (in x, if it cannot support macOS)|};
+    ]
+    (List.map
+       (fun (_, _, a, _) -> a)
+       (run ~earlier:[ earlier ] [ macos; linux ]))
+
 let test_unknown_outcome () =
   (* A job the CI failed is neither a pass nor a failure: "fails only on
      Windows" needs a real pass on its platform (#28291: fedora-45's image
@@ -3976,6 +4032,7 @@ let () =
           p "builder_specific_twin_age" test_builder_specific_twin_age;
           p "windows_pattern" test_windows_pattern;
           p "unknown_outcome" test_unknown_outcome;
+          p "experimental_only" test_experimental_only;
           p "unread_on_a_broken_image" test_unread_on_a_broken_image;
           p "compiler_option" test_compiler_option;
           p "pattern_after_a_change_from_the_log"

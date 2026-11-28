@@ -308,6 +308,180 @@ let compiler_option j =
       | _ -> None)
   | _ -> None
 
+(* The rules whose diagnosis is a property of the platform (a tool, header,
+   library or system package it lacks): a failure only there may be
+   accepted on it. *)
+let platform_property_rules : Rule.t list =
+  [
+    Missing_tool;
+    Missing_header;
+    Missing_library;
+    Missing_pkg_config;
+    Conf_no_depext;
+    Missing_system_package;
+  ]
+
+let os_words = function
+  | "macos" -> "macOS"
+  | "freebsd" -> "FreeBSD"
+  | "win32" -> "Windows"
+  | "linux" -> "Linux"
+  | o -> o
+
+(* A failure only on experimental platforms (macOS and FreeBSD on
+   opam-repo-ci), which do not block the merge: the failed jobs of a failure
+   key that are all experimental (no non-experimental job, CI failures
+   included, fails with that key), in a group where a non-experimental job
+   passes (#30751: randoml's vendored ocaml-interop on macOS arm64; #31316:
+   conf-postgresql.2 and conf-mariadb.2 under veins' tests on macOS). The
+   matrix's other patterns leave experimental jobs out. Not the keys for
+   which a job's log gave a change, or a result kept beside the patterns
+   (that suggestion stays, marked experimental). The diagnosis of a log on those keys is carried over (the
+   results without a change on a key the matrix explains are dropped), and
+   when it is a property of the platform, accepting the failure there is the
+   alternative. *)
+let experimental_only ~fin ~earlier ~from_log ~group_unknown ~pkg ~kind ~revdep
+    ~target js out =
+  let failed j = List.mem j.category failing_cats in
+  let blocking =
+    keys_of
+      (List.filter
+         (fun j -> (not j.experimental) && failed j)
+         (js @ group_unknown))
+  in
+  (* a key whose log gave a change, or a result kept beside the patterns:
+     that entry stays (marked experimental) *)
+  let covered k =
+    List.mem k from_log
+    || List.exists (fun r -> r.Suggestion.keep && r.key = Some k) earlier
+  in
+  let only =
+    List.filter
+      (fun j ->
+        j.experimental && failed j
+        && (not (List.mem (failure_key j) blocking))
+        && not (covered (failure_key j)))
+      js
+  in
+  let keys = Util.dedup (keys_of only) in
+  if only <> [] && real_passes js <> [] then begin
+    let named =
+      Util.dedup
+        (List.filter_map
+           (fun j ->
+             (* the log's package first: the CI's reason for a dependency
+                failure names the first of the failed packages *)
+             match fin j with
+             | Some d when d <> "" ->
+                 if fst (split_pkg d) <> fst (split_pkg pkg) then Some d
+                 else None
+             | _ -> (
+                 match
+                   if j.category = Dependency then failing_dep j.reason
+                   else None
+                 with
+                 | Some x when x <> "" -> Some x
+                 | _ -> None))
+           only)
+    in
+    let evidence =
+      List.find_opt
+        (fun r ->
+          r.Suggestion.rule <> None
+          && (match r.key with Some k -> List.mem k keys | None -> false)
+          && r.rule <> Some Rule.Unrecognised)
+        earlier
+    in
+    let dims = List.map job_dims only in
+    let distros =
+      sorted_strings
+        (List.map
+           (fun d -> match d.distro with Some s when s <> "" -> s | _ -> d.os)
+           dims)
+    in
+    let oses = sorted_strings (List.map (fun d -> os_words d.os) dims) in
+    let tests_only =
+      kind = Kind.Tests
+      || List.for_all (fun j -> j.category = Category.Build_or_test) only
+    in
+    let label =
+      Printf.sprintf "%s [%s%s]" pkg (Kind.to_string kind)
+        (match revdep with
+        | Some r when r <> "" -> ", revdep of " ^ target
+        | _ -> "")
+    in
+    let failing =
+      match named with
+      | [] -> pkg
+      | l -> String.concat ", " (List.sort_uniq compare l)
+    in
+    let alternative =
+      match evidence with
+      | Some r when Titles.has_rule platform_property_rules r ->
+          let owner =
+            match Suggestion.get r.failing with
+            | Some f when f <> "" -> fst (split_pkg f)
+            | _ -> fst (split_pkg pkg)
+          in
+          [
+            `Alternative
+              (Printf.sprintf
+                 "x-ci-accept-failures: [%s]   (in %s, if it cannot support %s)"
+                 (String.concat " "
+                    (List.map (fun d -> "\"" ^ d ^ "\"") distros))
+                 owner (String.concat ", " oses));
+          ]
+      | _ -> []
+    in
+    let note =
+      Printf.sprintf
+        "%s experimental on opam-repo-ci: %s failures do not block the merge, \
+         and the same job passes on other platforms."
+        (String.concat " and " oses
+        ^ if List.length oses > 1 then " are" else " is")
+        (if List.length oses > 1 then "their" else "its")
+      ^
+      match evidence with
+      | Some r ->
+          Printf.sprintf " Its log: %s: %s%s" (Titles.title_of r)
+            (Util.rstrip ~chars:"." (Suggestion.str r.error))
+            (match r.note with Some n when n <> "" -> ". " ^ n | _ -> ".")
+      | None -> ""
+    in
+    out :=
+      Suggestion.make
+        ([ `Variant label; `Failing (Some failing) ]
+        @ Where.fix_where Nothing
+            "nothing (an experimental platform does not block the merge)"
+        @ [
+            `Rule Rule.Experimental_only;
+            `Experimental true;
+            (* day10 only: a package that accepts these failures is
+               Context.accepted_but_failing's (#30785, yices2 on FreeBSD) *)
+            `Distros (if List.for_all starts_day10 only then distros else []);
+            `Error
+              (Printf.sprintf "%s only on %s (%s), %s%s"
+                 (if tests_only && named = [] then "Tests fail" else "Fails")
+                 (String.concat ", " oses)
+                 (String.concat ", " distros)
+                 (if List.length oses > 1 then "experimental platforms"
+                  else "an experimental platform")
+                 (match named with
+                 | [] -> ""
+                 | l ->
+                     "; the failure is in "
+                     ^ (if List.length l > 1 then "the dependencies "
+                        else "the dependency ")
+                     ^ String.concat ", " (List.sort_uniq compare l)));
+            `Confidence "high";
+            `Note note;
+            `Keys keys;
+            `Jobs (variants only);
+          ]
+        @ alternative)
+      :: !out
+  end
+
 let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?(unsure = []) ?run jobs
     (earlier : Suggestion.t list) match_ pr_packages =
   let fin j = List.assoc_opt (failure_key j) failing_in_log in
@@ -340,6 +514,11 @@ let matrix_rules ?(failing_in_log = []) ?(unknown = []) ?(unsure = []) ?run jobs
     (fun ((target', revdep, kind), js) ->
       let target = Option.value ~default:"" target' in
       let pkg = match revdep with Some r when r <> "" -> r | _ -> target in
+      experimental_only ~fin ~earlier ~from_log
+        ~group_unknown:
+          (Option.value ~default:[]
+             (List.assoc_opt (target', revdep, kind) unknown))
+        ~pkg ~kind ~revdep ~target js out;
       let fails =
         List.filter
           (fun j -> (not j.experimental) && List.mem j.category failing_cats)
@@ -866,84 +1045,119 @@ let collapse_systemic ?(threshold = 5) (out : Suggestion.t list) =
                   rs))
         in
         let r0 = List.hd rs in
-        let error, note =
-          if rule = Some Rule.Builder_specific then
-            ( List.hd (Util.split_on ~maxsplit:1 ";" pattern) ^ ".",
-              r0.Suggestion.note )
-          else begin
-            let error = Util.rstrip ~chars:"." pattern ^ "." in
-            let code, _, hint =
-              Util.partition (Suggestion.str_field r0.Suggestion.new_) "   "
-            in
-            let m = Rx.fullmatch in_re (String.trim hint) in
-            let fix =
-              match m with
-              | Some m when code <> "" ->
-                  Printf.sprintf "Possible fix, in %s: `%s`." (Rx.group m 1)
-                    code
-              | _ ->
-                  if code <> "" then
-                    Printf.sprintf "Possible fix for each package: `%s`" code
-                    ^
-                    if String.trim hint <> "" then " " ^ String.trim hint ^ "."
-                    else "."
-                  else Suggestion.str r0.advice
-            in
-            let prefix =
-              if culprits <> [] then
-                (if List.length culprits = 1 then
-                   "The failure is in a dependency: "
-                 else "The failure is in dependencies: ")
-                ^ String.concat ", "
-                    (List.map
-                       (fun (d, n) ->
-                         Printf.sprintf "%s (%s)" d (Words.counted n "package"))
-                       (Util.take 3 culprits))
-                ^ ". "
-              else ""
-            in
-            (error, Some (prefix ^ fix))
-          end
-        in
-        let entry =
-          Suggestion.make
-            ([
-               `Variant
-                 (Printf.sprintf "%d packages [%s]" (List.length rs)
-                    (Option.fold ~none:"" ~some:Rule.to_string rule));
-               `Failing
-                 (Some
-                    (String.concat ", " (Util.take 6 names)
-                    ^ if List.length names > 6 then " ..." else ""));
-             ]
-            @ (if rule = Some Rule.Builder_specific then
-                 Where.fix_where Ci (Suggestion.str r0.fix_in)
-               else
-                 Where.fix_where Unknown
-                   "the PR, a shared dependency, or the CI")
-            @ [
-                `Rule
-                  (Rule.systemic
-                     (Option.value ~default:(Rule.of_string "") rule));
-                `Error error;
-                `Confidence "medium";
-                `Keys (List.concat_map (fun r -> r.Suggestion.keys) rs);
-                `Jobs
-                  (Ci.merge_jobs []
-                     (List.concat_map
-                        (fun r -> Suggestion.list r.Suggestion.jobs)
-                        rs));
-              ])
-        in
-        entry.note <- note;
-        (match culprits with
-        | [ (d, n) ]
-          when rule <> Some Rule.Builder_specific && n = List.length rs ->
-            (* Every package fails through the same dependency: the fix goes there (shown as such). *)
-            entry.failing_dep <- Some d;
-            entry.where_kind <- Some Other_package;
-            entry.where_pkg <- Set d
-        | _ -> ());
-        [ entry ]
+        if rule = Some Rule.Experimental_only then
+          (* One entry, still not blocking: the packages' own diagnoses
+             (their logs) are left out. *)
+          let note, _, _ =
+            Util.partition (Suggestion.str r0.note) " Its log: "
+          in
+          [
+            Suggestion.make
+              ([
+                 `Variant
+                   (Printf.sprintf "%d packages [experimental-only]"
+                      (List.length rs));
+                 `Failing
+                   (Some
+                      (String.concat ", " (Util.take 6 names)
+                      ^ if List.length names > 6 then " ..." else ""));
+               ]
+              @ Where.fix_where Nothing (Suggestion.str r0.fix_in)
+              @ [
+                  `Rule Rule.Experimental_only;
+                  `Experimental true;
+                  `Error pattern;
+                  `Confidence "high";
+                  `Note note;
+                  `Keys (List.concat_map (fun r -> r.Suggestion.keys) rs);
+                  `Jobs
+                    (Ci.merge_jobs []
+                       (List.concat_map
+                          (fun r -> Suggestion.list r.Suggestion.jobs)
+                          rs));
+                ]);
+          ]
+        else
+          let error, note =
+            if rule = Some Rule.Builder_specific then
+              ( List.hd (Util.split_on ~maxsplit:1 ";" pattern) ^ ".",
+                r0.Suggestion.note )
+            else begin
+              let error = Util.rstrip ~chars:"." pattern ^ "." in
+              let code, _, hint =
+                Util.partition (Suggestion.str_field r0.Suggestion.new_) "   "
+              in
+              let m = Rx.fullmatch in_re (String.trim hint) in
+              let fix =
+                match m with
+                | Some m when code <> "" ->
+                    Printf.sprintf "Possible fix, in %s: `%s`." (Rx.group m 1)
+                      code
+                | _ ->
+                    if code <> "" then
+                      Printf.sprintf "Possible fix for each package: `%s`" code
+                      ^
+                      if String.trim hint <> "" then
+                        " " ^ String.trim hint ^ "."
+                      else "."
+                    else Suggestion.str r0.advice
+              in
+              let prefix =
+                if culprits <> [] then
+                  (if List.length culprits = 1 then
+                     "The failure is in a dependency: "
+                   else "The failure is in dependencies: ")
+                  ^ String.concat ", "
+                      (List.map
+                         (fun (d, n) ->
+                           Printf.sprintf "%s (%s)" d
+                             (Words.counted n "package"))
+                         (Util.take 3 culprits))
+                  ^ ". "
+                else ""
+              in
+              (error, Some (prefix ^ fix))
+            end
+          in
+          let entry =
+            Suggestion.make
+              ([
+                 `Variant
+                   (Printf.sprintf "%d packages [%s]" (List.length rs)
+                      (Option.fold ~none:"" ~some:Rule.to_string rule));
+                 `Failing
+                   (Some
+                      (String.concat ", " (Util.take 6 names)
+                      ^ if List.length names > 6 then " ..." else ""));
+               ]
+              @ (if rule = Some Rule.Builder_specific then
+                   Where.fix_where Ci (Suggestion.str r0.fix_in)
+                 else
+                   Where.fix_where Unknown
+                     "the PR, a shared dependency, or the CI")
+              @ [
+                  `Rule
+                    (Rule.systemic
+                       (Option.value ~default:(Rule.of_string "") rule));
+                  `Error error;
+                  `Confidence "medium";
+                  `Keys (List.concat_map (fun r -> r.Suggestion.keys) rs);
+                  `Jobs
+                    (Ci.merge_jobs []
+                       (List.concat_map
+                          (fun r -> Suggestion.list r.Suggestion.jobs)
+                          rs));
+                ])
+          in
+          entry.note <- note;
+          (match culprits with
+          | [ (d, n) ]
+            when rule <> Some Rule.Builder_specific && n = List.length rs ->
+              (* Every package fails through the same dependency: the fix goes there (shown as such). *)
+              entry.failing_dep <- Some d;
+              entry.where_kind <- Some Other_package;
+              entry.where_pkg <- Set d
+          | _ -> ());
+          [ entry ]
       end)
     (Util.group_by sig_ out)

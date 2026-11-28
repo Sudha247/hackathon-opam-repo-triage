@@ -34,6 +34,7 @@ let legacy_kinds : (string * Where_kind.t) list =
     ("opam (the CI's opam version)", Ci);
     ("upstream (the package's source)", Upstream);
     ("nothing (this PR's bound)", Nothing);
+    ("nothing (an experimental platform does not block the merge)", Nothing);
     ("the dependency declaring these depexts", Other_package);
     ("the reverse dependencies (other packages)", Other_package);
     ("the PR, a shared dependency, or the CI", Unknown);

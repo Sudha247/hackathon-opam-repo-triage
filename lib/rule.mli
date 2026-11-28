@@ -61,6 +61,7 @@ type t =
   | Test_needs_other_package
       (** [dune runtest -p pkg] needs a target of another package *)
   | Compiler_option
+  | Experimental_only
       (** fails only on a compiler-option variant (flambda, no-flat-float-array,
           ...), passes on the plain compiler *)
   | Other of string
