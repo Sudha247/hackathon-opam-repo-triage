@@ -287,6 +287,55 @@ let test_allows () =
   check_false "excludes"
     (Constraints.allows "6.0.0" (terms {|>= "4.0.0" & < "5.0.0"|}))
 
+(* One version of a package failing on two platforms with notes that differ
+   by the platform's name is one entry naming both (conf-rust-2018 on Cygwin
+   and MSYS2, PR 30751); a note that says more on one platform stays an entry
+   of its own (conf-gcc's cygwinports depexts, PR 31316). *)
+let test_merge_versions_platforms () =
+  let entry pkg plat extra =
+    Suggestion.make
+      [
+        `Rule Rule.Missing_tool;
+        `Failing (Some pkg);
+        `Error {|"cargo": command not found|};
+        `Note
+          (Printf.sprintf
+             "%s does not provide `cargo` on %s: its depexts have no entry for \
+              that platform. Add one.%s"
+             (fst (Ci.split_pkg pkg))
+             plat extra);
+        `Jobs [ "day10," ^ plat ^ ",x86_64,4.14,randoml.0.1.5" ];
+      ]
+  in
+  let plats v = [ List.nth (String.split_on_char ',' v) 1 ] in
+  (match
+     Checks.merge_versions ~plats
+       [
+         entry "conf-rust-2018.1" "cygwin" "";
+         entry "conf-rust-2018.1" "msys2" "";
+       ]
+   with
+  | [ r ] ->
+      check_str "note"
+        "conf-rust-2018 does not provide `cargo` on cygwin, msys2: its depexts \
+         have no entry for these platforms. Add one."
+        (Suggestion.str r.note);
+      check_int "jobs" 2 (List.length (Checks.jobs_or_variant r))
+  | l -> Alcotest.failf "%d entries, expected 1" (List.length l));
+  match
+    Checks.merge_versions ~plats
+      [
+        entry "conf-gcc.1.0" "cygwin"
+          " Its depexts for os-distribution \"cygwinports\" do not apply.";
+        entry "conf-gcc.1.0" "msys2" "";
+      ]
+  with
+  | [ a; b ] ->
+      check_true "cygwinports"
+        (Util.contains (Suggestion.str a.note) "cygwinports");
+      check_true "msys2" (Util.contains (Suggestion.str b.note) "on msys2")
+  | l -> Alcotest.failf "%d entries, expected 2" (List.length l)
+
 let test_applied () =
   let text =
     "opam-version: \"2.0\"\ndepends: [\n  \"ocaml\" {>= \"4.08\"}\n]\n"
@@ -3867,6 +3916,7 @@ let () =
           p "unsatisfiable" test_unsatisfiable;
           p "allows" test_allows;
           p "applied" test_applied;
+          p "merge_versions_platforms" test_merge_versions_platforms;
         ] );
       ("SuggestionTest", [ p "round_trip" test_round_trip ]);
       ( "ProcTest",

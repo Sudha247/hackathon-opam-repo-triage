@@ -188,10 +188,85 @@ let jobs_or_variant r =
   | Some (_ :: _ as l) -> l
   | _ -> [ Suggestion.str r.Suggestion.variant ]
 
-let merge_versions results =
+(* [s] with each name of [names] as a whole word (not in "cygwinports")
+   replaced by [by]. *)
+let replace_names names by s =
+  let word c =
+    match c with
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' -> true
+    | _ -> false
+  in
+  let names =
+    List.sort (fun a b -> compare (String.length b) (String.length a)) names
+  in
+  let n = String.length s in
+  let b = Buffer.create n in
+  let rec go i =
+    if i < n then
+      match
+        List.find_opt
+          (fun x ->
+            let k = String.length x in
+            i + k <= n
+            && String.sub s i k = x
+            && (i = 0 || not (word s.[i - 1]))
+            && (i + k = n || not (word s.[i + k])))
+          names
+      with
+      | Some x ->
+          Buffer.add_string b by;
+          go (i + String.length x)
+      | None ->
+          Buffer.add_char b s.[i];
+          go (i + 1)
+  in
+  go 0;
+  Buffer.contents b
+
+(* A note without what [Suggest] put before the rule's: whether the failure
+   is pre-existing or new on master (it differs from job to job, not from
+   platform to platform). *)
+let diagnosis_note (r : Suggestion.t) =
+  let strip prefix n =
+    if String.starts_with ~prefix n then
+      Util.slice ~start:(String.length prefix) n
+    else n
+  in
+  let n = Suggestion.str r.note in
+  let n =
+    match r.preexisting with
+    | Some p -> strip (Printf.sprintf "Pre-existing: %s. " p) n
+    | None -> n
+  in
+  match r.new_on_master with Some h -> strip (h ^ " ") n | None -> n
+
+let merge_versions ?(plats = fun _ -> []) results =
   let first = Hashtbl.create 8 in
   let extra : (Suggestion.t * (string option * string * string list)) list ref =
     ref []
+  in
+  (* One version on several platforms whose texts differ only by the
+     platform's name (conf-rust-2018 "does not provide `cargo` on cygwin" and
+     "on msys2", #30751): one entry naming them all. Its error, note and
+     advice with the names replaced by "{P}", and the names. *)
+  let templates :
+      (Suggestion.t
+      * ((string option * string option * string option) * string list ref))
+      list
+      ref =
+    ref []
+  in
+  let named r =
+    let texts =
+      List.filter_map Fun.id [ r.Suggestion.error; r.note; r.advice ]
+    in
+    List.filter
+      (fun n -> List.exists (fun t -> replace_names [ n ] "" t <> t) texts)
+      (Util.dedup (List.concat_map plats (jobs_or_variant r)))
+  in
+  let template names (r : Suggestion.t) =
+    let t = Option.map (replace_names names "{P}") in
+    (t r.error, t (Some (diagnosis_note r)), t r.advice)
   in
   (* For each merged entry: its first note, its first package, the others whose note differs. *)
   let out =
@@ -217,6 +292,30 @@ let merge_versions results =
           | None ->
               Hashtbl.replace first k r;
               true
+          | Some f
+            when List.mem failing
+                   (Util.split_on ", "
+                      (Suggestion.str_field f.Suggestion.failing))
+                 && Suggestion.nonempty r.note
+                 && diagnosis_note r <> diagnosis_note f ->
+              (* The same version, another note: from another platform. *)
+              let tf, names =
+                match List.assq_opt f !templates with
+                | Some t -> t
+                | None ->
+                    let n = named f in
+                    (template n f, ref n)
+              in
+              let nr = named r in
+              if !names <> [] && nr <> [] && template nr r = tf then begin
+                if not (List.mem_assq f !templates) then
+                  templates := (f, (tf, names)) :: !templates;
+                names := Util.dedup (!names @ nr);
+                f.Suggestion.jobs <-
+                  Some (merge_jobs (jobs_or_variant f) (jobs_or_variant r));
+                false
+              end
+              else true (* a diagnosis of its own: not dropped *)
           | Some f ->
               if
                 not
@@ -271,6 +370,32 @@ let merge_versions results =
                     (String.concat ", " similar))
       | None -> ())
     out;
+  List.iter
+    (fun (r, ((error, note, advice), names)) ->
+      let names = List.sort compare !names in
+      if List.length names > 1 then begin
+        let fill =
+          Option.map (fun t ->
+              let t =
+                Util.replace t {|"{P}"|}
+                  (String.concat " " (List.map (Printf.sprintf "%S") names))
+              in
+              let t =
+                Util.replace
+                  (Util.replace t "that platform has" "these platforms have")
+                  "that platform" "these platforms"
+              in
+              Util.replace t "{P}" (String.concat ", " names))
+        in
+        let n = Suggestion.str r.note in
+        let prefix =
+          String.sub n 0 (String.length n - String.length (diagnosis_note r))
+        in
+        r.Suggestion.error <- fill error;
+        r.note <- Option.map (fun t -> prefix ^ t) (fill note);
+        r.advice <- fill advice
+      end)
+    !templates;
   out
 
 let merge_ci_failures results =

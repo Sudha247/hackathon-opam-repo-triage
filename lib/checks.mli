@@ -26,9 +26,14 @@ val merge_ci_failures : Suggestion.t list -> Suggestion.t list
     crashing worker, under several packages): one entry, listing the packages
     and every job. *)
 
-val merge_versions : Suggestion.t list -> Suggestion.t list
+val merge_versions :
+  ?plats:(string -> string list) -> Suggestion.t list -> Suggestion.t list
 (** Several versions of one package with the same rule and no diff (a diff stays
-    with its own opam file, for line comments): one entry, listing them. *)
+    with its own opam file, for line comments): one entry, listing them. The
+    same version with another note (from another platform) is merged only when
+    the two differ by the platform names alone ([plats]: the names of a job's
+    platform, by variant), naming every platform; otherwise it stays an entry of
+    its own. *)
 
 val merge_unrecognised : Suggestion.t list -> Suggestion.t list
 (** The failures no rule recognises, as one entry listing their jobs. *)

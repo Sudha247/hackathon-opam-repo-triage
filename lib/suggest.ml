@@ -654,8 +654,17 @@ let suggest sha (data : data) src cache_dir max_logs match_ llm =
         data cache_dir pr_packages
   in
   Checks.check_changes results src sha pr_packages;
+  let plats v =
+    match Hashtbl.find_opt jobs_by_variant v with
+    | Some j ->
+        let d = job_dims j in
+        List.filter
+          (fun p -> p <> "")
+          [ Option.value ~default:"" d.distro; d.os ]
+    | None -> []
+  in
   Context.accepted_elsewhere results src pr_packages;
   List.iter (fun (r : Suggestion.t) -> r.installed <- None) results;
   Titles.readable
     (Checks.merge_ci_failures
-       (Checks.merge_versions (Checks.merge_unrecognised results)))
+       (Checks.merge_versions ~plats (Checks.merge_unrecognised results)))
